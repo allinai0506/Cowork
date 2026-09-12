@@ -184,10 +184,41 @@ def save_workflow_config_for(workflow_id, workflow_data):
     return False
 
 
+SUBJECT_MAX_LEN = 64
+_SUBJECT_MARKDOWN_PREFIX = re.compile(
+    r"^(#{1,6}\s+|[-*+>]+\s+|\d+[.、)]\s*|\[[ xX]\]\s*)+"
+)
+
+
+def requirement_subject(requirement=""):
+    """Extract a one-line human-readable subject from a free-form requirement.
+
+    Prefers the first non-heading line (a bare `## 需求` title says nothing),
+    strips markdown heading/list/emphasis markers, then truncates.
+    """
+    candidates = []
+    for raw in str(requirement or "").splitlines():
+        text = raw.strip()
+        stripped = _SUBJECT_MARKDOWN_PREFIX.sub("", text).strip()
+        if not stripped:
+            continue
+        candidates.append((text.startswith("#"), stripped))
+    if not candidates:
+        return ""
+    line = next((s for is_heading, s in candidates if not is_heading), None)
+    if line is None:
+        line = candidates[0][1]
+    line = re.sub(r"\s{2,}", " ", line.replace("**", "").replace("`", ""))
+    if len(line) > SUBJECT_MAX_LEN:
+        return line[: SUBJECT_MAX_LEN - 1] + "…"
+    return line
+
+
 def register_workflow(workflow_id, project, requirement=""):
     data = load_workflows()
     data.setdefault("workflows", {})[workflow_id] = {
         "workflow_id": workflow_id,
+        "requirement_subject": requirement_subject(requirement),
         "project_id": project["project_id"],
         "project_name": project["project_name"],
         "project_root": project["project_root"],

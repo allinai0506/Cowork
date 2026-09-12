@@ -7,6 +7,7 @@ from pathlib import Path
 HOME=Path.home(); HERDR_ROOT=Path(os.environ.get('HERDR_ROOT', str(HOME/'herdr'))); ROOT=HOME/'.herdr-controller'
 sys.path.insert(0, str(HERDR_ROOT))
 from herdr import workflow as herdr_workflow
+from herdr import projects as herdr_projects
 PROJECTS_FILE=ROOT/'projects.json'; WORKFLOWS_FILE=ROOT/'workflows.json'; TASKS_FILE=ROOT/'tasks.json'; POOLS_FILE=ROOT/'agent-pools.json'; SLOTS_FILE=ROOT/'pane-slots.json'; LOG_DIR=ROOT/'logs'
 HOST='127.0.0.1'; PORT=int(os.environ.get('HERDR_CONSOLE_PORT','8765'))
 PRODUCT_NAME='共事工厂'; PRODUCT_TAGLINE='本地 AI 软件工厂'
@@ -39,7 +40,12 @@ def ops_center(workflow_id=None,include_tasks=False):
     cmd=[str(HERDR_TASK),'ops-center']
     if workflow_id:cmd += ['--workflow-id',workflow_id]
     if include_tasks:cmd.append('--include-tasks')
-    return run_json(cmd,20)
+    data=run_json(cmd,20)
+    subjects={wid:(w.get('requirement_subject') or herdr_projects.requirement_subject(w.get('requirement',''))) for wid,w in workflows().items()}
+    for c in data.get('workflow_cards') or []:
+        s=subjects.get(c.get('workflow_id'))
+        if s:c['workflow_label']=s
+    return data
 
 def projects():return list(load_json(PROJECTS_FILE,{'projects':{}}).get('projects',{}).values())
 def workflows():return load_json(WORKFLOWS_FILE,{'workflows':{}}).get('workflows',{})
@@ -48,10 +54,16 @@ def project_by_id(pid):return next((p for p in projects() if p.get('project_id')
 def project_for_workflow(wid):
     w=workflows().get(wid); return (project_by_id(w.get('project_id')) if w else None) or w
 
+def _with_subject(w):
+    w=dict(w)
+    if not w.get('requirement_subject'):
+        w['requirement_subject']=herdr_projects.requirement_subject(w.get('requirement',''))
+    return w
+
 def workflows_for_project(pid):
     out=[]
     for wid,w in workflows().items():
-        if w.get('project_id')==pid: out.append({'workflow_id':wid,**w})
+        if w.get('project_id')==pid: out.append({'workflow_id':wid,**_with_subject(w)})
     return sorted(out,key=lambda x:x['workflow_id'],reverse=True)
 
 def tasks_for_workflow(wid):return [t for t in tasks() if t.get('workflow_id')==wid]
@@ -303,7 +315,7 @@ def workflow_detail(wid):
     p=project_for_workflow(wid); ts=tasks_for_workflow(wid); ss=[]
     for k,l in STAGES:
         x=stage_summary(ts,k); x['label']=l; ss.append(x)
-    return {'workflow':{'workflow_id':wid,**w},'project':p,'stages':ss,'tasks':ts,'coordinator':agent_runtime(w.get('coordinator_pane_id')),'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto')}
+    return {'workflow':{'workflow_id':wid,**_with_subject(w)},'project':p,'stages':ss,'tasks':ts,'coordinator':agent_runtime(w.get('coordinator_pane_id')),'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto')}
 
 def task_detail(tid):
     t=next((x for x in tasks() if x.get('task_id')==tid),None)
@@ -437,8 +449,8 @@ def tail_log(kind='controller',n=180):
     return '\n'.join(p.read_text(errors='ignore').splitlines()[-max(10,min(n,1000)):])
 
 HTML_TEMPLATE='''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PRODUCT_NAME__</title><style>
-:root{--bg:#0b0f14;--panel:#121821;--card:#17202b;--line:#293342;--text:#edf2f7;--muted:#8fa0b5;--accent:#67a4ff;--good:#42c58a;--warn:#f3b950;--bad:#f36b6b}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif}button,input,select,textarea{font:inherit}button{cursor:pointer}.shell{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:100vh}.sidebar{border-right:1px solid var(--line);background:#0f141b;padding:18px;position:sticky;top:0;height:100vh;overflow:auto}.brand{font-size:20px;font-weight:750}.sub{color:var(--muted);font-size:12px;margin:4px 0 20px}.project{width:100%;text-align:left;background:transparent;border:1px solid var(--line);color:var(--text);border-radius:12px;padding:12px;margin-bottom:8px}.project.active{border-color:var(--accent);background:#14243a}.project small{display:block;color:var(--muted);margin-top:4px}.main{padding:22px;min-width:0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px}.title{font-size:22px;font-weight:760}.muted{color:var(--muted)}.actions{display:flex;gap:8px;flex-wrap:wrap}.btn{border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:10px;padding:9px 12px}.btn.primary{background:var(--accent);color:#06111f;border-color:var(--accent);font-weight:700}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:16px}.metric,.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px}.metric{padding:14px}.metric b{font-size:22px;display:block}.metric span{font-size:12px;color:var(--muted)}.stages{display:grid;grid-template-columns:repeat(6,minmax(130px,1fr));gap:10px;overflow:auto;margin-bottom:16px}.stage{min-width:130px;padding:13px;background:var(--panel);border:1px solid var(--line);border-radius:14px}.stage strong{display:block;margin-bottom:8px}.badge{font-size:12px;border-radius:999px;padding:3px 8px;display:inline-block;border:1px solid var(--line)}.badge.cleaned{color:var(--good)}.badge.working,.badge.finalizing{color:var(--warn)}.badge.failed,.badge.blocked{color:var(--bad)}.badge.waiting{color:var(--muted)}.grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(280px,.8fr);gap:14px}.panel{overflow:hidden}.panel h3{font-size:14px;margin:0;padding:13px 15px;border-bottom:1px solid var(--line)}.task{padding:13px 15px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center}.task-name{font-weight:650}.task-id{color:#6f8197;font-size:11px;margin-top:3px}.task-meta{color:var(--muted);font-size:12px;margin-top:4px}.task-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.mini{padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:#101720;color:var(--text);font-size:12px}.agent-row,.slot-row,.alert-row{padding:11px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:center}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:7px;background:var(--muted)}.dot.ready{background:var(--good)}.dot.working{background:var(--warn)}.dot.disabled,.dot.failed{background:var(--bad)}.section-gap{margin-top:14px}.empty{padding:18px;color:var(--muted);font-size:13px}pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5}.modal{position:fixed;inset:0;background:rgba(0,0,0,.58);display:none;align-items:center;justify-content:center;padding:20px;z-index:50}.modal.open{display:flex}.modal-card{width:min(920px,100%);max-height:86vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:16px}.modal-head{display:flex;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}.modal-body{padding:16px}.close{background:transparent;color:var(--text);border:0;font-size:22px}.form{display:grid;gap:10px}.form label{font-size:12px;color:var(--muted)}.form input,.form select,.form textarea{width:100%;background:#0d131a;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px}.form textarea{min-height:120px}.toast{position:fixed;right:18px;bottom:18px;background:#111923;border:1px solid var(--line);padding:12px 14px;border-radius:12px;display:none;max-width:420px;z-index:60}.toast.show{display:block}.danger-text{color:var(--bad)}.good-text{color:var(--good)}@media(max-width:1000px){.shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}.projects{display:flex;gap:8px;overflow:auto}.project{min-width:180px}.grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}}
-</style></head><body><div class="shell"><aside class="sidebar"><div class="brand">__PRODUCT_NAME__</div><div class="sub">__PRODUCT_TAGLINE__ · 控制台</div><div id="projects" class="projects"></div><button class="btn" style="width:100%;margin-top:10px" onclick="refreshAll()">刷新</button></aside><main class="main"><div class="top"><div><div class="title" id="projectTitle">选择项目</div><div class="muted" id="workflowTitle">—</div></div><div class="actions"><button class="btn primary factory-action" onclick="showNewWorkflow()">＋ 新需求</button><button class="btn factory-action" onclick="showTemplateLibrary()">模板库</button><button class="btn factory-action" onclick="runPreflight()">执行者自检</button><button class="btn factory-action" onclick="showAgentOverride()">指定执行者</button><button class="btn factory-action" onclick="createCandidate()">创建候选分支</button><button class="btn factory-action" onclick="advanceStage()">进入下一阶段</button><button class="btn factory-action" onclick="showLogs()">查看日志</button></div></div><div class="metrics"><div class="metric"><b id="mProjects">0</b><span>Herdr 空间</span></div><div class="metric"><b id="mWorkflows">0</b><span>活跃 Workflow</span></div><div class="metric"><b id="mAgents">0</b><span>活跃执行者</span></div><div class="metric"><b id="mAlerts">0</b><span>需要关注</span></div></div><div id="stages" class="stages"></div><div class="grid"><section class="panel"><h3>执行者与任务实时看板</h3><div id="tasks"></div></section><section><div class="panel"><h3>执行者阵容</h3><div id="agents"></div></div><div class="panel section-gap"><h3>常驻智能体工位</h3><div id="slots"></div></div><div class="panel section-gap"><h3>告警中心</h3><div id="alerts"></div></div></section></div></main></div><div id="modal" class="modal"><div class="modal-card"><div class="modal-head"><strong id="modalTitle">详情</strong><button class="close" onclick="closeModal()">×</button></div><div id="modalBody" class="modal-body"></div></div></div><div id="toast" class="toast"></div><script>
+:root{--bg:#0b0f14;--panel:#121821;--card:#17202b;--line:#293342;--text:#edf2f7;--muted:#8fa0b5;--accent:#67a4ff;--good:#42c58a;--warn:#f3b950;--bad:#f36b6b}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif}button,input,select,textarea{font:inherit}button{cursor:pointer}.shell{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:100vh}.sidebar{border-right:1px solid var(--line);background:#0f141b;padding:18px;position:sticky;top:0;height:100vh;overflow:auto}.brand{font-size:20px;font-weight:750}.sub{color:var(--muted);font-size:12px;margin:4px 0 20px}.project{width:100%;text-align:left;background:transparent;border:1px solid var(--line);color:var(--text);border-radius:12px;padding:12px;margin-bottom:8px}.project.active{border-color:var(--accent);background:#14243a}.project small{display:block;color:var(--muted);margin-top:4px}.main{padding:22px;min-width:0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px}.title{font-size:22px;font-weight:760}.muted{color:var(--muted)}.actions{display:flex;gap:8px;flex-wrap:wrap}.btn{border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:10px;padding:9px 12px}.btn.primary{background:var(--accent);color:#06111f;border-color:var(--accent);font-weight:700}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:16px}.metric,.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px}.metric{padding:14px}.metric b{font-size:22px;display:block}.metric span{font-size:12px;color:var(--muted)}.stages{display:grid;grid-template-columns:repeat(6,minmax(130px,1fr));gap:10px;overflow:auto;margin-bottom:16px}.stage{min-width:130px;padding:13px;background:var(--panel);border:1px solid var(--line);border-radius:14px}.stage strong{display:block;margin-bottom:8px}.badge{font-size:12px;border-radius:999px;padding:3px 8px;display:inline-block;border:1px solid var(--line)}.badge.cleaned{color:var(--good)}.badge.working,.badge.finalizing{color:var(--warn)}.badge.failed,.badge.blocked{color:var(--bad)}.badge.waiting{color:var(--muted)}.grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(280px,.8fr);gap:14px}.panel{overflow:hidden}.panel h3{font-size:14px;margin:0;padding:13px 15px;border-bottom:1px solid var(--line)}.task{padding:13px 15px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center}.task-name{font-weight:650}.task-id{color:#6f8197;font-size:11px;margin-top:3px}.task-meta{color:var(--muted);font-size:12px;margin-top:4px}.task-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.mini{padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:#101720;color:var(--text);font-size:12px}.agent-row,.slot-row,.alert-row{padding:11px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:center}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:7px;background:var(--muted)}.dot.ready{background:var(--good)}.dot.working{background:var(--warn)}.dot.disabled,.dot.failed{background:var(--bad)}.section-gap{margin-top:14px}.empty{padding:18px;color:var(--muted);font-size:13px}pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5}.modal{position:fixed;inset:0;background:rgba(0,0,0,.58);display:none;align-items:center;justify-content:center;padding:20px;z-index:50}.modal.open{display:flex}.modal-card{width:min(920px,100%);max-height:86vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:16px}.modal-head{display:flex;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}.modal-body{padding:16px}.close{background:transparent;color:var(--text);border:0;font-size:22px}.form{display:grid;gap:10px}.form label{font-size:12px;color:var(--muted)}.form input,.form select,.form textarea{width:100%;background:#0d131a;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px}.form textarea{min-height:120px}.toast{position:fixed;right:18px;bottom:18px;background:#111923;border:1px solid var(--line);padding:12px 14px;border-radius:12px;display:none;max-width:420px;z-index:60}.toast.show{display:block}.danger-text{color:var(--bad)}.good-text{color:var(--good)}.wf-subject{font-size:16px;font-weight:700;line-height:1.35}.wf-sub{font-size:12px;margin-top:3px}.wf-switcher{display:flex;align-items:center;gap:8px;margin:-6px 0 14px}.wf-switcher label{font-size:12px;color:var(--muted)}.wf-switcher select{background:#0d131a;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:7px 10px;max-width:520px}@media(max-width:1000px){.shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}.projects{display:flex;gap:8px;overflow:auto}.project{min-width:180px}.grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}}
+</style></head><body><div class="shell"><aside class="sidebar"><div class="brand">__PRODUCT_NAME__</div><div class="sub">__PRODUCT_TAGLINE__ · 控制台</div><div id="projects" class="projects"></div><button class="btn" style="width:100%;margin-top:10px" onclick="refreshAll()">刷新</button></aside><main class="main"><div class="top"><div><div class="title" id="projectTitle">选择项目</div><div id="workflowTitle"><div class="wf-subject" id="workflowSubject">—</div><div class="muted wf-sub" id="workflowSub"></div></div></div><div class="actions"><button class="btn primary factory-action" onclick="showNewWorkflow()">＋ 新需求</button><button class="btn factory-action" onclick="showTemplateLibrary()">模板库</button><button class="btn factory-action" onclick="runPreflight()">执行者自检</button><button class="btn factory-action" onclick="showAgentOverride()">指定执行者</button><button class="btn factory-action" onclick="createCandidate()">创建候选分支</button><button class="btn factory-action" onclick="advanceStage()">进入下一阶段</button><button class="btn factory-action" onclick="showLogs()">查看日志</button></div></div><div class="metrics"><div class="metric"><b id="mProjects">0</b><span>Herdr 空间</span></div><div class="metric"><b id="mWorkflows">0</b><span>活跃 Workflow</span></div><div class="metric"><b id="mAgents">0</b><span>活跃执行者</span></div><div class="metric"><b id="mAlerts">0</b><span>需要关注</span></div></div><div id="stages" class="stages"></div><div id="workflowSwitcher" class="wf-switcher" style="display:none"></div><div class="grid"><section class="panel"><h3>执行者与任务实时看板</h3><div id="tasks"></div></section><section><div class="panel"><h3>执行者阵容</h3><div id="agents"></div></div><div class="panel section-gap"><h3>常驻智能体工位</h3><div id="slots"></div></div><div class="panel section-gap"><h3>告警中心</h3><div id="alerts"></div></div></section></div></main></div><div id="modal" class="modal"><div class="modal-card"><div class="modal-head"><strong id="modalTitle">详情</strong><button class="close" onclick="closeModal()">×</button></div><div id="modalBody" class="modal-body"></div></div></div><div id="toast" class="toast"></div><script>
 let state={overview:null,project:null,workflow:null,ops:null,projectId:null,workflowId:null,spaceId:null,space:null,opsMode:false};
 async function waitForWorkflowJob(jobId){
   for(let i=0;i<180;i++){
@@ -663,7 +675,9 @@ function showOpsCenter(){
   state.opsMode=true;
   syncOpsUi();
   document.getElementById('projectTitle').textContent='运维驾驶舱';
-  document.getElementById('workflowTitle').textContent='四层运维视图 · 每 3 秒刷新';
+  document.getElementById('workflowSubject').textContent='四层运维视图 · 每 3 秒刷新';
+  document.getElementById('workflowSub').textContent='';
+  document.getElementById('workflowSwitcher').style.display='none';
   document.getElementById('stages').innerHTML='';
   document.getElementById('tasks').innerHTML='<div class="empty">正在加载运维数据…</div>';
   loadOpsCenter()
@@ -780,9 +794,11 @@ async function selectSpace(workspaceId,rer=true){
     state.workflowId=null;
 
     document.getElementById('projectTitle').textContent=s.label||s.workspace_id;
-    document.getElementById('workflowTitle').textContent=
-      `${relationText(s)} · ${s.workspace_id}`+
+    document.getElementById('workflowSubject').textContent=relationText(s);
+    document.getElementById('workflowSub').textContent=
+      s.workspace_id+
       (s.factory_workspace_id?` · 当前工厂空间：${s.factory_workspace_id}`:'');
+    document.getElementById('workflowSwitcher').style.display='none';
 
     document.getElementById('stages').innerHTML='';
     document.getElementById('tasks').innerHTML=`
@@ -800,7 +816,26 @@ async function selectSpace(workspaceId,rer=true){
   if(rer)renderOverview()
 }
 
-async function loadProject(id,rer=true){state.projectId=id;state.project=await api('/api/project?id='+encodeURIComponent(id));if(rer&&state.overview)renderOverview();document.getElementById('projectTitle').textContent=state.project.project.project_name;const w=state.project.workflows;if(!state.workflowId||!w.some(x=>x.workflow_id===state.workflowId))state.workflowId=state.project.latest_workflow_id;renderAgents();renderSlots();if(state.workflowId)await loadWorkflow(state.workflowId);else clearWorkflow()}async function loadWorkflow(id){state.workflowId=id;state.workflow=await api('/api/workflow?id='+encodeURIComponent(id));const w=state.workflow.workflow;document.getElementById('workflowTitle').textContent='Workflow · '+id+' · 执行者 '+(state.workflow.agent_override||'auto')+(w.candidate_branch?' · 候选分支 '+w.candidate_branch:'');renderStages();renderTasks()}function clearWorkflow(){state.workflow=null;state.workflowId=null;document.getElementById('workflowTitle').textContent='暂无 Workflow';document.getElementById('stages').innerHTML='';document.getElementById('tasks').innerHTML='<div class="empty">暂无任务</div>'}function renderStages(){
+async function loadProject(id,rer=true){state.projectId=id;state.project=await api('/api/project?id='+encodeURIComponent(id));if(rer&&state.overview)renderOverview();document.getElementById('projectTitle').textContent=state.project.project.project_name;const w=state.project.workflows;if(!state.workflowId||!w.some(x=>x.workflow_id===state.workflowId))state.workflowId=state.project.latest_workflow_id;renderAgents();renderSlots();renderWorkflowSwitcher();if(state.workflowId)await loadWorkflow(state.workflowId);else clearWorkflow()}
+function workflowSubject(w){return (w&&w.requirement_subject)||''}
+function renderWorkflowHead(w){
+  const subj=workflowSubject(w);
+  document.getElementById('workflowSubject').textContent=subj||w.workflow_id;
+  const a=state.workflow.agent_override||'auto';
+  const parts=[];
+  if(subj)parts.push('Workflow '+w.workflow_id);
+  parts.push('执行者 '+(a==='auto'?'自动分配':a));
+  if(w.candidate_branch)parts.push('候选分支 '+w.candidate_branch);
+  document.getElementById('workflowSub').textContent=parts.join(' · ')
+}
+function renderWorkflowSwitcher(){
+  const box=document.getElementById('workflowSwitcher'),ws=(state.project&&state.project.workflows)||[];
+  if(ws.length<2){box.style.display='none';box.innerHTML='';return}
+  box.style.display='flex';
+  box.innerHTML='<label>Workflow</label><select onchange="loadWorkflow(this.value)">'+ws.map(x=>`<option value="${esc(x.workflow_id)}"${x.workflow_id===state.workflowId?' selected':''}>${esc(workflowSubject(x)||x.workflow_id)}</option>`).join('')+'</select>'
+}
+async function loadWorkflow(id){state.workflowId=id;state.workflow=await api('/api/workflow?id='+encodeURIComponent(id));const w=state.workflow.workflow;renderWorkflowHead(w);renderStages();renderTasks()}
+function clearWorkflow(){state.workflow=null;state.workflowId=null;document.getElementById('workflowSubject').textContent='暂无 Workflow';document.getElementById('workflowSub').textContent='';document.getElementById('stages').innerHTML='';document.getElementById('tasks').innerHTML='<div class="empty">暂无任务</div>'}function renderStages(){
   document.getElementById('stages').innerHTML=state.workflow.stages.map((s,i)=>`
     <div class="stage">
       <strong>${i+1}. ${esc(s.label)}</strong>
