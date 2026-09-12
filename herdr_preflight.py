@@ -14,13 +14,22 @@ PROJECTS = ROOT / "projects.json"
 
 KNOWN_AGENTS = ["opencode", "codex", "claude", "qodercli", "agy", "pi"]
 
+AGENT_BINARIES = {
+    "opencode": "opencode",
+    "codex": "codex",
+    "claude": "claude",
+    "qodercli": "qodercn",
+    "agy": "agy",
+    "pi": "pi",
+}
+
 AUTH_HINTS = {
     "codex": [HOME / ".codex" / "auth.json"],
     "claude": [HOME / ".claude.json"],
     "pi": [HOME / ".pi" / "agent" / "auth.json"],
     "opencode": [HOME / ".config" / "opencode"],
-    "qodercli": [HOME / ".qoder"],
-    "agy": [HOME / ".config" / "antigravity"],
+    "qodercli": [HOME / ".qoder-cn"],
+    "agy": [],
 }
 
 VERSION_ARGS = {
@@ -103,7 +112,8 @@ def inspect(project_id=None):
 
     rows = []
     for agent in allowed:
-        binary = shutil.which(agent)
+        binary_name = AGENT_BINARIES.get(agent, agent)
+        binary = shutil.which(binary_name)
         auth_state, auth_paths = auth_hint(agent)
 
         if not binary:
