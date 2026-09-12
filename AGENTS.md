@@ -5,6 +5,13 @@
 
 ---
 
+## 0. 知识层与持久理解 (LLM Wiki)
+
+- **知识层主索引**: [`wiki/index.md`](file:///Users/user/herdr/wiki/index.md) — 真实代码沉淀的知识图谱与意图寻路主入口。
+- **Wiki 治理规范**: [`wiki/WIKI.md`](file:///Users/user/herdr/wiki/WIKI.md) 与 [`wiki/log.md`](file:///Users/user/herdr/wiki/log.md) — 当变更涉及架构、模型、状态机、DAG 算法、自愈逻辑或路由时，必须同步更新对应 Wiki。
+
+---
+
 ## 1. 核心架构与事实来源 (Source of Truth)
 
 - **系统定位与全局架构**: [`architecture-overview.md`](file:///Users/user/herdr/docs/architecture/architecture-overview.md) — 分层设计、组件职责、状态机。

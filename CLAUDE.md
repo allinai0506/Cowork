@@ -89,7 +89,7 @@ python3 -m compileall herdr/ services/ bin/ tests/
 - [ ] **全局体检 PASS**：运行 `./bin/herdr-factory doctor`，确保无 `FAIL` 项。
 - [ ] **守护进程健康**：运行 `launchctl list | grep herdr`，确认各服务 PID 正常且退出码为 `0`。
 - [ ] **无残留临时垃圾**：检查无未加入 `.gitignore` 的 `.tmp`、`.bak`、调试日志或临时测试脚本。
-- [ ] **文档与代码同步**：若修改了 CLI 选项、模块结构或服务路径，必须同步更新 `README.md`、`AGENTS.md`、`docs/` 相应文档。
+- [ ] **文档与代码同步**：若修改了 CLI 选项、模块结构、核心算法、状态机或服务路径，必须同步更新 `wiki/`、`README.md`、`AGENTS.md` 及 `docs/` 相应文档。
 
 ---
 

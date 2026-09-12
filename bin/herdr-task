@@ -31,17 +31,18 @@ WORKFLOW_FILE = os.path.expanduser("~/.herdr-controller/workflow.json")
 
 TRANSITIONS = {
     "pending": {"dispatched", "failed"},
-    "dispatched": {"working", "blocked", "failed"},
-    "working": {"blocked", "agent_done", "failed"},
-    "blocked": {"working", "failed"},
-    "agent_done": {"completed", "rework", "failed"},
-    "rework": {"working", "blocked", "failed"},
+    "dispatched": {"working", "blocked", "failed", "superseded"},
+    "working": {"blocked", "agent_done", "failed", "superseded"},
+    "blocked": {"working", "failed", "superseded"},
+    "agent_done": {"completed", "rework", "failed", "superseded"},
+    "rework": {"working", "blocked", "failed", "superseded"},
     "completed": {"committed", "cleanup_ready"},
     "committed": {"integrated"},
     "integrated": {"cleanup_ready"},
     "cleanup_ready": {"cleaned"},
-    "cleaned": set(),
-    "failed": set(),
+    "cleaned": {"superseded"},
+    "failed": {"superseded"},
+    "superseded": set(),
 }
 
 
@@ -517,6 +518,22 @@ def dispatch_task(task_id, prompt):
         time.sleep(0.35)
         r2 = _press_enter()
         return r1.returncode == 0 and r2.returncode == 0
+
+    # Clear previous conversation context before dispatching new task.
+    # Sends /clear to reset agent history so each task starts with a clean slate.
+    _run(["herdr", "agent", "focus", pane_id])
+    time.sleep(0.25)
+    _run(["herdr", "pane", "send-text", pane_id, "/clear"])
+    _run(["herdr", "pane", "send-keys", pane_id, "enter"])
+    print(f"[CONTEXT CLEAR] task={task_id} pane={pane_id}")
+
+    # Wait for /clear to complete (agent returns to idle)
+    clear_deadline = time.time() + 8
+    while time.time() < clear_deadline:
+        state = _status()
+        if state in {"idle", None}:
+            break
+        time.sleep(0.4)
 
     set_status(task_id, "dispatched")
     time.sleep(1.5)
@@ -1348,16 +1365,27 @@ def node_status(workflow_id, node_key):
         )
         return
 
-    complete = all(
-        task.get("status") in (
-            "completed",
-            "committed",
-            "integrated",
-            "cleanup_ready",
-            "cleaned"
+    # Superseded tasks do not block node completion — they were replaced by
+    # another task whose outcome is the authoritative result for this node.
+    active_tasks = [
+        task for task in tasks
+        if task.get("status") != "superseded" and not task.get("superseded_by")
+    ]
+
+    if not active_tasks:
+        # All tasks were superseded with no replacement — treat as incomplete.
+        complete = False
+    else:
+        complete = all(
+            task.get("status") in (
+                "completed",
+                "committed",
+                "integrated",
+                "cleanup_ready",
+                "cleaned"
+            )
+            for task in active_tasks
         )
-        for task in tasks
-    )
 
     result = {
         "workflow_id": workflow_id,
@@ -1393,6 +1421,90 @@ def node_status(workflow_id, node_key):
 
 
 stage_status = node_status
+
+
+def supersede_task(task_id, new_task_id=None, reason=None):
+    """Mark a task as superseded (replaced by another task or abandoned).
+
+    Superseded tasks are excluded from node completion calculations,
+    allowing the DAG to advance when replacement tasks complete successfully.
+    """
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    old_status = task["status"]
+    if "superseded" not in TRANSITIONS.get(old_status, set()):
+        print(
+            f"Illegal transition: "
+            f"{task_id}: {old_status} -> superseded"
+        )
+        sys.exit(2)
+
+    task["status"] = "superseded"
+    if new_task_id:
+        task["superseded_by"] = new_task_id
+    if reason:
+        task["supersede_reason"] = reason
+    save_tasks(data)
+
+    msg = f"{task_id}: {old_status} -> superseded"
+    if new_task_id:
+        msg += f" (by {new_task_id})"
+    print(msg)
+
+
+def stage_reset(workflow_id, stage=None):
+    """Clear stage-state.json advance lock(s) for a workflow.
+
+    Removes 'queued' or 'notified' entries that may be permanently
+    preventing the Controller from re-triggering stage advance events.
+    Use when a workflow is stuck and manual intervention is needed.
+    """
+    stage_path = os.path.expanduser("~/.herdr-controller/stage-state.json")
+    if not os.path.exists(stage_path):
+        print("stage-state.json not found — nothing to reset.")
+        return
+
+    with open(stage_path, "r", encoding="utf-8") as f:
+        state = json.load(f)
+
+    prefix = f"{workflow_id}:"
+    removed = []
+    for key in list(state.keys()):
+        if key.startswith(prefix):
+            if stage is None or key == f"{prefix}{stage}":
+                del state[key]
+                removed.append(key)
+
+    tmp = stage_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, stage_path)
+
+    if removed:
+        for k in removed:
+            print(f"[RESET] cleared: {k}")
+    else:
+        target = f"{prefix}{stage}" if stage else f"{prefix}*"
+        print(f"[RESET] no entries found for: {target}")
+
+
+def force_advance(workflow_id, stage=None):
+    """Force re-evaluation of stage advance for a workflow.
+
+    Clears existing stage-state locks for the given stage(s) so the
+    Controller daemon will re-check DAG completion and re-notify the
+    coordinator on its next cycle (~2 s).
+    """
+    stage_reset(workflow_id, stage)
+    print(
+        f"[ADVANCE] stage-state cleared for workflow={workflow_id}."
+        " Controller will re-evaluate within ~2 seconds."
+    )
 
 def list_tasks(workflow_id=None):
     data = load_tasks()
@@ -1473,6 +1585,11 @@ def main():
         default=[]
     )
     launch.add_argument("--prompt", required=True)
+    launch.add_argument(
+        "--supersedes",
+        default=None,
+        help="Task ID of the old task being replaced. Atomically marks it as superseded."
+    )
 
     dispatch = sub.add_parser("dispatch")
     dispatch.add_argument("task_id")
@@ -1516,12 +1633,32 @@ def main():
     list_cmd = sub.add_parser("list")
     list_cmd.add_argument("--workflow-id")
 
+    supersede_cmd = sub.add_parser("supersede")
+    supersede_cmd.add_argument("task_id")
+    supersede_cmd.add_argument("--by", dest="new_task_id", default=None)
+    supersede_cmd.add_argument("--reason", default=None)
+
+    stage_reset_cmd = sub.add_parser("stage-reset")
+    stage_reset_cmd.add_argument("workflow_id")
+    stage_reset_cmd.add_argument("stage", nargs="?", default=None)
+
+    advance_cmd = sub.add_parser("advance")
+    advance_cmd.add_argument("workflow_id")
+    advance_cmd.add_argument("stage", nargs="?", default=None)
+
     args = parser.parse_args()
 
     if args.command == "add":
         add_task(args)
 
     elif args.command == "launch":
+        # Atomically supersede the old task before launching the replacement.
+        if getattr(args, "supersedes", None):
+            supersede_task(
+                args.supersedes,
+                new_task_id=args.task_id,
+                reason="superseded by launch --supersedes"
+            )
         launch_task(args)
 
     elif args.command == "dispatch":
@@ -1577,6 +1714,19 @@ def main():
 
     elif args.command == "list":
         list_tasks(args.workflow_id)
+
+    elif args.command == "supersede":
+        supersede_task(
+            args.task_id,
+            new_task_id=args.new_task_id,
+            reason=args.reason
+        )
+
+    elif args.command == "stage-reset":
+        stage_reset(args.workflow_id, args.stage)
+
+    elif args.command == "advance":
+        force_advance(args.workflow_id, args.stage)
 
 
 if __name__ == "__main__":

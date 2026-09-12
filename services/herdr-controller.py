@@ -2,6 +2,7 @@
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import queue
 import socket
@@ -52,6 +53,23 @@ lock = threading.Lock()
 
 coordinator_queue = queue.Queue()
 queued_events = set()
+
+# Per-workflow concurrency: each workflow gets its own execution slot so that
+# a blocked coordinator for workflow A cannot stall dispatch for workflow B.
+_wf_dispatch_locks: dict = {}
+_wf_dispatch_locks_meta = threading.Lock()
+_coordinator_executor = ThreadPoolExecutor(
+    max_workers=16,
+    thread_name_prefix="coord-worker"
+)
+
+
+def _workflow_dispatch_lock(workflow_id: str) -> threading.Lock:
+    """Return the per-workflow serialization lock (created on first use)."""
+    with _wf_dispatch_locks_meta:
+        if workflow_id not in _wf_dispatch_locks:
+            _wf_dispatch_locks[workflow_id] = threading.Lock()
+        return _wf_dispatch_locks[workflow_id]
 
 
 # ============================================================
@@ -277,12 +295,72 @@ def is_node_complete(workflow_id, node_id):
     ]
     if not tasks:
         return False
+
+    # Superseded tasks are excluded from completion calculation — they were
+    # replaced by another task whose outcome is the authoritative result.
+    active = [
+        t for t in tasks
+        if t.get("status") != "superseded" and not t.get("superseded_by")
+    ]
+
+    # A node with only superseded tasks and no replacements is incomplete.
+    if not active:
+        return False
+
     return all(
         t.get("status") in (
             "completed", "committed", "integrated", "cleanup_ready", "cleaned"
         )
-        for t in tasks
+        for t in active
     )
+
+
+def reconcile_stage_advance_states(workflow_id, workflow_cfg):
+    """Revoke 'notified' stage-state entries when their predecessor nodes
+    have regressed (e.g., a task failed or was superseded with no replacement).
+
+    Without this, a stage whose predecessor regresses after the coordinator
+    was already notified would never be re-triggered — because
+    mark_stage_advance_queued returns False for 'notified' entries and the
+    node never appears in get_ready_nodes again.
+    """
+    with lock:
+        state = load_stage_state()
+        changed = False
+
+        nodes_by_id = {
+            n["id"]: n
+            for n in workflow_cfg.get("nodes", [])
+        }
+
+        for key in list(state.keys()):
+            if not key.startswith(f"{workflow_id}:"):
+                continue
+            if state[key] != "notified":
+                continue
+
+            node_id = key.split(":", 1)[1]
+            node = nodes_by_id.get(node_id)
+            if not node:
+                continue
+
+            # Check whether all predecessors are still complete.
+            deps = node.get("depends_on", [])
+            predecessors_complete = all(
+                is_node_complete(workflow_id, dep)
+                for dep in deps
+            )
+            if not predecessors_complete:
+                del state[key]
+                changed = True
+                print(
+                    f"[STAGE REVOKE] "
+                    f"workflow={workflow_id} node={node_id}: "
+                    "predecessors no longer complete, revoking 'notified' lock"
+                )
+
+        if changed:
+            save_stage_state(state)
 
 
 def enqueue_stage_advance(task):
@@ -304,6 +382,10 @@ def check_workflow_stage_advance(workflow_id):
         return
 
     if workflow_cfg.get("nodes"):
+        # Revoke stale 'notified' locks before computing ready nodes,
+        # so that regressed stages can be re-triggered.
+        reconcile_stage_advance_states(workflow_id, workflow_cfg)
+
         completed_nodes = {
             n["id"]
             for n in workflow_cfg.get("nodes", [])
@@ -861,89 +943,116 @@ def finalize_completed_task(task_id):
 
 
 def coordinator_worker():
+    """Main dispatcher: reads items from coordinator_queue and fans them out
+    to per-workflow executor threads, guaranteeing at-most-one concurrent
+    dispatch per workflow without blocking the queue for other workflows.
+    """
     while True:
         item = coordinator_queue.get()
+        try:
+            # Resolve workflow_id for routing.
+            workflow_id = item.get("workflow_id")
+            if not workflow_id and "task_id" in item:
+                t = get_task(item["task_id"])
+                workflow_id = (t or {}).get("workflow_id", "unknown")
 
-        # ==============================================
-        # Workflow Stage Advance
-        # ==============================================
-        if item.get("kind") == "stage_advance":
-            workflow_id = item["workflow_id"]
-            coord_pane = coordinator_pane_for_workflow(workflow_id)
-            if not coord_pane:
-                print(
-                    f"[STAGE ADVANCE SKIP] "
-                    f"no coordinator pane for workflow={workflow_id}"
-                )
-                coordinator_queue.task_done()
-                continue
-
-            stage = item["stage"]
-            next_stage = item["next_stage"]
-            target_node_id = item.get("node_id") or next_stage
-
-            project_ctx = project_for_workflow(
-                workflow_id
-            ) or {}
-
-            project_name = project_ctx.get(
-                "project_name",
-                "legacy/unknown"
+            wf_lock = _workflow_dispatch_lock(workflow_id or "unknown")
+            _coordinator_executor.submit(
+                _process_coordinator_item, item, wf_lock
             )
+        finally:
+            coordinator_queue.task_done()
 
-            project_root = project_ctx.get(
-                "project_root",
-                ""
+
+def _process_coordinator_item(item, wf_lock):
+    """Process one coordinator queue item inside the executor thread pool,
+    serialized per-workflow via wf_lock.
+    """
+    with wf_lock:
+        _handle_coordinator_item(item)
+
+
+def _handle_coordinator_item(item):
+    """Actual item handling logic (stage_advance or normal task event)."""
+    # ==============================================
+    # Workflow Stage Advance
+    # ==============================================
+    if item.get("kind") == "stage_advance":
+        workflow_id = item["workflow_id"]
+        coord_pane = coordinator_pane_for_workflow(workflow_id)
+        if not coord_pane:
+            print(
+                f"[STAGE ADVANCE SKIP] "
+                f"no coordinator pane for workflow={workflow_id}"
             )
+            return
 
-            base_branch = project_ctx.get(
-                "base_branch",
-                ""
-            )
+        stage = item["stage"]
+        next_stage = item["next_stage"]
+        target_node_id = item.get("node_id") or next_stage
 
-            node = item.get("node")
-            if not node:
-                wf_cfg = workflow_config_for(workflow_id)
-                if wf_cfg:
-                    node = find_node(wf_cfg, next_stage)
+        project_ctx = project_for_workflow(
+            workflow_id
+        ) or {}
 
-            policy = get_stage_policy(
-                next_stage
-            )
+        project_name = project_ctx.get(
+            "project_name",
+            "legacy/unknown"
+        )
 
-            if node:
-                purpose = node.get("purpose") or policy.get("purpose", "未定义")
-                integration_mode = node.get("default_integration_mode") or policy.get("default_integration_mode", "none")
-                task_type = node.get("default_task_type") or policy.get("default_task_type", "feat")
-                node_label = node.get("label", next_stage)
-                node_type = node.get("node_type", "agent")
-                agent_policy = node.get("agent_policy", {})
-                req_outs = node.get("required_outputs") or policy.get("required_outputs", [])
-                rules_list = node.get("rules") or policy.get("rules", [])
-            else:
-                purpose = policy.get("purpose", "未定义")
-                integration_mode = policy.get("default_integration_mode", "none")
-                task_type = policy.get("default_task_type", "test")
-                node_label = item.get("stage_label", next_stage)
-                node_type = "agent"
-                agent_policy = {}
-                req_outs = policy.get("required_outputs", [])
-                rules_list = policy.get("rules", [])
+        project_root = project_ctx.get(
+            "project_root",
+            ""
+        )
 
-            required_outputs = "\n".join(
-                f"- {out}" for out in req_outs
-            ) or "- 未定义"
+        base_branch = project_ctx.get(
+            "base_branch",
+            ""
+        )
 
-            rules = "\n".join(
-                f"- {r}" for r in rules_list
-            ) or "- 未定义"
+        node = item.get("node")
+        if not node:
+            wf_cfg = workflow_config_for(workflow_id)
+            if wf_cfg:
+                node = find_node(wf_cfg, next_stage)
 
-            agent_policy_text = ""
-            if agent_policy:
-                pref = ", ".join(agent_policy.get("preferred", [])) or "无"
-                exc = ", ".join(agent_policy.get("exclude", [])) or "无"
-                fix = agent_policy.get("fixed") or "无"
-                agent_policy_text = f"""
+        policy = get_stage_policy(
+            next_stage
+        )
+
+        if node:
+            purpose = node.get("purpose") or policy.get("purpose", "未定义")
+            integration_mode = node.get("default_integration_mode") or policy.get("default_integration_mode", "none")
+            task_type = node.get("default_task_type") or policy.get("default_task_type", "feat")
+            node_label = node.get("label", next_stage)
+            node_type = node.get("node_type", "agent")
+            agent_policy = node.get("agent_policy", {})
+            req_outs = node.get("required_outputs") or policy.get("required_outputs", [])
+            rules_list = node.get("rules") or policy.get("rules", [])
+        else:
+            purpose = policy.get("purpose", "未定义")
+            integration_mode = policy.get("default_integration_mode", "none")
+            task_type = policy.get("default_task_type", "test")
+            node_label = item.get("stage_label", next_stage)
+            node_type = "agent"
+            agent_policy = {}
+            req_outs = policy.get("required_outputs", [])
+            rules_list = policy.get("rules", [])
+
+        required_outputs = "\n".join(
+            f"- {out}" for out in req_outs
+        ) or "- 未定义"
+
+        rules = "\n".join(
+            f"- {r}" for r in rules_list
+        ) or "- 未定义"
+
+        agent_policy_text = ""
+        if agent_policy:
+            pref = ", ".join(agent_policy.get("preferred", [])) or "无"
+            exc = ", ".join(agent_policy.get("exclude", [])) or "无"
+            fix = agent_policy.get("fixed") or "无"
+            agent_policy_text = f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Node Agent 策略
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -952,12 +1061,12 @@ Node Agent 策略
 - 固定 Agent: {fix}
 """.strip()
 
-            try:
-                while True:
-                    status = coordinator_status(workflow_id)
+        try:
+            while True:
+                status = coordinator_status(workflow_id)
 
-                    if status in ("idle", "done"):
-                        message = f"""
+                if status in ("idle", "done"):
+                    message = f"""
 HERDR_STAGE_ADVANCE_EVENT
 
 workflow_id: {workflow_id}
@@ -1060,121 +1169,17 @@ task_type:
    结束当前回合。
 
 10. 后续执行、验收、返工、节点推进，
-    继续交给 Controller。
+继续交给 Controller。
 
 不要等待用户提醒。
 """.strip()
-
-                        result = subprocess.run(
-                            [
-                                "herdr",
-                                "agent",
-                                "prompt",
-                                coord_pane,
-                                message,
-                                "--wait",
-                                "--timeout",
-                                "600000"
-                            ],
-                            text=True,
-                            capture_output=True
-                        )
-
-                        if result.returncode == 0:
-                            mark_stage_advance_notified(
-                                workflow_id,
-                                target_node_id
-                            )
-
-                            print(
-                                f"[STAGE ADVANCED] "
-                                f"workflow={workflow_id} "
-                                f"{stage} -> {next_stage}"
-                            )
-                        else:
-                            clear_stage_advance(
-                                workflow_id,
-                                target_node_id
-                            )
-
-                            print(
-                                f"[STAGE ADVANCE ERROR] "
-                                f"workflow={workflow_id}: "
-                                f"{result.stderr.strip() or result.stdout.strip()}"
-                            )
-
-                        break
-
-                    print(
-                        f"[STAGE ADVANCE WAIT] "
-                        f"coordinator={status} "
-                        f"workflow={workflow_id}"
-                    )
-
-                    time.sleep(1)
-
-            finally:
-                coordinator_queue.task_done()
-
-            continue
-
-        # ==============================================
-        # Normal Task Event
-        # ==============================================
-
-        task_id = item["task_id"]
-        event_type = item["event_type"]
-        key = item["key"]
-
-        expected_status = (
-            "blocked"
-            if event_type == "blocked"
-            else "agent_done"
-        )
-
-        try:
-            while True:
-                task = get_task(task_id)
-
-                if not task:
-                    print(
-                        f"[QUEUE DROP] "
-                        f"task={task_id} missing"
-                    )
-                    break
-
-                current_task_status = task.get("status")
-
-                # 事件在等待期间已经失效
-                if current_task_status != expected_status:
-                    print(
-                        f"[QUEUE STALE] "
-                        f"task={task_id} "
-                        f"expected={expected_status} "
-                        f"actual={current_task_status}"
-                    )
-                    break
-
-                status = coordinator_status(task.get("workflow_id"))
-
-                if status in ("idle", "done"):
-                    message = build_coordinator_message(
-                        task,
-                        event_type
-                    )
-
-                    print(
-                        f"[COORDINATOR READY] "
-                        f"task={task_id} "
-                        f"event={event_type}"
-                    )
 
                     result = subprocess.run(
                         [
                             "herdr",
                             "agent",
                             "prompt",
-                            coordinator_pane_for_workflow(task.get("workflow_id")),
+                            coord_pane,
                             message,
                             "--wait",
                             "--timeout",
@@ -1185,72 +1190,175 @@ task_type:
                     )
 
                     if result.returncode == 0:
-                        print(
-                            f"[COORDINATOR NOTIFIED] "
-                            f"task={task_id} "
-                            f"event={event_type}"
+                        mark_stage_advance_notified(
+                            workflow_id,
+                            target_node_id
                         )
 
-                        # done 事件经过总指挥正式验收后，
-                        # 根据 integration_mode 自动集成并清理。
-                        if event_type == "done":
-                            decision = wait_for_coordinator_decision(
-                                task_id
-                            )
-
-                            # 第一次没有形成决策时，只自动重试一次。
-                            if decision == "agent_done":
-                                decision = retry_coordinator_decision(
-                                    task_id
-                                )
-
-                            if decision == "completed":
-                                finalize_completed_task(
-                                    task_id
-                                )
-
-                            elif decision == "rework":
-                                print(
-                                    f"[FINALIZE DEFER] "
-                                    f"task={task_id} "
-                                    f"status=rework"
-                                )
-
-                            elif decision == "failed":
-                                print(
-                                    f"[FINALIZE STOP] "
-                                    f"task={task_id} "
-                                    f"status=failed"
-                                )
-
-                            else:
-                                print(
-                                    f"[FINALIZE WAIT] "
-                                    f"task={task_id} "
-                                    f"status={decision}"
-                                )
-                    else:
                         print(
-                            "[COORDINATOR ERROR]",
-                            result.stderr.strip()
-                            or result.stdout.strip()
+                            f"[STAGE ADVANCED] "
+                            f"workflow={workflow_id} "
+                            f"{stage} -> {next_stage}"
+                        )
+                    else:
+                        clear_stage_advance(
+                            workflow_id,
+                            target_node_id
+                        )
+
+                        print(
+                            f"[STAGE ADVANCE ERROR] "
+                            f"workflow={workflow_id}: "
+                            f"{result.stderr.strip() or result.stdout.strip()}"
                         )
 
                     break
 
                 print(
-                    f"[COORDINATOR BUSY] "
-                    f"status={status} "
-                    f"task={task_id}"
+                    f"[STAGE ADVANCE WAIT] "
+                    f"coordinator={status} "
+                    f"workflow={workflow_id}"
                 )
 
                 time.sleep(1)
 
         finally:
-            with lock:
-                queued_events.discard(key)
+            pass  # task_done is called by coordinator_worker dispatcher
 
-            coordinator_queue.task_done()
+        return
+
+# ==============================================
+# Normal Task Event
+# ==============================================
+
+    task_id = item["task_id"]
+    event_type = item["event_type"]
+    key = item["key"]
+
+    expected_status = (
+        "blocked"
+        if event_type == "blocked"
+        else "agent_done"
+    )
+
+    try:
+        while True:
+            task = get_task(task_id)
+
+            if not task:
+                print(
+                    f"[QUEUE DROP] "
+                    f"task={task_id} missing"
+                )
+                break
+
+            current_task_status = task.get("status")
+
+            # 事件在等待期间已经失效
+            if current_task_status != expected_status:
+                print(
+                    f"[QUEUE STALE] "
+                    f"task={task_id} "
+                    f"expected={expected_status} "
+                    f"actual={current_task_status}"
+                )
+                break
+
+            status = coordinator_status(task.get("workflow_id"))
+
+            if status in ("idle", "done"):
+                message = build_coordinator_message(
+                    task,
+                    event_type
+                )
+
+                print(
+                    f"[COORDINATOR READY] "
+                    f"task={task_id} "
+                    f"event={event_type}"
+                )
+
+                result = subprocess.run(
+                    [
+                        "herdr",
+                        "agent",
+                        "prompt",
+                        coordinator_pane_for_workflow(task.get("workflow_id")),
+                        message,
+                        "--wait",
+                        "--timeout",
+                        "600000"
+                    ],
+                    text=True,
+                    capture_output=True
+                )
+
+                if result.returncode == 0:
+                    print(
+                        f"[COORDINATOR NOTIFIED] "
+                        f"task={task_id} "
+                        f"event={event_type}"
+                    )
+
+                    # done 事件经过总指挥正式验收后，
+                    # 根据 integration_mode 自动集成并清理。
+                    if event_type == "done":
+                        decision = wait_for_coordinator_decision(
+                            task_id
+                        )
+
+                        # 第一次没有形成决策时，只自动重试一次。
+                        if decision == "agent_done":
+                            decision = retry_coordinator_decision(
+                                task_id
+                            )
+
+                        if decision == "completed":
+                            finalize_completed_task(
+                                task_id
+                            )
+
+                        elif decision == "rework":
+                            print(
+                                f"[FINALIZE DEFER] "
+                                f"task={task_id} "
+                                f"status=rework"
+                            )
+
+                        elif decision == "failed":
+                            print(
+                                f"[FINALIZE STOP] "
+                                f"task={task_id} "
+                                f"status=failed"
+                            )
+
+                        else:
+                            print(
+                                f"[FINALIZE WAIT] "
+                                f"task={task_id} "
+                                f"status={decision}"
+                            )
+                else:
+                    print(
+                        "[COORDINATOR ERROR]",
+                        result.stderr.strip()
+                        or result.stdout.strip()
+                    )
+
+                break
+
+            print(
+                f"[COORDINATOR BUSY] "
+                f"status={status} "
+                f"task={task_id}"
+            )
+
+            time.sleep(1)
+
+    finally:
+        with lock:
+            queued_events.discard(key)
+
 
 
 # ============================================================
