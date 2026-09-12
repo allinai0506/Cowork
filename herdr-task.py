@@ -14,6 +14,7 @@ import shutil
 
 from herdr_projects import project_for_workflow, workflow_config_for, ensure_node_runtime
 from herdr_workflow import find_node, normalize_workflow
+from herdr_topology import ensure_stage_topology
 
 TASKS_FILE = os.path.expanduser("~/.herdr-controller/tasks.json")
 WORKFLOW_FILE = os.path.expanduser("~/.herdr-controller/workflow.json")
@@ -226,9 +227,11 @@ def launch_task(args):
         print("Error: either --node or --stage is required")
         sys.exit(1)
 
-    stage_config = resolve_node(
+    # Live topology is the source of truth.
+    # Internal tab/pane IDs are repaired immediately before every Task launch.
+    stage_config = ensure_stage_topology(
+        args.workflow_id,
         node_id,
-        args.workflow_id
     )
 
     workspace_id = stage_config[
@@ -379,9 +382,9 @@ def launch_task(args):
         "coordinator_pane_id": project.get("coordinator_pane_id"),
         "workflow_config": project.get("workflow_file"),
         "node": node_id,
-        "node_label": stage_config["node_label"],
+        "node_label": stage_config.get("node_label") or stage_config.get("stage_label", ""),
         "stage": node_id,
-        "stage_label": stage_config["stage_label"],
+        "stage_label": stage_config.get("stage_label") or stage_config.get("node_label", ""),
         "tab_id": stage_config["tab_id"],
         "workspace_id": workspace_id,
         "pane_id": pane_id,

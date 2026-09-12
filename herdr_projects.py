@@ -261,9 +261,9 @@ def project_alive(project):
     workflow = _load(project.get("workflow_file", ""), None)
     if not workflow:
         return False
-    for stage in workflow.get("stages", []):
-        if not _pane_alive(stage.get("anchor_pane_id", "")):
-            return False
+
+    # Stage tabs/anchors are repairable topology, not project identity.
+    # Missing anchors must never reprovision the whole workspace.
     return True
 
 
