@@ -5,4 +5,5 @@ __pycache__/
 path-migration-backup-*/
 *.before-*
 pre-workflow-*/
+topology-selfheal-backup-*/
 .pytest_cache/
