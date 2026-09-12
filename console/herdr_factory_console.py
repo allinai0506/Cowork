@@ -830,9 +830,12 @@ function renderWorkflowHead(w){
 }
 function renderWorkflowSwitcher(){
   const box=document.getElementById('workflowSwitcher'),ws=(state.project&&state.project.workflows)||[];
+  const sig=state.workflowId+'#'+ws.map(x=>x.workflow_id+':'+(workflowSubject(x)||x.workflow_id)).join('|');
+  if(box.dataset.sig===sig){box.style.display=ws.length<2?'none':'flex';return}
+  box.dataset.sig=sig;
   if(ws.length<2){box.style.display='none';box.innerHTML='';return}
   box.style.display='flex';
-  box.innerHTML='<label>Workflow</label><select onchange="loadWorkflow(this.value)">'+ws.map(x=>`<option value="${esc(x.workflow_id)}"${x.workflow_id===state.workflowId?' selected':''}>${esc(workflowSubject(x)||x.workflow_id)}</option>`).join('')+'</select>'
+  box.innerHTML='<label>Workflow</label><select onchange="state.workflowId=this.value;loadWorkflow(this.value)">'+ws.map(x=>`<option value="${esc(x.workflow_id)}"${x.workflow_id===state.workflowId?' selected':''}>${esc(workflowSubject(x)||x.workflow_id)}</option>`).join('')+'</select>'
 }
 async function loadWorkflow(id){state.workflowId=id;state.workflow=await api('/api/workflow?id='+encodeURIComponent(id));const w=state.workflow.workflow;renderWorkflowHead(w);renderStages();renderTasks()}
 function clearWorkflow(){state.workflow=null;state.workflowId=null;document.getElementById('workflowSubject').textContent='暂无 Workflow';document.getElementById('workflowSub').textContent='';document.getElementById('stages').innerHTML='';document.getElementById('tasks').innerHTML='<div class="empty">暂无任务</div>'}function renderStages(){
