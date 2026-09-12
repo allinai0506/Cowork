@@ -113,10 +113,26 @@ def current_project():
 
 def project_by_id(project_id):
     ps = load_json(PROJECTS, {"projects": {}}).get("projects", {})
-    if isinstance(ps, dict) and project_id in ps:
-        p = dict(ps[project_id])
-        p.setdefault("project_id", project_id)
-        return p
+
+    if isinstance(ps, dict):
+        if project_id in ps and isinstance(ps[project_id], dict):
+            p = dict(ps[project_id])
+            p.setdefault("project_id", project_id)
+            return p
+
+        for key, value in ps.items():
+            if not isinstance(value, dict):
+                continue
+            if value.get("project_id") == project_id:
+                p = dict(value)
+                p.setdefault("project_id", key)
+                return p
+
+    if isinstance(ps, list):
+        for value in ps:
+            if isinstance(value, dict) and value.get("project_id") == project_id:
+                return dict(value)
+
     return None
 
 
