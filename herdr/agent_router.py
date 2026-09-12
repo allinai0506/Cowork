@@ -130,7 +130,7 @@ def _active_agent_loads(project_id):
     data = _load(TASKS_FILE, {"tasks": []})
     active = {
         "pending", "dispatched", "working", "blocked", "agent_done",
-        "rework", "completed", "committed", "integrated", "cleanup_ready",
+        "rework",
     }
     loads = {}
     for task in data.get("tasks", []):

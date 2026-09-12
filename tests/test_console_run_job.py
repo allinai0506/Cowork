@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 import re
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -54,6 +55,41 @@ class TestConsoleRunJob(unittest.TestCase):
         with patch.object(module, "run", return_value=completed) as run_command:
             self.assertEqual(module.run_workflow("/tmp/project", "需求"), "WORKFLOW_ID")
         self.assertEqual(run_command.call_args.args[1], 600)
+
+
+class TestConsoleDeepPreflight(unittest.TestCase):
+    @staticmethod
+    def fake_completed():
+        return type("Completed", (), {"returncode": 0, "stdout": '{"agents":[]}', "stderr": ""})()
+
+    def test_uses_the_deep_preflight_cli_entrypoint(self):
+        module = load_console()
+        with patch.object(module, "run", return_value=self.fake_completed()) as run_command:
+            result = module.deep_preflight({"project_id": "p1"})
+        command = run_command.call_args.args[0]
+        self.assertEqual(command[0], str(ROOT / "bin" / "herdr-deep-preflight"))
+        self.assertEqual(command[1:], ["--project-id", "p1", "--deep", "--json"])
+        self.assertEqual(run_command.call_args.args[1], 180)
+        self.assertEqual(result, {"agents": []})
+
+    def test_falls_back_to_the_library_script_without_the_cli(self):
+        module = load_console()
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = Path(tmp) / "herdr" / "deep_preflight.py"
+            lib.parent.mkdir()
+            lib.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            module.HERDR_ROOT = Path(tmp)
+            with patch.object(module, "run", return_value=self.fake_completed()) as run_command:
+                module.deep_preflight({"project_id": "p1"})
+            self.assertEqual(run_command.call_args.args[0][0], str(lib))
+
+    def test_missing_install_reports_the_checked_path(self):
+        module = load_console()
+        with tempfile.TemporaryDirectory() as tmp:
+            module.HERDR_ROOT = Path(tmp)
+            with self.assertRaises(RuntimeError) as ctx:
+                module.deep_preflight({"project_id": "p1"})
+        self.assertIn("未安装", str(ctx.exception))
 
 
 class TestConsoleOpsNavigation(unittest.TestCase):

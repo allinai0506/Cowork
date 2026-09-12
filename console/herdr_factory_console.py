@@ -86,22 +86,50 @@ def agent_runtime(pane):
     except Exception:return None
 
 def pool(pid):return load_json(POOLS_FILE,{'projects':{}}).get('projects',{}).get(pid,{})
+AGENT_BINARIES = {
+    'opencode': 'opencode',
+    'codex': 'codex',
+    'claude': 'claude',
+    'qodercli': 'qodercn',
+    'agy': 'agy',
+    'pi': 'pi',
+}
+
+AUTH_HINTS = {
+    'codex': [HOME / '.codex' / 'auth.json'],
+    'claude': [HOME / '.claude.json'],
+    'pi': [HOME / '.pi' / 'agent' / 'auth.json'],
+    'opencode': [HOME / '.config' / 'opencode'],
+    'qodercli': [HOME / '.qoder-cn'],
+    'agy': [HOME / '.agy'],
+}
+
+IN_FLIGHT_STATUSES = {'pending', 'dispatched', 'working', 'blocked', 'agent_done', 'rework'}
+
 def agent_loads(pid):
     d={a:0 for a in AGENTS}
     for t in tasks():
-        if t.get('project_id')==pid and t.get('status') in ACTIVE and t.get('agent'):d[t['agent']]=d.get(t['agent'],0)+1
+        if t.get('project_id')==pid and t.get('status') in IN_FLIGHT_STATUSES and t.get('agent'):d[t['agent']]=d.get(t['agent'],0)+1
     return d
 
 def preflight(p):
     po=pool(p.get('project_id')); allowed=po.get('allowed_agents',AGENTS); disabled=set(po.get('disabled_agents',[])); loads=agent_loads(p.get('project_id'))
-    hints={'codex':HOME/'.codex/auth.json','claude':HOME/'.claude.json','pi':HOME/'.pi/agent/auth.json'}; out=[]
+    out=[]
     for a in allowed:
-        b=shutil.which(a); h=hints.get(a)
-        out.append({'agent':a,'installed':bool(b),'binary':b,'disabled':a in disabled,'load':loads.get(a,0),'auth_hint':'present' if h and h.exists() else 'missing' if h else 'unknown','status':'disabled' if a in disabled else 'ready' if b else 'missing'})
+        bin_name=AGENT_BINARIES.get(a,a)
+        b=shutil.which(bin_name)
+        hs=AUTH_HINTS.get(a,[])
+        if hs:
+            auth_state='present' if any(h.exists() for h in hs) else 'missing'
+        else:
+            auth_state='unknown'
+        out.append({'agent':a,'installed':bool(b),'binary':b,'disabled':a in disabled,'load':loads.get(a,0),'auth_hint':auth_state,'status':'disabled' if a in disabled else 'ready' if b else 'missing'})
     return out
 
 def deep_preflight(p):
-    script = HERDR_ROOT / "herdr_deep_preflight.py"
+    script = HERDR_ROOT / "bin" / "herdr-deep-preflight"
+    if not script.exists():
+        script = HERDR_ROOT / "herdr" / "deep_preflight.py"
     if not script.exists():
         raise RuntimeError(f"Deep Preflight 未安装: {script}")
 
