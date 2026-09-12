@@ -33,7 +33,7 @@
 | **新增/调整工作流模板或 DAG 调度算法** | [[dag-workflow-engine]] | `herdr/workflow.py` |
 | **修改 Agent 分配算法、优先级或并发锁** | [[agent-routing-and-pools]] | `herdr/agent_router.py` |
 | **排查 Tab/Pane 窗格误关、丢失或重建失败** | [[tab-node-model]] | `herdr/projects.py:ensure_node_runtime` |
-| **新增支持的 AI Agent CLI** | [[common-change-paths]] | `herdr/preflight.py`, `herdr/deep_preflight.py` |
+| **新增支持的 AI Agent CLI** | [[common-change-paths]] | `herdr/agent_binary.py`, `herdr/preflight.py`, `herdr/deep_preflight.py` |
 | **排查后台服务不推进、状态不同步** | [[architecture]] | `services/herdr-controller.py` |
 | **编写或修改自动化测试** | [[dag-workflow-engine]] | `tests/test_workflow_engine.py` |
 | **更新或扩展 Wiki 本身** | [[WIKI]] / [[log]] | `wiki/WIKI.md` |

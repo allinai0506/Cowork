@@ -311,3 +311,48 @@ curl -s "http://127.0.0.1:8765/api/ops-center?workflow_id=wf-nexusarchive-544332
 `/api/workflow` 全部 stage 为 `cleaned`（修复前为 `mixed`→"处理中"）；
 drilldown 从最老的 plan-t1 变为权威的 plan-t2-rev。
 数据修补记录：plan-t2 已归一为 cleaned（备份 `~/.herdr-controller/backups/tasks.json.bak-20260912-230513`）。
+
+## 8. 已装 Agent 被误判"未安装"：`shutil.which` 依赖服务进程 PATH，且映射三处手写
+
+### 问题背景
+
+共事工厂控制台"执行者阵容"把 codex/claude/qodercli/agy 显示为"未安装"，但四者实际已装
+（volta、`~/.local/bin`、`~/.qoder-cn/entry`）。前一次修复（§6，commit 7d6dc5a）只修正了
+二进制名映射（qodercli→qodercn）与认证提示，探测仍走裸 `shutil.which`。而 console 与
+controller 均以 LaunchAgent 常驻，plist PATH 精简为
+`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`，不含用户级安装目录——
+这正是 opencode/pi（homebrew）显示正常、其余四个误判的原因。同一探测语义当时在仓库里有
+3 处独立实现：`console/herdr_factory_console.py:preflight`、`herdr/preflight.py:inspect`、
+`herdr/deep_preflight.py:resolve_binary`（第三处有 zsh 兜底但硬编码目录漏了 volta）。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| `shutil.which` 在 LaunchAgent 里漏判 | 服务进程 PATH ≠ 用户 shell PATH；`~/.zshrc` 补的 PATH 对常驻服务不可见 | 二进制解析不得裸依赖进程 PATH，必须有目录兜底或登录 shell 兜底 |
+| AGENT_BINARIES 映射 3 处手写 | 与 §6/§7 同类：同一语义多处手写必然漂移（qodercli 映射 bug 即由此而来） | 映射与解析收敛到 `herdr/agent_binary.py` 单一事实来源，消费方只 import |
+| 修复"看起来改了"但问题复现 | 第一次修复只覆盖了名字映射这一层，未追问 `which` 本身的适用边界 | 修 bug 时先完整走一遍数据链路（UI 字段 → 判定函数 → 执行环境），确认根因层而不是症状层 |
+
+### 操作规范
+
+1. 任何需要定位 Agent CLI 的代码，一律 `from herdr.agent_binary import resolve_agent_binary`；
+   解析顺序：`shutil.which` → `EXTRA_BIN_DIRS`（`~/.local/bin`、`~/.volta/bin`、`~/.qoder-cn/entry`、homebrew）→ 登录 shell `command -v`。
+2. 新增 Agent 注册入口收敛到 `herdr/agent_binary.py:AGENT_BINARIES`；
+   `herdr/preflight.py` 只维护 `KNOWN_AGENTS`/`AUTH_HINTS`/`VERSION_ARGS`，`deep_preflight.py` 只维护 `AUTH_HINTS`/错误模式。
+3. 给 LaunchAgent 服务写依赖用户环境的功能前，先看 `~/Library/LaunchAgents/com.user.*.plist` 的
+   `EnvironmentVariables.PATH`；需要用户 PATH 的逻辑放代码兜底，不要依赖改 plist。
+4. 排查"服务里不对、终端里正常"类问题时，第一步用
+   `env -i HOME=$HOME PATH=<plist PATH> <python> -c ...` 复现服务环境，再谈代码。
+
+### 验证命令 / 证据
+
+```bash
+/opt/homebrew/bin/pytest tests/test_agent_binary_resolution.py tests/test_console_agent_roster.py
+bash scripts/install-herdr-console.sh
+curl -s "http://127.0.0.1:8765/api/project?id=nexusarchive-54433229" | python3 -c "import json,sys; [print(a['agent'],a['status'],a['binary']) for a in json.load(sys.stdin)['data']['agents']]"
+env -i HOME=$HOME PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin python3 -c "import sys; sys.path.insert(0,'$HOME/herdr'); from herdr.agent_binary import resolve_agent_binary; print(resolve_agent_binary('codex'))"
+```
+
+实际修复证据：`/api/project` 返回六 Agent 全部 `ready`，binary 均为绝对路径
+（codex/claude→`~/.volta/bin`，qodercli→`~/.qoder-cn/entry/qodercn`，agy→`~/.local/bin/agy`）；
+最后一条命令模拟 LaunchAgent 精简 PATH，解析同样成功。

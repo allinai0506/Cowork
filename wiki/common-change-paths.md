@@ -14,13 +14,15 @@
      - 在 `DEFAULT_ALLOWED` 列表中追加该 Agent 名称。
      - 在 `DEFAULT_STAGE_PREFERENCES` 与 `DEFAULT_TASK_TYPE_PREFERENCES` 中配置其推荐阶位。
 2. **轻量探针适配**:
+   - `herdr/agent_binary.py`（agent id -> CLI 映射与二进制解析的单一事实来源，console / preflight / deep_preflight 共用）:
+     - 在 `AGENT_BINARIES` 中注册内部标识到 CLI 名称的映射；安装位置不在服务 PATH 时确认 `EXTRA_BIN_DIRS` 覆盖。
    - `herdr/preflight.py`:
-     - 在 `KNOWN_AGENTS` 与 `AGENT_BINARIES` 中注册 CLI 名称与内部标识映射。
+     - 在 `KNOWN_AGENTS` 中追加该 Agent 名称。
      - 在 `AUTH_HINTS` 中追加其本地凭证文件路径（若有）。
      - 在 `VERSION_ARGS` 中声明版本测试参数（通常为 `["--version"]`）。
 3. **深度沙盒探针适配**:
    - `herdr/deep_preflight.py`:
-     - 更新 `AGENT_BINARIES` 与 `AUTH_HINTS`。
+     - 更新 `AUTH_HINTS`（`AGENT_BINARIES` 已统一到 `herdr/agent_binary.py`，无需在此重复）。
      - 检查其认证失败和配额耗尽的 CLI 标准错误输出，是否需要补充 `TOKEN_PATTERNS` 或 `AUTH_PATTERNS`。
 4. **Worker 启动适配**:
    - `services/herdr-worker.py`:
@@ -37,8 +39,8 @@
 
 Evidence:
 - `herdr/agent_router.py:DEFAULT_ALLOWED`
-- `herdr/preflight.py:AGENT_BINARIES`
-- `herdr/deep_preflight.py:AGENT_BINARIES`
+- `herdr/agent_binary.py:AGENT_BINARIES`
+- `herdr/preflight.py:KNOWN_AGENTS`
 - `services/herdr-worker.py`
 
 ---

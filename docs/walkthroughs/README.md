@@ -16,3 +16,4 @@
 3. **已归档文档**：
    - [`walkthrough.md`](file:///Users/user/herdr/docs/walkthroughs/walkthrough.md)：仓库目录架构重构与最佳实践整理 Walkthrough。
    - [`20260912-console-template-library.md`](file:///Users/user/herdr/docs/walkthroughs/20260912-console-template-library.md)：共事工厂控制台工作流模板库（页面编排）交付与实现决策记录。
+   - [`20260912-agent-binary-resolution.md`](file:///Users/user/herdr/docs/walkthroughs/20260912-agent-binary-resolution.md)：Agent CLI 二进制解析治本修复（执行者阵容误判"未安装"）的决策与权衡记录。

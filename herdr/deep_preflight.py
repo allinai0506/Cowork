@@ -3,28 +3,23 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
+try:
+    from herdr.agent_binary import AGENT_BINARIES, resolve_binary
+except ImportError:  # 直接以脚本方式运行: python3 herdr/deep_preflight.py
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from herdr.agent_binary import AGENT_BINARIES, resolve_binary
+
 HOME = Path.home()
 HERDR_DIR = HOME / "herdr"
 ROOT = HOME / ".herdr-controller"
 PROJECTS = ROOT / "projects.json"
 POOLS = ROOT / "agent-pools.json"
-
-# Internal Factory agent id -> actual local CLI binary.
-AGENT_BINARIES = {
-    "opencode": "opencode",
-    "codex": "codex",
-    "claude": "claude",
-    "qodercli": "qodercn",
-    "agy": "agy",
-    "pi": "pi",
-}
 
 AGENTS = list(AGENT_BINARIES)
 
@@ -207,36 +202,6 @@ def classify_text(text):
     for status, patterns in checks:
         if any(re.search(p, low, re.I) for p in patterns):
             return status
-    return None
-
-
-def resolve_binary(binary_name):
-    direct = shutil.which(binary_name)
-    if direct:
-        return direct
-
-    try:
-        r = subprocess.run(
-            ["/bin/zsh", "-lic", f"command -v {binary_name}"],
-            text=True,
-            capture_output=True,
-            timeout=8,
-        )
-        lines = (r.stdout or "").strip().splitlines()
-        if r.returncode == 0 and lines:
-            candidate = lines[-1].strip()
-            if candidate and Path(candidate).exists():
-                return candidate
-    except Exception:
-        pass
-
-    for p in [
-        HOME / ".local" / "bin" / binary_name,
-        HOME / ".qoder-cn" / "entry" / binary_name,
-    ]:
-        if p.exists() and os.access(p, os.X_OK):
-            return str(p)
-
     return None
 
 

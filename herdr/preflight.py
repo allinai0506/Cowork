@@ -2,10 +2,15 @@
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+try:
+    from herdr.agent_binary import resolve_agent_binary
+except ImportError:  # 直接以脚本方式运行: python3 herdr/preflight.py
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from herdr.agent_binary import resolve_agent_binary
 
 HOME = Path.home()
 ROOT = HOME / ".herdr-controller"
@@ -13,15 +18,6 @@ POOLS = ROOT / "agent-pools.json"
 PROJECTS = ROOT / "projects.json"
 
 KNOWN_AGENTS = ["opencode", "codex", "claude", "qodercli", "agy", "pi"]
-
-AGENT_BINARIES = {
-    "opencode": "opencode",
-    "codex": "codex",
-    "claude": "claude",
-    "qodercli": "qodercn",
-    "agy": "agy",
-    "pi": "pi",
-}
 
 AUTH_HINTS = {
     "codex": [HOME / ".codex" / "auth.json"],
@@ -112,8 +108,7 @@ def inspect(project_id=None):
 
     rows = []
     for agent in allowed:
-        binary_name = AGENT_BINARIES.get(agent, agent)
-        binary = shutil.which(binary_name)
+        binary = resolve_agent_binary(agent)
         auth_state, auth_paths = auth_hint(agent)
 
         if not binary:

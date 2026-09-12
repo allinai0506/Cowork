@@ -8,6 +8,7 @@ HOME=Path.home(); HERDR_ROOT=Path(os.environ.get('HERDR_ROOT', str(HOME/'herdr')
 sys.path.insert(0, str(HERDR_ROOT))
 from herdr import workflow as herdr_workflow
 from herdr import projects as herdr_projects
+from herdr.agent_binary import resolve_agent_binary
 PROJECTS_FILE=ROOT/'projects.json'; WORKFLOWS_FILE=ROOT/'workflows.json'; TASKS_FILE=ROOT/'tasks.json'; POOLS_FILE=ROOT/'agent-pools.json'; SLOTS_FILE=ROOT/'pane-slots.json'; LOG_DIR=ROOT/'logs'
 HOST='127.0.0.1'; PORT=int(os.environ.get('HERDR_CONSOLE_PORT','8765'))
 PRODUCT_NAME='共事工厂'; PRODUCT_TAGLINE='本地 AI 软件工厂'
@@ -103,14 +104,6 @@ def agent_runtime(pane):
     except Exception:return None
 
 def pool(pid):return load_json(POOLS_FILE,{'projects':{}}).get('projects',{}).get(pid,{})
-AGENT_BINARIES = {
-    'opencode': 'opencode',
-    'codex': 'codex',
-    'claude': 'claude',
-    'qodercli': 'qodercn',
-    'agy': 'agy',
-    'pi': 'pi',
-}
 
 AUTH_HINTS = {
     'codex': [HOME / '.codex' / 'auth.json'],
@@ -133,8 +126,7 @@ def preflight(p):
     po=pool(p.get('project_id')); allowed=po.get('allowed_agents',AGENTS); disabled=set(po.get('disabled_agents',[])); loads=agent_loads(p.get('project_id'))
     out=[]
     for a in allowed:
-        bin_name=AGENT_BINARIES.get(a,a)
-        b=shutil.which(bin_name)
+        b=resolve_agent_binary(a)
         hs=AUTH_HINTS.get(a,[])
         if hs:
             auth_state='present' if any(h.exists() for h in hs) else 'missing'

@@ -71,3 +71,16 @@ already advanced the DAG.
   pins card aggregation to `is_node_complete` (this stats-drift class recurred
   for the 2nd time, per lessons-learned discipline #4).
 - Lessons recorded in `docs/lessons/lessons-learned.md` §7.
+
+## [2026-09-12] fix | Agent CLI binary resolution unified into herdr/agent_binary.py
+Console roster / lightweight preflight / deep preflight each hand-rolled the
+agent-id -> CLI mapping and resolved binaries via bare `shutil.which`, which
+misses volta / `~/.local/bin` / `~/.qoder-cn/entry` installs under the
+LaunchAgents' minimal PATH (codex/claude/qodercli/agy shown 未安装 while installed).
+- Added [[preflight-and-health]] §2: resolution order is now
+  `shutil.which` -> `EXTRA_BIN_DIRS` fallback -> login-shell `command -v`.
+- Updated [[common-change-paths]] §2/§3 + [[index]] routing row: new-agent
+  registration now starts at `herdr/agent_binary.py` (single source of truth
+  for `AGENT_BINARIES`); preflight/deep_preflight keep only `AUTH_HINTS`/`VERSION_ARGS`.
+- Lessons recorded in `docs/lessons/lessons-learned.md` §8 (3rd recurrence of
+  the same-semantics-multi-implementation class).
