@@ -201,5 +201,31 @@ class TestTemplateLibraryUI(unittest.TestCase):
         self.assertIn("template:", body)
 
 
+class TestTermTranslation(unittest.TestCase):
+    """用户确认的术语映射：Tab=工作流节点、Pane=智能体工位、Agent=执行者、Task=任务。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.html = load_console().HTML
+
+    def test_confirmed_terms_are_translated(self):
+        for snippet in (
+            ">执行者 / 任务 实时看板<",
+            ">执行者池<",
+            ">常驻智能体工位<",
+            "执行者舰队",
+            ">执行者自检<",
+            ">指定执行者<",
+            "个工作流节点 · ",
+            "个智能体工位",
+            "Workflow / 工作流节点<",
+        ):
+            self.assertIn(snippet, self.html, f"missing translation: {snippet}")
+
+    def test_english_terms_are_gone_from_visible_copy(self):
+        for term in ("Agent ", "Task ", "Pane ", "Tab "):
+            self.assertNotIn(term, self.html, f"untranslated term remains: {term!r}")
+
+
 if __name__ == "__main__":
     unittest.main()

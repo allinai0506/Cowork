@@ -42,3 +42,10 @@
 ## 部署
 
 仓库内 canonical source 改动经 `./scripts/install-herdr-console.sh` 同步至 `~/.herdr-console` 并重启 `com.user.herdr-factory-console` LaunchAgent 后，在 http://127.0.0.1:8765/ 生效。
+
+---
+
+## 追加交付（同日）
+
+1. **`b10b117`**：新需求模板下拉默认预选 `software-development-v1`（原 `populateTemplateSelect` 按字母序重写选项，默认悄悄变成 bidding）。
+2. **术语翻译**：用户确认映射 Tab=工作流节点/阶段、Pane=智能体工位、Agent=执行者、Task=任务，已落实前端全部用户可见文案（约 25 处，RED-first 补 `TestTermTranslation` 断言新旧两侧）。编辑决策：标题与空态用全称（如"常驻智能体工位"），紧凑场景（按钮、行内提示）用短形"工位/节点"；Workflow、Space、`auto`、Router、agent 名称与状态枚举值按用户未列出而保持原样，README 术语约定已同步改写。`auto（Router 自动）` 中的 Router 属组件名未翻译。
