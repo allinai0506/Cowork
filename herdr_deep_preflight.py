@@ -278,9 +278,32 @@ def choose_smoke_command(agent, binary, cwd):
         if re.search(r"\brun\b", help_text):
             return [binary, "run", prompt], "opencode run"
 
-    # qodercn / agy / pi vary by release and packaging. We intentionally do not
-    # guess a real-request flag. Their deep state remains UNKNOWN until we add
-    # an adapter based on their local `--help`.
+    if agent == "qodercli":
+        # Qoder CN explicitly documents -p/--print as non-interactive.
+        # Disable session persistence and all built-in tools for the probe.
+        if "--print" in help_text:
+            return [
+                binary,
+                "--print",
+                "--no-session-persistence",
+                "--tools", "",
+                prompt,
+            ], "qodercn --print"
+
+    if agent == "agy":
+        # AGY explicitly documents -p/--print as non-interactive.
+        # Keep the probe in plan mode and disable slash-command expansion.
+        if "--print" in help_text:
+            return [
+                binary,
+                "--print",
+                "--mode", "plan",
+                "--disable-slash-commands",
+                prompt,
+            ], "agy --print"
+
+    # Pi is currently disabled in this project. Add a safe adapter only after
+    # its current CLI help is reviewed.
     return None, "no safe non-interactive adapter"
 
 
