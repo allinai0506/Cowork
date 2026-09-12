@@ -417,7 +417,7 @@ def start_agent(task_id, agent_kind, pane_id, retries=10, delay=0.5):
 
             if agent_kind == "opencode":
                 cmd += ["--", "--auto"]
-            elif agent_kind in ("qodercli", "claude"):
+            elif agent_kind in ("qodercli", "claude", "agy"):
                 cmd += ["--", "--dangerously-skip-permissions"]
 
             data = run_json(cmd)
