@@ -184,7 +184,7 @@ def save_workflow_config_for(workflow_id, workflow_data):
     return False
 
 
-def register_workflow(workflow_id, project):
+def register_workflow(workflow_id, project, requirement=""):
     data = load_workflows()
     data.setdefault("workflows", {})[workflow_id] = {
         "workflow_id": workflow_id,
@@ -195,7 +195,22 @@ def register_workflow(workflow_id, project):
         "workspace_id": project["workspace_id"],
         "coordinator_pane_id": project["coordinator_pane_id"],
         "workflow_file": project["workflow_file"],
+        "requirement": requirement,
+        "startup_ready": False,
     }
+    save_workflows(data)
+
+
+def mark_workflow_startup_ready(workflow_id, healthy_agents=None, unhealthy_agents=None):
+    data = load_workflows()
+    record = data.setdefault("workflows", {}).get(workflow_id)
+    if not record:
+        raise RuntimeError(f"Workflow registry missing: {workflow_id}")
+    record["startup_ready"] = True
+    if healthy_agents is not None:
+        record["healthy_agents"] = healthy_agents
+    if unhealthy_agents is not None:
+        record["unhealthy_agents"] = unhealthy_agents
     save_workflows(data)
 
 

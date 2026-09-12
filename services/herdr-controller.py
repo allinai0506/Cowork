@@ -381,6 +381,14 @@ def check_workflow_stage_advance(workflow_id):
     if not workflow_cfg:
         return
 
+    workflow_record = project_for_workflow(workflow_id) or {}
+    # New factory starts persist the requirement and keep this gate closed
+    # until Deep Preflight has completed. This prevents the controller from
+    # delivering a stage event before the startup request is ready.
+    if workflow_record.get("startup_ready") is False:
+        print(f"[STARTUP WAIT] workflow={workflow_id} preflight/request not ready")
+        return
+
     if workflow_cfg.get("nodes"):
         # Revoke stale 'notified' locks before computing ready nodes,
         # so that regressed stages can be re-triggered.
@@ -1063,6 +1071,15 @@ Node Agent 策略
 
         try:
             while True:
+                startup_record = project_for_workflow(workflow_id) or {}
+                if startup_record.get("startup_ready") is False:
+                    print(
+                        f"[STARTUP WAIT] workflow={workflow_id} "
+                        "queued event held until request is ready"
+                    )
+                    time.sleep(1)
+                    continue
+
                 status = coordinator_status(workflow_id)
 
                 if status in ("idle", "done"):
@@ -1076,6 +1093,9 @@ base_branch: {base_branch}
 completed_node: {stage}
 next_node: {next_stage} ({node_label})
 node_type: {node_type}
+
+用户需求：
+{project_ctx.get('requirement', '').strip() or '（未提供；请停止并等待需求正文）'}
 
 当前工作流前置依赖已全部完成。
 

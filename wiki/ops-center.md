@@ -1,0 +1,91 @@
+# Agent Operations Center
+
+> `herdr-task ops-center` 为多 Agent 并行运行提供分层运维视图。它读取任务注册表并按需探测 Pane 对应 Agent；它是观测聚合层，不负责推进状态机。
+
+## 1. 四层视图
+
+`FACT` 输出按以下层次组织：
+
+- `boss`: 工作中的 Agent 数、运行中的 Workflow 数、阻塞 Workflow 和待处理异常数。
+- `workflow_cards`: 每个 Workflow 的节点卡片，包含 active/completed/blocked/failed 计数、运行时长和待下钻任务。
+- `agent_fleet`: 已知 Agent 与任务中出现的 Agent，包含健康状态、当前任务、负载、运行时长、最后结果和运行时状态。
+- `anomalies`: 只列异常，并为每种异常提供建议操作与 `herdr`/`herdr-task` 命令链接。
+
+默认返回卡片与摘要；`--include-tasks` 才返回完整任务摘要和状态轨迹，避免首页展开全部 Pane 细节。
+
+Evidence:
+- `bin/herdr-task#_ops_center_payload`
+- `bin/herdr-task#_build_boss_summary`
+- `bin/herdr-task#_build_workflow_cards`
+- `bin/herdr-task#_build_agent_fleet`
+- `bin/herdr-task#_build_anomalies`
+
+## 2. 状态、时长与流动
+
+`FACT` 任务摘要同时提供：
+
+- `status`: 任务注册表状态。
+- `runtime_status`: Pane 中 Agent 的运行时状态；探测失败时为 `null`。
+- `last_activity_at`: 最后活动时间，并派生为 `last_event`。
+- `started_at`、`elapsed`、`elapsed_bucket`: 运行时长及 `normal`（不超过 10 分钟）、`slow`（不超过 30 分钟）、`stuck`（超过 30 分钟）分桶。
+- `status_trajectory`: 仅在 `--include-tasks` 下输出，由 `status_history` 的状态变更序列归一化得到。
+
+因此 `idle` 不会被单独解释为“完成”：当任务仍在运行、Pane 为 idle/unknown 或运行时探针不可用时，Agent Fleet 会标记为 `STALE`，异常中心也会给出 `BLOCKED` 或 `CONTROLLER_RECOVERY` 信号。
+
+Evidence:
+- `bin/herdr-task#_task_summaries_for_ops`
+- `bin/herdr-task#_task_status_trajectory`
+- `bin/herdr-task#_task_healthy_status`
+- `tests/test_herdr_task_ops_center.py#test_ops_center_marks_stale_agent`
+
+## 3. 异常契约
+
+`FACT` 当前识别 `BLOCKED`、`FAILED`、`AUTH_REQUIRED`、`TOKEN_EXHAUSTED`、`TRUST_REQUIRED`、`UPDATE_BLOCKED`、`ANCHOR_MISSING`、`PANE_NOT_FOUND` 和 `CONTROLLER_RECOVERY`。每条异常至少带有 Workflow、Task、Agent、Node、最后事件信息；若有 Pane，还提供打开 Pane 和日志的命令。
+
+`INFERENCE` 这些命令链接是 Dashboard 后续交互按钮的后端契约草案；当前 CLI 只输出建议动作，不会自动执行重试、换 Agent、禁用 Agent 或修复。
+
+Evidence:
+- `bin/herdr-task#ANOMALY_ACTIONS`
+- `bin/herdr-task#_classify_task_anomalies`
+- `bin/herdr-task#_suggested_actions_for_anomaly`
+- `tests/test_herdr_task_ops_center.py#test_ops_center_detects_anomalies`
+
+## 4. 前端部署边界
+
+`FACT` Console 前端源代码位于 `console/herdr_factory_console.py`，LaunchAgent 运行的是 `~/.herdr-console/herdr_factory_console.py` 部署副本。两者通过 `scripts/install-herdr-console.sh` 同步；脚本默认同步后重启 `com.user.herdr-factory-console`，`--no-restart` 可用于只更新文件。
+
+Evidence:
+- `console/README.md`
+- `scripts/install-herdr-console.sh`
+- `docs/operations/service-management.md`
+
+## 5. Workflow 启动反馈
+
+`POST /api/run` 使用异步 Job 协议：接口先返回 `202` 和 `job_id`，控制台随后轮询
+`GET /api/run/status?id=<job_id>`。这样不会因为深度预检、Agent 路由或 Pane
+装配超过 HTTP 超时而误报失败；后台 `herdr-factory run` 的允许时长为 600 秒。
+
+- 成功：关闭“新建需求”窗口，刷新驾驶舱并显示 Workflow 标识。
+- 失败：保留窗口，显示后端错误，恢复按钮并允许重试。
+- 服务端同步校验失败仍返回 `500`，同时记录请求路径和异常文本，便于定位。
+
+Evidence:
+- `console/herdr_factory_console.py#start_workflow_job`
+- `console/herdr_factory_console.py#workflow_job_status`
+- `tests/test_console_run_job.py`
+
+## 6. 启动状态同步
+
+新 Workflow 的启动状态由 Registry 统一承载：`requirement` 保存需求正文，
+`startup_ready=false` 表示仍在 Deep Preflight，完成预检并通过固定 Agent 校验后才写入
+`startup_ready=true`。Controller 只对已打开门闩的 Workflow 发送首个节点事件，并把 Registry
+中的需求正文附带到总指挥消息中。这样不会出现“阶段已通知、总指挥却没有需求”的半启动状态。
+
+`herdr-factory` 不再直接向总指挥 Pane 注入启动消息，避免它与 Controller 同时写入同一个 Pane。
+
+Evidence:
+- `herdr/projects.py#register_workflow`
+- `herdr/projects.py#mark_workflow_startup_ready`
+- `bin/herdr-factory#start_workflow`
+- `services/herdr-controller.py#check_workflow_stage_advance`
+- `tests/test_workflow_start_sync.py`

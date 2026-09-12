@@ -68,6 +68,7 @@ graph TD
 - **事件循环**：作为后台 LaunchAgent 运行，监控 `tasks.json`。
 - **任务推进**：当某节点下任务完成（状态进入 `cleaned` 或 `completed`）时，结合 DAG 依赖动态推进至下一个节点。
 - **协调器通知**：向 Coordinator Pane (`wX:p1`) 注入下一步的派发指令。
+- **启动请求同步**：新 Workflow 的需求正文先写入 Workflow Registry；Deep Preflight 完成并打开 `startup_ready` 后，Controller 从 Registry 读取正文并负责首次节点通知，避免阶段事件与需求消息竞态。
 - **全流程终结**：所有节点完成时，触发系统级完成事件并唤醒 Notifier。
 
 ### 3.3 路由与负载均衡器 (`herdr/agent_router.py`)

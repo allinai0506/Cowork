@@ -18,6 +18,14 @@ Created initial LLM Wiki directly derived from active repository code inspection
 - Documented non-destructive lightweight and deep sandbox health probes in [[preflight-and-health]].
 - Codified developer & agent guide for safely making frequent codebase modifications in [[common-change-paths]].
 
+## [2026-09-12] add | Agent Operations Center knowledge
+- Added [[ops-center]]: documented the four dashboard layers, runtime/task state distinction, duration buckets, trajectory output, and anomaly action contract.
+- Updated [[index]]: indexed the new operations view for future code navigation.
+
+## [2026-09-12] move | Console source into repository
+- Added the canonical Console source under `console/` and a repeatable `scripts/install-herdr-console.sh` deployment path.
+- Updated service operations documentation and [[ops-center]] to distinguish repository source from the LaunchAgent deployment copy.
+
 ## [2026-09-12] fix | Workflow deadlock permanent engineering fix
 
 Root-cause analysis identified three compounding failure modes causing DAG advance to permanently stall:

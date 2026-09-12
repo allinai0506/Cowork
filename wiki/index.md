@@ -19,6 +19,7 @@
 7. **[[agent-routing-and-pools]] (异构 Agent 路由与并发锁)**: 掌握 Node 级策略解析、优先级评分、300s TTL 预占锁与负载均衡算法。
 8. **[[preflight-and-health]] (体检与沙盒深层探针)**: 掌握轻量与深度沙盒探针如何保证无副作用检测 Agent 额度与凭证。
 9. **[[common-change-paths]] (高频开发与代码修改指南)**: 针对常见业务与工程需求（如添加新 Agent、修改状态机、重载服务），指导您需要同时关注哪些文件与测试。
+10. **[[ops-center]] (Agent 运维驾驶舱)**: 了解 Dashboard V2 的老板视角、Workflow 卡片、Agent Fleet、异常中心与下钻数据契约。
 
 ---
 
@@ -55,5 +56,6 @@
 
 ### 3.3 开发者与 Agent 实操层
 - **[[common-change-paths]]**: 常见业务修改的完整关联文件、注意陷阱与验证命令
+- **[[ops-center]]**: 分层 Agent 运维视图、运行时/任务状态对照、时长与异常聚合
 - **[[WIKI]]**: Wiki 维护规范、证据契约与更新触发条件
 - **[[log]]**: 结构化演进记录与知识修订历史

@@ -24,6 +24,7 @@ try:
         project_by_root,
         project_for_workflow,
         register_workflow,
+        mark_workflow_startup_ready,
         workflow_config_for,
     )
     from herdr.workflow import list_templates, load_template, get_ready_nodes
@@ -38,6 +39,7 @@ except ImportError:
         project_by_root,
         project_for_workflow,
         register_workflow,
+        mark_workflow_startup_ready,
         workflow_config_for,
     )
     from herdr_workflow import list_templates, load_template, get_ready_nodes
@@ -273,7 +275,7 @@ def start_workflow(
             f"{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         )
 
-    register_workflow(workflow_id, project)
+    register_workflow(workflow_id, project, requirement=requirement)
 
     ensure_pool_for_project(project["project_id"])
     healthy_agents, unhealthy_agents = run_workflow_preflight(
@@ -289,6 +291,11 @@ def start_workflow(
             )
 
     set_workflow_agent_override(workflow_id, agent_override)
+    mark_workflow_startup_ready(
+        workflow_id,
+        healthy_agents=healthy_agents,
+        unhealthy_agents=unhealthy_agents,
+    )
 
     wf_cfg = workflow_config_for(workflow_id) or {}
     nodes = wf_cfg.get("nodes", [])
@@ -340,25 +347,10 @@ workflow_config: {project['workflow_file']}
 13. 当前 Workflow 已在启动前执行 Deep Preflight；Router 只能从该 Workflow 的 healthy_agents 中选择 Agent。
 """.strip()
 
-    coordinator = project["coordinator_pane_id"]
-    r = run(
-        [
-            "herdr",
-            "agent",
-            "prompt",
-            coordinator,
-            prompt,
-        ],
-        check=False,
-    )
-
-    if r.returncode != 0:
-        print(r.stderr.strip() or r.stdout.strip())
-        return None
-
     print(f"PROJECT={project['project_name']}")
     print(f"PROJECT_ROOT={project['project_root']}")
     print(f"WORKSPACE_ID={project['workspace_id']}")
+    coordinator = project["coordinator_pane_id"]
     print(f"COORDINATOR_PANE={coordinator}")
     print(f"WORKFLOW_ID={workflow_id}")
     return workflow_id

@@ -57,18 +57,24 @@ herdr-task launch \
 > 注：`--stage` 可作为 `--node` 的兼容别名。
 
 ### 2.2 `herdr-task node-status`
-查询 Workflow 中所有节点的 DAG 依赖、Tab/Anchor 映射及关联任务。
+查询 Workflow 指定节点的任务状态与 DAG 依赖摘要。
 ```bash
-herdr-task node-status --workflow-id <workflow_id>
+herdr-task node-status <workflow_id> <node_id>
 ```
 
-### 2.3 `herdr-task ensure-runtime`
+### 2.3 `herdr-task ops-center`
+输出运维驾驶舱聚合视图：老板视角、Workflow 卡片、Agent Fleet、异常清单与任务时长摘要。
+```bash
+herdr-task ops-center [--workflow-id <workflow_id>] [--include-tasks]
+```
+
+### 2.4 `herdr-task ensure-runtime`
 对目标节点执行 Tab / Anchor Pane 的探活与自动自愈。
 ```bash
 herdr-task ensure-runtime --workflow-id <workflow_id> --node <node_id>
 ```
 
-### 2.4 `herdr-task status` / `list` / `cleanup`
+### 2.5 `herdr-task status` / `list` / `cleanup`
 ```bash
 # 查看任务状态
 herdr-task status <task_id>

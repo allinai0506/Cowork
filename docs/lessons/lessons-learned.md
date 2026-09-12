@@ -193,3 +193,50 @@ pytest tests/ -v --tb=short
 - `wiki/task-lifecycle.md` — 任务生命周期状态机
 
 ---
+
+## 5. Workflow 启动竞态：阶段事件先到、需求正文丢失
+
+### 问题背景
+
+Factory Console 启动 Workflow 时，`herdr-factory` 先写入 Workflow Registry；Controller
+周期扫描到新 Workflow 后立即发送 `start → requirements`，而需求正文仍只存在于
+`herdr-factory` 的进程参数中，尚未进入 Registry 或总指挥 Pane。Deep Preflight 完成后，
+原实现再尝试直接向同一个总指挥 Pane 注入需求，造成 Controller 与 Factory 双写同一 Pane
+的竞态。实际证据是 Workflow `wf-nexusarchive-54433229-20260912-194638` 已进入
+`requirements`、Task 数为 0，总指挥 Pane 处于 working 但不知道具体需求。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 需求正文只存在于启动进程参数 | Workflow ID、阶段状态和用户需求必须属于同一个持久化启动记录 | Registry 必须保存 `requirement` |
+| 注册即触发 Controller 推进 | “已注册”不等于“可派发” | 用 `startup_ready` 门闩隔离注册、预检和首次派发 |
+| Factory 与 Controller 同时写总指挥 Pane | 同一会话不能有两个未协调的消息生产者 | Controller 作为首次节点消息的唯一投递者 |
+| 队列事件可能早于状态修复进入内存队列 | 只在入队处检查状态不够 | 队列消费者也必须重新检查启动门闩 |
+| Dashboard 保留旧 Workflow ID | 当前选中对象和最新 Job 对象可能分离 | 启动成功后必须用 Job 返回的 Workflow ID 更新前端上下文 |
+
+### 操作规范
+
+1. 启动时先写入 `requirement` 和 `startup_ready=false`。
+2. Deep Preflight、固定 Agent 校验和策略写入全部完成后，才设置 `startup_ready=true`。
+3. Controller 只消费 `startup_ready=true` 的启动记录，并从 Registry 组装总指挥消息。
+4. 队列消费者再次检查启动门闩；旧队列事件不能绕过启动协议。
+5. 发生中断恢复时，优先检查 Workflow Registry、`stage-state.json`、Task Registry 和
+   总指挥 Pane 四层状态，不要只看单个 HTTP 返回码。
+
+### 验证命令 / 证据
+
+```bash
+python3 -m unittest tests/test_workflow_start_sync.py
+python3 -m unittest discover -s tests -p 'test_*.py'
+./bin/herdr-task stage-status wf-nexusarchive-54433229-20260912-194638 requirements
+herdr agent get wA:p1
+herdr pane read wA:p1 --source visible
+```
+
+实际修复证据：Controller 日志出现 `STARTUP WAIT`，预检完成后 Registry 的
+`startup_ready` 变为 `true`；清理当前 Workflow 的 requirements 锁并重新评估后，
+`wA:p1` 标题变为“零号病人 Bug 责任链追溯脚本需求分析”。回归测试覆盖 Registry
+需求持久化、启动门闩、Factory 不再直接投递和队列消费者二次检查。
+
+---

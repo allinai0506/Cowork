@@ -46,6 +46,8 @@
   - [`pane_pool.py`](file:///Users/user/herdr/herdr/pane_pool.py): Herdr Pane 槽位管理。
   - [`preflight.py`](file:///Users/user/herdr/herdr/preflight.py) / [`deep_preflight.py`](file:///Users/user/herdr/herdr/deep_preflight.py): 探针实现。
 - **`workflow_templates/`**: 内置 YAML 工作流模板。
+- **`console/`**: Factory Console 的仓库内 canonical source；通过 `scripts/install-herdr-console.sh` 部署到 `~/.herdr-console`。
+- **`scripts/install-herdr-console.sh`**: 同步 Console 前端并按需重启 LaunchAgent。
 - **`tests/`**: [`test_workflow_engine.py`](file:///Users/user/herdr/tests/test_workflow_engine.py) 核心算法与引擎测试。
 
 ---

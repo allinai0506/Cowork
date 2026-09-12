@@ -13,7 +13,9 @@
 | `com.user.herdr-controller` | `/Users/user/herdr/services/herdr-controller.py` | 任务状态监控、DAG 依赖推进、协调器事件分发。 |
 | `com.user.herdr-notifier` | `/Users/user/herdr/services/herdr-notifier.py` | 任务与工作流完成时的 macOS 原生系统通知推送。 |
 | `com.user.herdr-sentinel` | `/Users/user/herdr/services/herdr-sentinel.py` | 工位生命周期监控与空闲/僵死任务守护巡检。 |
-| `com.user.herdr-factory-console` | `/Users/user/.herdr-console/herdr_factory_console.py` | 可视化 Web 控制台服务（默认端口 `8765`）。 |
+| `com.user.herdr-factory-console` | 仓库源：`console/herdr_factory_console.py`；部署副本：`/Users/user/.herdr-console/herdr_factory_console.py` | 可视化 Web 控制台服务（默认端口 `8765`）。 |
+
+Console 使用 Python 标准库 `http.server` 提供 HTTP 服务，页面是内嵌 HTML/CSS/原生 JavaScript，没有独立 Node/npm 构建产物。Dashboard API 由 `/api/ops-center` 暴露；Workflow 启动通过异步 `POST /api/run` + `GET /api/run/status` 完成，具体契约见 [`console/README.md`](../../console/README.md) 与 [`wiki/ops-center.md`](../../wiki/ops-center.md)。
 
 ---
 
@@ -33,6 +35,9 @@ launchctl list | grep herdr
 
 ### 2.2 重启服务（热更新代码后生效）
 ```bash
+# 从仓库同步并重启 Console（推荐）
+./scripts/install-herdr-console.sh
+
 # 重启 Controller 调度控制器
 launchctl kickstart -k gui/$(id -u)/com.user.herdr-controller
 
