@@ -280,25 +280,22 @@ def choose_smoke_command(agent, binary, cwd):
 
     if agent == "qodercli":
         # Qoder CN explicitly documents -p/--print as non-interactive.
-        # Disable session persistence and all built-in tools for the probe.
+        # Keep the probe minimal; extra tool flags can trigger config/skill side effects.
         if "--print" in help_text:
             return [
                 binary,
                 "--print",
                 "--no-session-persistence",
-                "--tools", "",
                 prompt,
             ], "qodercn --print"
 
     if agent == "agy":
         # AGY explicitly documents -p/--print as non-interactive.
-        # Keep the probe in plan mode and disable slash-command expansion.
+        # Minimal print mode is sufficient for auth/quota/readiness validation.
         if "--print" in help_text:
             return [
                 binary,
                 "--print",
-                "--mode", "plan",
-                "--disable-slash-commands",
                 prompt,
             ], "agy --print"
 
