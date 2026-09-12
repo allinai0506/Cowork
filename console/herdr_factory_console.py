@@ -656,7 +656,7 @@ async function populateTemplateSelect(){
     const ts=await fetchTemplates();
     const sel=document.getElementById('newTemplate');
     if(!sel||!ts.length)return;
-    sel.innerHTML=ts.map(t=>`<option value="${esc(t.id)}">${esc(t.id)} · ${esc(t.label||'')}（${t.node_count} 节点）</option>`).join('')
+    sel.innerHTML=ts.map(t=>`<option value="${esc(t.id)}"${t.id==='software-development-v1'?' selected':''}>${esc(t.id)} · ${esc(t.label||'')}（${t.node_count} 节点）</option>`).join('')
   }catch(e){}
 }
 function showOpsCenter(){

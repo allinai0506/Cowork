@@ -190,6 +190,11 @@ class TestTemplateLibraryUI(unittest.TestCase):
         body = self.function_body("showNewWorkflow")
         self.assertIn("newTemplate", body)
 
+    def test_template_select_defaults_to_software_development(self):
+        body = self.function_body("populateTemplateSelect")
+        self.assertIn("software-development-v1", body)
+        self.assertIn("selected", body)
+
     def test_submit_new_workflow_sends_template(self):
         body = self.function_body("submitNewWorkflowAsync")
         self.assertIn("newTemplate", body)
