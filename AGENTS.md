@@ -9,6 +9,7 @@
 
 - **知识层主索引**: [`wiki/index.md`](file:///Users/user/herdr/wiki/index.md) — 真实代码沉淀的知识图谱与意图寻路主入口。
 - **Wiki 治理规范**: [`wiki/WIKI.md`](file:///Users/user/herdr/wiki/WIKI.md) 与 [`wiki/log.md`](file:///Users/user/herdr/wiki/log.md) — 当变更涉及架构、模型、状态机、DAG 算法、自愈逻辑或路由时，必须同步更新对应 Wiki。
+- **工程教训知识库**: [`docs/lessons/lessons-learned.md`](file:///Users/user/herdr/docs/lessons/lessons-learned.md) — 跨模块可复用工程教训（四段式）。使用 `.agents/skills/knowledge-capture/` 技能在收尾时沉淀。
 
 ---
 
@@ -53,3 +54,18 @@
 
 - **作业规范与红线约束**: 必须严格遵循 [`RULES.md`](file:///Users/user/herdr/RULES.md) 执行开发。
 - **操作入口与环境避坑**: 常用命令与运维陷阱请直接参考 [`CLAUDE.md`](file:///Users/user/herdr/CLAUDE.md)。
+
+---
+
+## 4. 任务收尾 SOP（合并 PR 前的强制前置步骤）
+
+### 收尾第 1 步：知识沉淀（在合并 PR 之前）
+
+- 检查本次 session 是否排查了复杂 bug、解决了同类复发问题、或踩了技术坑；
+- 凡符合通用教训的，按四段式规范追加到 [`docs/lessons/lessons-learned.md`](file:///Users/user/herdr/docs/lessons/lessons-learned.md)；
+- 对 Agent 说 **"沉淀一下本次 session 的知识"** 或 **"归档教训"**，Agent 自动执行 `.agents/skills/knowledge-capture/` 流程；
+- 将知识更新与代码**一同提交到同一个 PR**（禁止事后单独补提 PR）。
+
+### 收尾第 2 步：验收清单
+
+按 `RULES.md §3` 逐项核对后，方可合并 PR。
