@@ -15,3 +15,4 @@
    - **验证与测试数据**：提供真实的命令执行结果、测试用例通过率及日志截图。
 3. **已归档文档**：
    - [`walkthrough.md`](file:///Users/user/herdr/docs/walkthroughs/walkthrough.md)：仓库目录架构重构与最佳实践整理 Walkthrough。
+   - [`20260912-console-template-library.md`](file:///Users/user/herdr/docs/walkthroughs/20260912-console-template-library.md)：共事工厂控制台工作流模板库（页面编排）交付与实现决策记录。

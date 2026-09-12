@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-import json, os, shutil, subprocess, threading, time, urllib.parse, uuid
+import json, os, re, shutil, subprocess, sys, threading, time, urllib.parse, uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HOME=Path.home(); HERDR_ROOT=Path(os.environ.get('HERDR_ROOT', str(HOME/'herdr'))); ROOT=HOME/'.herdr-controller'
+sys.path.insert(0, str(HERDR_ROOT))
+from herdr import workflow as herdr_workflow
 PROJECTS_FILE=ROOT/'projects.json'; WORKFLOWS_FILE=ROOT/'workflows.json'; TASKS_FILE=ROOT/'tasks.json'; POOLS_FILE=ROOT/'agent-pools.json'; SLOTS_FILE=ROOT/'pane-slots.json'; LOG_DIR=ROOT/'logs'
 HOST='127.0.0.1'; PORT=int(os.environ.get('HERDR_CONSOLE_PORT','8765'))
 PRODUCT_NAME='共事工厂'; PRODUCT_TAGLINE='本地 AI 软件工厂'
@@ -313,27 +315,67 @@ def read_pane(pid):
     if r.returncode!=0:raise RuntimeError(r.stderr.strip() or r.stdout.strip())
     return r.stdout
 
-def run_workflow(root,req,agent='auto'):
-    r=run([str(HERDR_ROOT/'bin'/'herdr-factory'),'run','--project',root,'--agent',agent or 'auto',req],600)
+def run_workflow(root,req,agent='auto',template='software-development-v1'):
+    r=run([str(HERDR_ROOT/'bin'/'herdr-factory'),'run','--project',root,'--agent',agent or 'auto','--template',template or 'software-development-v1',req],600)
     if r.returncode!=0:raise RuntimeError(r.stderr.strip() or r.stdout.strip())
     return r.stdout.strip()
 
-def _run_workflow_job(job_id,root,req,agent):
+TEMPLATE_NAME_RE=re.compile(r'^[a-z0-9][a-z0-9_-]{0,63}$')
+
+def _is_builtin_path(path):
+    return Path(path).resolve().parent==herdr_workflow.BUNDLED_TEMPLATES_DIR.resolve()
+
+def templates_summary():
+    out=[]
+    for name,info in sorted(herdr_workflow.list_templates().items()):
+        out.append({'id':name,**info,'is_builtin':_is_builtin_path(info['path'])})
+    return {'templates':out}
+
+def template_detail(tid):
+    info=herdr_workflow.list_templates().get(tid)
+    if not info:raise RuntimeError('模板不存在: '+tid)
+    wf=herdr_workflow.load_template(tid)
+    nodes=[{'id':n.get('id'),'label':n.get('label') or n.get('id'),'node_type':n.get('node_type','agent'),'depends_on':n.get('depends_on',[]),'purpose':n.get('purpose','')} for n in wf.get('nodes',[])]
+    return {'template':{'id':tid,**info},'nodes':nodes,'is_builtin':_is_builtin_path(info['path']),'yaml':Path(info['path']).read_text(encoding='utf-8')}
+
+def save_template(name,content):
+    name=(name or '').strip()
+    if not TEMPLATE_NAME_RE.match(name):raise RuntimeError('模板名只能用小写字母/数字/-/_，且以字母或数字开头')
+    info=herdr_workflow.list_templates().get(name)
+    if info and _is_builtin_path(info['path']):raise RuntimeError('内置模板只读，请换一个名字保存为自定义模板')
+    import yaml
+    text=(content or '').replace('\r\n','\n')
+    if not text.strip():raise RuntimeError('模板内容不能为空')
+    try:data=yaml.safe_load(text)
+    except yaml.YAMLError as e:raise RuntimeError('YAML 解析失败:\n'+str(e))
+    if not isinstance(data,dict):raise RuntimeError('模板顶层必须是 YAML 映射')
+    if data.get('name') and data.get('name')!=name:raise RuntimeError(f"YAML 中的 name '{data.get('name')}' 与模板名 '{name}' 不一致")
+    nodes=data.get('nodes')
+    if not isinstance(nodes,list) or not nodes:raise RuntimeError('模板必须包含非空 nodes 列表')
+    for n in nodes:
+        if not isinstance(n,dict) or not n.get('id'):raise RuntimeError('每个节点都必须是包含 id 的映射')
+    try:herdr_workflow.validate_workflow_dag(nodes)
+    except ValueError as e:raise RuntimeError(str(e))
+    path=herdr_workflow.USER_TEMPLATES_DIR/f'{name}.yaml'; path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text(text,encoding='utf-8')
+    return {'name':name,'path':str(path),'node_count':len(nodes)}
+
+def _run_workflow_job(job_id,root,req,agent,template):
     try:
-        output=run_workflow(root,req,agent)
+        output=run_workflow(root,req,agent,template)
         with RUN_JOBS_LOCK:
             RUN_JOBS[job_id].update({'status':'succeeded','output':output,'finished_at':time.time()})
     except Exception as e:
         with RUN_JOBS_LOCK:
             RUN_JOBS[job_id].update({'status':'failed','error':str(e),'finished_at':time.time()})
 
-def start_workflow_job(root,req,agent='auto'):
+def start_workflow_job(root,req,agent='auto',template='software-development-v1'):
     if not root or not req:
         raise RuntimeError('项目目录和自然语言需求不能为空')
     job_id=uuid.uuid4().hex[:12]
     with RUN_JOBS_LOCK:
         RUN_JOBS[job_id]={'job_id':job_id,'status':'running','started_at':time.time()}
-    threading.Thread(target=_run_workflow_job,args=(job_id,root,req,agent),daemon=True).start()
+    threading.Thread(target=_run_workflow_job,args=(job_id,root,req,agent,template),daemon=True).start()
     return RUN_JOBS[job_id].copy()
 
 def workflow_job_status(job_id):
@@ -396,7 +438,7 @@ def tail_log(kind='controller',n=180):
 
 HTML_TEMPLATE='''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PRODUCT_NAME__</title><style>
 :root{--bg:#0b0f14;--panel:#121821;--card:#17202b;--line:#293342;--text:#edf2f7;--muted:#8fa0b5;--accent:#67a4ff;--good:#42c58a;--warn:#f3b950;--bad:#f36b6b}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif}button,input,select,textarea{font:inherit}button{cursor:pointer}.shell{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:100vh}.sidebar{border-right:1px solid var(--line);background:#0f141b;padding:18px;position:sticky;top:0;height:100vh;overflow:auto}.brand{font-size:20px;font-weight:750}.sub{color:var(--muted);font-size:12px;margin:4px 0 20px}.project{width:100%;text-align:left;background:transparent;border:1px solid var(--line);color:var(--text);border-radius:12px;padding:12px;margin-bottom:8px}.project.active{border-color:var(--accent);background:#14243a}.project small{display:block;color:var(--muted);margin-top:4px}.main{padding:22px;min-width:0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px}.title{font-size:22px;font-weight:760}.muted{color:var(--muted)}.actions{display:flex;gap:8px;flex-wrap:wrap}.btn{border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:10px;padding:9px 12px}.btn.primary{background:var(--accent);color:#06111f;border-color:var(--accent);font-weight:700}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:16px}.metric,.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px}.metric{padding:14px}.metric b{font-size:22px;display:block}.metric span{font-size:12px;color:var(--muted)}.stages{display:grid;grid-template-columns:repeat(6,minmax(130px,1fr));gap:10px;overflow:auto;margin-bottom:16px}.stage{min-width:130px;padding:13px;background:var(--panel);border:1px solid var(--line);border-radius:14px}.stage strong{display:block;margin-bottom:8px}.badge{font-size:12px;border-radius:999px;padding:3px 8px;display:inline-block;border:1px solid var(--line)}.badge.cleaned{color:var(--good)}.badge.working,.badge.finalizing{color:var(--warn)}.badge.failed,.badge.blocked{color:var(--bad)}.badge.waiting{color:var(--muted)}.grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(280px,.8fr);gap:14px}.panel{overflow:hidden}.panel h3{font-size:14px;margin:0;padding:13px 15px;border-bottom:1px solid var(--line)}.task{padding:13px 15px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center}.task-name{font-weight:650}.task-id{color:#6f8197;font-size:11px;margin-top:3px}.task-meta{color:var(--muted);font-size:12px;margin-top:4px}.task-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.mini{padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:#101720;color:var(--text);font-size:12px}.agent-row,.slot-row,.alert-row{padding:11px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:center}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:7px;background:var(--muted)}.dot.ready{background:var(--good)}.dot.working{background:var(--warn)}.dot.disabled,.dot.failed{background:var(--bad)}.section-gap{margin-top:14px}.empty{padding:18px;color:var(--muted);font-size:13px}pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5}.modal{position:fixed;inset:0;background:rgba(0,0,0,.58);display:none;align-items:center;justify-content:center;padding:20px;z-index:50}.modal.open{display:flex}.modal-card{width:min(920px,100%);max-height:86vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:16px}.modal-head{display:flex;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}.modal-body{padding:16px}.close{background:transparent;color:var(--text);border:0;font-size:22px}.form{display:grid;gap:10px}.form label{font-size:12px;color:var(--muted)}.form input,.form select,.form textarea{width:100%;background:#0d131a;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px}.form textarea{min-height:120px}.toast{position:fixed;right:18px;bottom:18px;background:#111923;border:1px solid var(--line);padding:12px 14px;border-radius:12px;display:none;max-width:420px;z-index:60}.toast.show{display:block}.danger-text{color:var(--bad)}.good-text{color:var(--good)}@media(max-width:1000px){.shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}.projects{display:flex;gap:8px;overflow:auto}.project{min-width:180px}.grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}}
-</style></head><body><div class="shell"><aside class="sidebar"><div class="brand">__PRODUCT_NAME__</div><div class="sub">__PRODUCT_TAGLINE__ · 控制台</div><div id="projects" class="projects"></div><button class="btn" style="width:100%;margin-top:10px" onclick="refreshAll()">刷新</button><button class="btn" style="width:100%;margin-top:8px" onclick="openHerdr()">打开 Herdr</button></aside><main class="main"><div class="top"><div><div class="title" id="projectTitle">选择项目</div><div class="muted" id="workflowTitle">—</div></div><div class="actions"><button class="btn primary factory-action" onclick="showNewWorkflow()">＋ 新需求</button><button class="btn factory-action" onclick="runPreflight()">Agent 自检</button><button class="btn factory-action" onclick="showAgentOverride()">指定 Agent</button><button class="btn factory-action" onclick="createCandidate()">创建候选分支</button><button class="btn factory-action" onclick="advanceStage()">进入下一阶段</button><button class="btn factory-action" onclick="showLogs()">查看日志</button></div></div><div class="metrics"><div class="metric"><b id="mProjects">0</b><span>Herdr 空间</span></div><div class="metric"><b id="mWorkflows">0</b><span>活跃 Workflow</span></div><div class="metric"><b id="mAgents">0</b><span>活跃 Agent</span></div><div class="metric"><b id="mAlerts">0</b><span>需要关注</span></div></div><div id="stages" class="stages"></div><div class="grid"><section class="panel"><h3>Agent / Task 实时看板</h3><div id="tasks"></div></section><section><div class="panel"><h3>Agent 池</h3><div id="agents"></div></div><div class="panel section-gap"><h3>常驻 Pane</h3><div id="slots"></div></div><div class="panel section-gap"><h3>告警中心</h3><div id="alerts"></div></div></section></div></main></div><div id="modal" class="modal"><div class="modal-card"><div class="modal-head"><strong id="modalTitle">详情</strong><button class="close" onclick="closeModal()">×</button></div><div id="modalBody" class="modal-body"></div></div></div><div id="toast" class="toast"></div><script>
+</style></head><body><div class="shell"><aside class="sidebar"><div class="brand">__PRODUCT_NAME__</div><div class="sub">__PRODUCT_TAGLINE__ · 控制台</div><div id="projects" class="projects"></div><button class="btn" style="width:100%;margin-top:10px" onclick="refreshAll()">刷新</button><button class="btn" style="width:100%;margin-top:8px" onclick="openHerdr()">打开 Herdr</button></aside><main class="main"><div class="top"><div><div class="title" id="projectTitle">选择项目</div><div class="muted" id="workflowTitle">—</div></div><div class="actions"><button class="btn primary factory-action" onclick="showNewWorkflow()">＋ 新需求</button><button class="btn factory-action" onclick="showTemplateLibrary()">模板库</button><button class="btn factory-action" onclick="runPreflight()">Agent 自检</button><button class="btn factory-action" onclick="showAgentOverride()">指定 Agent</button><button class="btn factory-action" onclick="createCandidate()">创建候选分支</button><button class="btn factory-action" onclick="advanceStage()">进入下一阶段</button><button class="btn factory-action" onclick="showLogs()">查看日志</button></div></div><div class="metrics"><div class="metric"><b id="mProjects">0</b><span>Herdr 空间</span></div><div class="metric"><b id="mWorkflows">0</b><span>活跃 Workflow</span></div><div class="metric"><b id="mAgents">0</b><span>活跃 Agent</span></div><div class="metric"><b id="mAlerts">0</b><span>需要关注</span></div></div><div id="stages" class="stages"></div><div class="grid"><section class="panel"><h3>Agent / Task 实时看板</h3><div id="tasks"></div></section><section><div class="panel"><h3>Agent 池</h3><div id="agents"></div></div><div class="panel section-gap"><h3>常驻 Pane</h3><div id="slots"></div></div><div class="panel section-gap"><h3>告警中心</h3><div id="alerts"></div></div></section></div></main></div><div id="modal" class="modal"><div class="modal-card"><div class="modal-head"><strong id="modalTitle">详情</strong><button class="close" onclick="closeModal()">×</button></div><div id="modalBody" class="modal-body"></div></div></div><div id="toast" class="toast"></div><script>
 let state={overview:null,project:null,workflow:null,ops:null,projectId:null,workflowId:null,spaceId:null,space:null,opsMode:false};
 async function waitForWorkflowJob(jobId){
   for(let i=0;i<180;i++){
@@ -411,11 +453,12 @@ async function submitNewWorkflowAsync(){
   const button=[...document.querySelectorAll('#modal button')].find(x=>x.textContent.includes('启动 Workflow'));
   const q=document.getElementById('newRequirement')?.value.trim();
   const a=document.getElementById('newAgent')?.value;
+  const t=document.getElementById('newTemplate')?.value||'software-development-v1';
   if(!q)return toast('请输入需求',true);
   if(button){button.disabled=true;button.textContent='启动中…'}
   try{
     toast('正在创建 Workflow…');
-    const job=await api('/api/run',{method:'POST',body:JSON.stringify({project_root:state.project.project.project_root,requirement:q,agent:a})});
+    const job=await api('/api/run',{method:'POST',body:JSON.stringify({project_root:state.project.project.project_root,requirement:q,agent:a,template:t})});
     const result=await waitForWorkflowJob(job.job_id);
     closeModal();await refreshAll();toast('Workflow 已启动：'+(result.output||'已提交'));
   }catch(e){
@@ -521,6 +564,100 @@ function agentStatusLabel(s){
 }
 function authHintLabel(s){
   return ({present:'已配置',missing:'未配置',unknown:'未知'})[s]||s||'未知'
+}
+async function fetchTemplates(){
+  const d=await api('/api/templates');
+  state.templates=d.templates||[];
+  return state.templates
+}
+async function showTemplateLibrary(){
+  openModal('工作流模板库','<div class="empty">正在加载模板…</div>');
+  try{
+    const ts=await fetchTemplates();
+    const cards=ts.length?ts.map(t=>`
+      <div class="task">
+        <div>
+          <div class="task-name">${esc(t.label||t.id)} <span class="badge ${t.is_builtin?'waiting':'good-text'}">${t.is_builtin?'内置':'自定义'}</span></div>
+          <div class="task-id">${esc(t.id)} · v${esc(t.version)} · ${t.node_count} 节点</div>
+          <div class="task-meta">${esc(t.description||'')}</div>
+        </div>
+        <div class="task-actions">
+          <button class="mini" onclick="showTemplateDAG('${esc(t.id)}')">节点依赖</button>
+          <button class="mini" onclick="showTemplateEditor('${esc(t.id)}')">${t.is_builtin?'查看 YAML':'编辑'}</button>
+        </div>
+      </div>`).join(''):'<div class="empty">暂无模板</div>';
+    openModal('工作流模板库',`<div class="muted" style="margin-bottom:10px">模板定义 Workflow 的节点与 DAG 依赖。自定义模板保存到 ~/.herdr-controller/templates/，对新启动的 Workflow 即时生效，不影响已运行的 Workflow。</div>${cards}<div style="margin-top:12px"><button class="btn primary" onclick="showTemplateEditor()">＋ 新建模板</button></div>`)
+  }catch(e){toast(e.message,true)}
+}
+async function showTemplateDAG(id){
+  try{
+    const d=await api('/api/template?id='+encodeURIComponent(id));
+    const rows=(d.nodes||[]).map(n=>`
+      <div class="agent-row">
+        <div>
+          <div class="task-name">${esc(n.label||n.id)} <span class="task-id">${esc(n.id)} · ${esc(n.node_type||'agent')}</span></div>
+          <div class="task-meta">${esc(n.purpose||'')}</div>
+        </div>
+        <div class="task-meta">${(n.depends_on||[]).length?'← '+(n.depends_on||[]).map(esc).join('、'):'起始节点'}</div>
+      </div>`).join('');
+    openModal('节点依赖 · '+((d.template&&d.template.label)||id),rows||'<div class="empty">无节点</div>')
+  }catch(e){toast(e.message,true)}
+}
+const TEMPLATE_SCAFFOLD=`name: my-workflow
+label: 我的工作流
+version: "1.0"
+description: 在这里描述业务流程
+
+nodes:
+  - id: analyze
+    label: 分析
+    node_type: agent
+    purpose: 第一步做什么
+
+  - id: deliver
+    label: 交付
+    node_type: agent
+    depends_on: [analyze]
+    purpose: 汇总并产出结果
+`;
+async function showTemplateEditor(id){
+  const info=(state.templates||[]).find(t=>t.id===id);
+  const builtin=!!(info&&info.is_builtin);
+  let yaml=TEMPLATE_SCAFFOLD;
+  if(id){
+    try{
+      const d=await api('/api/template?id='+encodeURIComponent(id));
+      yaml=d.yaml
+    }catch(e){return toast(e.message,true)}
+  }
+  openModal(id?(builtin?'内置模板（只读）':'编辑模板 · '+id):'新建模板',`
+    <div class="form">
+      <label>模板名（小写字母/数字/-/_，作为启动时的 --template 参数${id?'，不可修改':''}）</label>
+      <input id="tplName" value="${esc(id||'')}" ${id?'disabled':''}>
+      <label>YAML 定义</label>
+      <textarea id="tplYaml" style="min-height:320px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace" ${builtin?'disabled':''}>${esc(yaml)}</textarea>
+      <div class="muted">保存时服务端会做 DAG 校验（未知依赖 / 循环依赖会被拒绝）。内置模板只读；自定义模板保存后可在“新建需求”中选用。</div>
+      ${builtin?'':`<button class="btn primary" onclick="saveTemplate()">保存模板</button>`}
+    </div>`)
+}
+async function saveTemplate(){
+  const name=document.getElementById('tplName').value.trim();
+  const yaml=document.getElementById('tplYaml').value;
+  if(!name)return toast('请填写模板名',true);
+  try{
+    const d=await api('/api/template',{method:'POST',body:JSON.stringify({name:name,yaml:yaml})});
+    closeModal();
+    await fetchTemplates();
+    toast('模板已保存：'+d.name+'（'+d.node_count+' 节点）')
+  }catch(e){toast(e.message,true)}
+}
+async function populateTemplateSelect(){
+  try{
+    const ts=await fetchTemplates();
+    const sel=document.getElementById('newTemplate');
+    if(!sel||!ts.length)return;
+    sel.innerHTML=ts.map(t=>`<option value="${esc(t.id)}">${esc(t.id)} · ${esc(t.label||'')}（${t.node_count} 节点）</option>`).join('')
+  }catch(e){}
 }
 function showOpsCenter(){
   state.opsMode=true;
@@ -690,7 +827,7 @@ function renderTasks(){
     </div>`).join('')
 }
 function renderAgents(){const rs=state.project.agents||[];document.getElementById('agents').innerHTML=rs.length?rs.map(a=>`<div class="agent-row"><span><i class="dot ${esc(a.status)}"></i>${esc(a.agent)}</span><span class="muted">${esc(agentStatusLabel(a.status))} · 负载 ${a.load} · 认证 ${esc(authHintLabel(a.auth_hint))}</span></div>`).join(''):'<div class="empty">暂无 Agent 信息</div>'}function renderSlots(){const rs=state.project.slots||[];document.getElementById('slots').innerHTML=rs.length?rs.map(s=>`<div class="slot-row"><div><div>${esc(s.pane_id)} · ${esc(s.stage_label)}</div><div class="task-meta">绑定 ${esc(s.bound_agent)} · 运行时 ${esc(s.live_agent||'空闲')} · ${esc(s.claimed_by?'被任务占用':'未占用')}</div></div><button class="mini" onclick="bindSlotPrompt('${esc(s.pane_id)}')">绑定</button></div>`).join(''):'<div class="empty">暂无用户预建 Pane</div>'}
-function openModal(t,h){document.getElementById('modalTitle').textContent=t;document.getElementById('modalBody').innerHTML=h;document.getElementById('modal').classList.add('open')}function closeModal(){document.getElementById('modal').classList.remove('open')}function showNewWorkflow(){if(!state.project||!state.space||state.space.relation!=='current_factory')return toast('请先选择当前工厂空间',true);openModal('新建需求',`<div class="form"><label>项目</label><input value="${esc(state.project.project.project_name)}" disabled><label>Agent 策略</label><select id="newAgent"><option value="auto">auto（Router 自动）</option>${['opencode','codex','claude','qodercli','agy','pi'].map(a=>`<option>${a}</option>`).join('')}</select><label>自然语言需求</label><textarea id="newRequirement"></textarea><button class="btn primary" onclick="submitNewWorkflow()">启动 Workflow</button></div>`)}async function submitNewWorkflow(){const q=document.getElementById('newRequirement').value.trim(),a=document.getElementById('newAgent').value;if(!q)return toast('请输入需求',true);try{toast('正在启动 Workflow…');await api('/api/run',{method:'POST',body:JSON.stringify({project_root:state.project.project.project_root,requirement:q,agent:a})});closeModal();await refreshAll();toast('Workflow 已启动')}catch(e){toast(e.message,true)}}async function runPreflight(){
+function openModal(t,h){document.getElementById('modalTitle').textContent=t;document.getElementById('modalBody').innerHTML=h;document.getElementById('modal').classList.add('open')}function closeModal(){document.getElementById('modal').classList.remove('open')}function showNewWorkflow(){if(!state.project||!state.space||state.space.relation!=='current_factory')return toast('请先选择当前工厂空间',true);openModal('新建需求',`<div class="form"><label>项目</label><input value="${esc(state.project.project.project_name)}" disabled><label>工作流模板</label><select id="newTemplate"><option value="software-development-v1">software-development-v1（默认软件开发）</option></select><label>Agent 策略</label><select id="newAgent"><option value="auto">auto（Router 自动）</option>${['opencode','codex','claude','qodercli','agy','pi'].map(a=>`<option>${a}</option>`).join('')}</select><label>自然语言需求</label><textarea id="newRequirement"></textarea><button class="btn primary" onclick="submitNewWorkflow()">启动 Workflow</button></div>`);populateTemplateSelect()}async function submitNewWorkflow(){const q=document.getElementById('newRequirement').value.trim(),a=document.getElementById('newAgent').value,t=document.getElementById('newTemplate').value;if(!q)return toast('请输入需求',true);try{toast('正在启动 Workflow…');await api('/api/run',{method:'POST',body:JSON.stringify({project_root:state.project.project.project_root,requirement:q,agent:a,template:t})});closeModal();await refreshAll();toast('Workflow 已启动')}catch(e){toast(e.message,true)}}async function runPreflight(){
   if(!state.projectId)return toast('当前空间不参与工厂调度',true);
   try{
     toast('正在执行深度自检…');
@@ -764,6 +901,8 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/':return self.send_html(HTML)
             if p=='/api/overview':return self.send_json(200,overview())
             if p=='/api/ops-center':return self.send_json(200,ops_center(self.query().get('workflow_id',[''])[0] or None,self.query().get('include_tasks',[''])[0]=='1'))
+            if p=='/api/templates':return self.send_json(200,templates_summary())
+            if p=='/api/template':return self.send_json(200,template_detail(self.query().get('id',[''])[0]))
             if p=='/api/run/status':return self.send_json(200,workflow_job_status(self.query().get('id',[''])[0]))
             if p=='/api/project':return self.send_json(200,project_detail(self.query().get('id',[''])[0]))
             if p=='/api/workflow':return self.send_json(200,workflow_detail(self.query().get('id',[''])[0]))
@@ -787,7 +926,8 @@ class Handler(BaseHTTPRequestHandler):
         p=urllib.parse.urlparse(self.path).path
         try:
             b=self.body()
-            if p=='/api/run':return self.send_json(202,start_workflow_job(str(Path(b.get('project_root','')).expanduser().resolve()),str(b.get('requirement','')).strip(),str(b.get('agent') or 'auto')))
+            if p=='/api/run':return self.send_json(202,start_workflow_job(str(Path(b.get('project_root','')).expanduser().resolve()),str(b.get('requirement','')).strip(),str(b.get('agent') or 'auto'),str(b.get('template') or 'software-development-v1')))
+            if p=='/api/template':return self.send_json(200,save_template(str(b.get('name') or ''),str(b.get('yaml') or '')))
             if p=='/api/workflow/agent':return self.send_json(200,set_agent_override(str(b['workflow_id']),str(b.get('agent') or 'auto')))
             if p=='/api/workflow/candidate':return self.send_json(200,create_candidate(str(b['workflow_id'])))
             if p=='/api/workflow/advance':return self.send_json(200,manual_advance(str(b['workflow_id'])))

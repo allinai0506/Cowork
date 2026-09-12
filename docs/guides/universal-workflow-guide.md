@@ -315,6 +315,9 @@ herdr-factory templates
 herdr-factory run "调研国内主流低代码平台竞争格局" --template market-research
 ```
 
+### 6.4 在共事工厂控制台页面编排（免手写 YAML 入口）
+上述 YAML 亦可通过控制台页面完成：打开 `http://127.0.0.1:8765/` → 动作区 **模板库**，即可查看内置/自定义模板、预览节点依赖（DAG）、新建或编辑模板。保存时服务端自动执行与 CLI 相同的 DAG 校验（未知依赖 / 循环依赖会被拒绝）。“新建需求”弹窗可选“工作流模板”，启动时透传 `--template`。内置模板只读；自定义模板保存至 `~/.herdr-controller/templates/`，仅影响之后新启动的 Workflow。
+
 ---
 
 ## 7. Node 级 Agent 路由策略配置

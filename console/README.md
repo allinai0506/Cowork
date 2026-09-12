@@ -54,6 +54,19 @@ GET /api/run/status?id=<job_id>
 
 新需求启动采用异步 Job：Console 不会让浏览器请求同步等待 Deep Preflight 和总指挥派发；后台命令允许最多运行 600 秒。启动成功后关闭弹窗并提示 Workflow ID；失败时保留表单、恢复按钮，并展示后端返回的具体错误。
 
+## 工作流模板库 API
+
+Console 通过 `sys.path` 直接复用 `herdr.workflow` 的模板引擎（`list_templates` / `load_template` / `validate_workflow_dag`）：
+
+```text
+GET  /api/templates          -> {templates: [{id, label, version, node_count, path, is_builtin}]}
+GET  /api/template?id=<name> -> {template, nodes(含 depends_on), yaml(原文), is_builtin}
+POST /api/template           -> {name, yaml}；服务端 DAG 校验通过后写入 ~/.herdr-controller/templates/<name>.yaml
+POST /api/run                -> body 支持 template 字段，透传 herdr-factory run --template
+```
+
+页面入口：动作区“模板库”（列表 / 节点依赖预览 / 查看 YAML / 新建与编辑自定义模板）；“新需求”弹窗提供“工作流模板”下拉框。内置模板（`workflow_templates/`）只读；自定义模板名限 `^[a-z0-9][a-z0-9_-]{0,63}$`（防路径穿越），保存时先做未知依赖 / 循环依赖校验，失败即拒绝写盘。模板变更只影响之后新启动的 Workflow，不改运行中实例。
+
 ## 变更规则
 
 - 前端代码只修改 `console/`，通过安装脚本部署。
