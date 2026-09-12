@@ -72,8 +72,10 @@ herdr/
 │   ├── topology.py               # Node/Stage 拓扑现场动态自愈与 Anchor 重建
 │   ├── preflight.py              # Agent 基础状态检测
 │   └── deep_preflight.py         # Agent 深层沙盒探针
+├── console/                      # Factory Console 前端 Web 界面 canonical源码
 ├── scripts/                      # 运维、安装、迁移与系统辅助脚本
-│   └── herdr-topology-selfheal-install.sh
+│   ├── herdr-topology-selfheal-install.sh
+│   └── install-herdr-console.sh  # Factory Console 同步部署与服务重启脚本
 ├── workflow_templates/           # 声明式工作流 DAG 模板定义 (YAML)
 │   ├── bidding.yaml
 │   ├── customer-service.yaml
@@ -87,8 +89,9 @@ herdr/
 │   ├── product-specs/            # Schema 规范与 Agent 策略标准
 │   ├── operations/               # 守护进程运维手册与排障 FAQ
 │   ├── references/               # CLI 参考手册与归档历史说明
+│   ├── walkthroughs/             # 交付演进报告与 Walkthrough 归档
 │   └── context/                  # 系统演进上下文与历史转录文本
-├── pyproject.toml                # PEP 517/621 标准项目构建与依赖配置
+├── pyproject.toml                # 项目工具配置（pytest / pythonpath）
 ├── README.md                     # 根目录主文档与导航指引
 ├── AGENTS.md                     # AI 上下文地图与快速索引
 ├── RULES.md                      # 开发作业规范与强制红线

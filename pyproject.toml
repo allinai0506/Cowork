@@ -1,25 +1,3 @@
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "herdr"
-version = "1.0.0"
-description = "Herdr Multi-Agent Workflow Platform"
-readme = "README.md"
-requires-python = ">=3.9"
-dependencies = [
-    "pyyaml>=6.0",
-]
-
-[project.scripts]
-herdr-factory = "herdr.bin.factory:main"
-herdr-task = "herdr.bin.task:main"
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["herdr*"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
