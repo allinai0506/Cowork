@@ -32,6 +32,8 @@
    为主流 Agent（Claude、Codex、OpenCode、Qoder、Agy、Pi 等）提供无副作用的沙盒实测验证，阻断死锁与无效分发。
 7. **100% 向下兼容**  
    双向归一化引擎全面兼容既有项目、`--stage` 参数与历史工单，平滑升级无断层。
+8. **Web Console 与运维驾驶舱**  
+   提供轻量级 Web 控制台（默认 `127.0.0.1:8765`），提供实时 Workflow/Tab 现场视角、Agent Fleet 状态监控、Dashboard V2 运维驾驶舱与异步任务启动。
 
 ---
 
