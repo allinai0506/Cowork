@@ -1,0 +1,578 @@
+#!/opt/homebrew/bin/python3
+from herdr_pane_pool import list_slots_for_project, bind_pane, unbind_pane
+from herdr_agent_router import ensure_pool_for_project, describe_project_pool, set_workflow_agent_override
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+from herdr_projects import (
+    detect_git_root,
+    ensure_project,
+    load_projects,
+    load_workflows,
+    project_by_root,
+    project_for_workflow,
+    register_workflow,
+    workflow_config_for,
+)
+from herdr_workflow import list_templates, load_template, get_ready_nodes
+
+HOME = Path.home()
+ROOT = HOME / ".herdr-controller"
+TASKS_FILE = ROOT / "tasks.json"
+POLICIES_FILE = ROOT / "stage-policies.json"
+PROJECTS_FILE = ROOT / "projects.json"
+WORKFLOWS_FILE = ROOT / "workflows.json"
+SERVICE = f"gui/{os.getuid()}/com.user.herdr-controller"
+
+STAGES = [
+    "requirements",
+    "plan",
+    "implementation",
+    "test",
+    "review",
+    "wrapup",
+]
+
+
+def run(cmd, check=True):
+    return subprocess.run(
+        cmd,
+        text=True,
+        capture_output=True,
+        check=check,
+    )
+
+
+def load_json(path, default=None):
+    if default is None:
+        default = {}
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def tasks_for(workflow_id):
+    data = load_json(TASKS_FILE, {"tasks": []})
+    return [
+        t
+        for t in data.get("tasks", [])
+        if t.get("workflow_id") == workflow_id
+    ]
+
+
+def resolve_project(explicit_path=None, create=True, template_name="software-development-v1"):
+    root = detect_git_root(explicit_path or os.getcwd())
+    if create:
+        return ensure_project(root, template_name=template_name)
+    return project_by_root(root)
+
+
+def project_command(path=None):
+    project = resolve_project(path, create=True)
+    print(json.dumps(project, ensure_ascii=False, indent=2))
+    return 0
+
+
+def projects_command():
+    data = load_projects()
+    projects = list(data.get("projects", {}).values())
+    if not projects:
+        print("No registered projects.")
+        return 0
+
+    print("Registered Herdr projects:")
+    for p in projects:
+        print(
+            f"- {p.get('project_name')}  "
+            f"{p.get('project_root')}  "
+            f"workspace={p.get('workspace_id')}  "
+            f"coordinator={p.get('coordinator_pane_id')}"
+        )
+    return 0
+
+
+def doctor():
+    checks = []
+
+    def add(name, ok, detail=""):
+        checks.append((name, ok, detail))
+
+    for p in [
+        HOME / "herdr-controller.py",
+        HOME / "herdr-task.py",
+        HOME / "herdr-worker.py",
+        HOME / "herdr_projects.py",
+        TASKS_FILE,
+        POLICIES_FILE,
+        PROJECTS_FILE,
+        WORKFLOWS_FILE,
+    ]:
+        add(f"file {p.name}", p.exists(), str(p))
+
+    r = run(["herdr", "status"], check=False)
+    add(
+        "Herdr server",
+        r.returncode == 0 and "status: running" in r.stdout,
+        "running" if "status: running" in r.stdout else "not running",
+    )
+
+    r = run(["launchctl", "print", SERVICE], check=False)
+    add(
+        "Controller service",
+        r.returncode == 0 and "state = running" in r.stdout,
+        "running" if r.returncode == 0 else "not running",
+    )
+
+    projects = load_projects().get("projects", {})
+    for root, project in projects.items():
+        ws = project.get("workspace_id", "")
+        coord = project.get("coordinator_pane_id", "")
+
+        r = run(["herdr", "workspace", "get", ws], check=False)
+        add(
+            f"project {project.get('project_name')} workspace",
+            r.returncode == 0,
+            ws,
+        )
+
+        r = run(["herdr", "agent", "get", coord], check=False)
+        add(
+            f"project {project.get('project_name')} coordinator",
+            r.returncode == 0,
+            coord,
+        )
+
+    failed = False
+    print("Herdr Factory Doctor")
+    print("=" * 64)
+    for name, ok, detail in checks:
+        mark = "PASS" if ok else "FAIL"
+        print(f"[{mark}] {name}" + (f" — {detail}" if detail else ""))
+        failed = failed or not ok
+    print("=" * 64)
+    print("DOCTOR: FAIL" if failed else "DOCTOR: PASS")
+    return 1 if failed else 0
+
+
+def run_workflow_preflight(project, workflow_id):
+    """Run Deep Preflight once and store a workflow-scoped healthy Agent set."""
+    script = Path.home() / "herdr" / "herdr_deep_preflight.py"
+    if not script.exists():
+        raise RuntimeError(f"Deep Preflight 未安装: {script}")
+
+    r = run(
+        [
+            str(script),
+            "--project-id",
+            project["project_id"],
+            "--deep",
+            "--json",
+        ],
+        check=False,
+    )
+
+    if r.returncode != 0:
+        raise RuntimeError(
+            r.stderr.strip()
+            or r.stdout.strip()
+            or "Deep Preflight 执行失败"
+        )
+
+    try:
+        result = json.loads(r.stdout)
+    except Exception as e:
+        raise RuntimeError("Deep Preflight JSON 解析失败") from e
+
+    agents = result.get("agents", [])
+    healthy = [
+        item["agent"]
+        for item in agents
+        if item.get("final_status") == "READY"
+    ]
+    unhealthy = {
+        item["agent"]: item.get("final_status")
+        for item in agents
+        if item.get("final_status") != "READY"
+    }
+
+    if not healthy:
+        raise RuntimeError(
+            "Deep Preflight 未发现任何 READY Agent，拒绝启动 Workflow"
+        )
+
+    data = json.loads(WORKFLOWS_FILE.read_text(encoding="utf-8"))
+    record = data.setdefault("workflows", {}).get(workflow_id)
+    if record is None:
+        raise RuntimeError(f"Workflow registry missing: {workflow_id}")
+
+    record["healthy_agents"] = healthy
+    record["unhealthy_agents"] = unhealthy
+    record["preflight_checked_at"] = datetime.now().isoformat(timespec="seconds")
+
+    tmp = WORKFLOWS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(WORKFLOWS_FILE)
+
+    print("PREFLIGHT_READY=" + ",".join(healthy))
+    if unhealthy:
+        print(
+            "PREFLIGHT_EXCLUDED="
+            + ",".join(f"{k}:{v}" for k, v in unhealthy.items())
+        )
+
+    return healthy, unhealthy
+
+
+
+def start_workflow(
+    requirement,
+    workflow_id=None,
+    e2e=False,
+    project_path=None,
+    agent_override="auto",
+    template="software-development-v1",
+):
+    project = resolve_project(project_path, create=True, template_name=template)
+
+    if not workflow_id:
+        prefix = "e2e" if e2e else "wf"
+        workflow_id = (
+            f"{prefix}-{project['project_id']}-"
+            f"{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        )
+
+    register_workflow(workflow_id, project)
+
+    ensure_pool_for_project(project["project_id"])
+    healthy_agents, unhealthy_agents = run_workflow_preflight(
+        project,
+        workflow_id,
+    )
+
+    if agent_override and agent_override != "auto":
+        if agent_override not in healthy_agents:
+            status = unhealthy_agents.get(agent_override, "NOT_READY")
+            raise RuntimeError(
+                f"指定 Agent '{agent_override}' 未通过 Deep Preflight: {status}"
+            )
+
+    set_workflow_agent_override(workflow_id, agent_override)
+
+    wf_cfg = workflow_config_for(workflow_id) or {}
+    nodes = wf_cfg.get("nodes", [])
+    ready_nodes = get_ready_nodes(wf_cfg, set()) if nodes else []
+    first_node_id = ready_nodes[0]["id"] if ready_nodes else (nodes[0]["id"] if nodes else "requirements")
+    nodes_summary = ", ".join(f"{n['id']} ({n.get('label', n['id'])})" for n in nodes) if nodes else "标准开发 6 节点"
+
+    extra = ""
+    if e2e:
+        extra = (
+            "这是 E2E 纯流程测试：所有阶段不得修改项目文件；"
+            "使用 integration_mode=none 和 task_type=test。"
+            "验收以 Agent 生命周期到 done/agent_done 且 "
+            "verify-baseline=BASELINE_MATCH 为准；"
+            "不得因为 OpenCode alternate-screen 读取为空白而返工。"
+        )
+
+    prompt = f"""请按照 Herdr 工作流规范启动 Workflow。
+
+project_name: {project['project_name']}
+project_root: {project['project_root']}
+workspace_id: {project['workspace_id']}
+workflow_id: {workflow_id}
+workflow_template: {wf_cfg.get('workflow_template', template)}
+workflow_nodes: {nodes_summary}
+workflow_config: {project['workflow_file']}
+
+用户需求：
+{requirement}
+
+{extra}
+
+执行要求：
+1. 这是项目 {project['project_name']}，所有 Task 必须属于 workflow_id={workflow_id}。
+2. 从首个就绪节点 {first_node_id} 开始。
+3. 创建 Task 必须使用 ~/herdr/herdr-task.py launch。
+4. 每次 launch 必须显式指定：
+   --workflow-id {workflow_id}
+   --node <node_id>
+   --source {project['project_root']}
+5. 不允许手工创建 Clone、Pane、Branch、Agent。
+6. 每个 Task 必须明确 goal 和 acceptance criteria。
+7. 当前节点必要 Task 派发完成后结束当前回合。
+8. 后续节点推进交给 Controller 自动根据 DAG 依赖推进。
+9. 不得读取、修改或推进其他项目/其他 Workflow。
+10. 创建 Task 时默认使用 --agent auto，让 Agent Router 根据 node + task_type 动态选择执行者。
+11. 如果用户为当前 Workflow 指定了固定 Agent，该指定优先于自动路由。
+12. 同一节点可以创建多个 Task，并由 Router 分配给不同 Agent；不要默认把所有 Task 都交给同一个 Agent。
+13. 当前 Workflow 已在启动前执行 Deep Preflight；Router 只能从该 Workflow 的 healthy_agents 中选择 Agent。
+""".strip()
+
+    coordinator = project["coordinator_pane_id"]
+    r = run(
+        [
+            "herdr",
+            "agent",
+            "prompt",
+            coordinator,
+            prompt,
+        ],
+        check=False,
+    )
+
+    if r.returncode != 0:
+        print(r.stderr.strip() or r.stdout.strip())
+        return None
+
+    print(f"PROJECT={project['project_name']}")
+    print(f"PROJECT_ROOT={project['project_root']}")
+    print(f"WORKSPACE_ID={project['workspace_id']}")
+    print(f"COORDINATOR_PANE={coordinator}")
+    print(f"WORKFLOW_ID={workflow_id}")
+    return workflow_id
+
+
+def status(workflow_id):
+    tasks = tasks_for(workflow_id)
+    project = project_for_workflow(workflow_id) or {}
+
+    if not tasks:
+        print(f"No tasks for workflow: {workflow_id}")
+        return 1
+
+    print(
+        f"Project: {project.get('project_name', 'legacy/unknown')} "
+        f"({project.get('project_root', '-')})"
+    )
+    print(f"Workflow: {workflow_id}")
+    print("=" * 88)
+
+    cfg = workflow_config_for(workflow_id)
+    nodes_to_show = []
+    if cfg and cfg.get("nodes"):
+        nodes_to_show = [(n["id"], n.get("label", n["id"])) for n in cfg["nodes"]]
+    else:
+        nodes_to_show = [(s, s) for s in STAGES]
+
+    for node_id, label in nodes_to_show:
+        node_tasks = [
+            t for t in tasks
+            if t.get("node") == node_id or t.get("stage") == node_id
+        ]
+        display_name = f"{node_id} ({label})" if label != node_id else node_id
+        if not node_tasks:
+            print(f"{display_name:28} -")
+            continue
+
+        states = ", ".join(
+            f"{t['task_id']}={t['status']}"
+            for t in node_tasks
+        )
+        print(f"{display_name:28} {states}")
+
+    print("=" * 88)
+    return 0
+
+
+def e2e(project_path=None):
+    workflow_id = start_workflow(
+        "验证当前项目的 Herdr Factory 六阶段可以全自动推进。"
+        "这是纯流程测试，不允许修改任何项目文件。",
+        workflow_id=None,
+        e2e=True,
+        project_path=project_path,
+    )
+
+    if not workflow_id:
+        print("E2E: FAIL (start)")
+        return 1
+
+    print(f"E2E started: {workflow_id}")
+    deadline = time.time() + 20 * 60
+    last_snapshot = None
+
+    while time.time() < deadline:
+        tasks = tasks_for(workflow_id)
+        snapshot = tuple(sorted(
+            (
+                t.get("stage"),
+                t.get("task_id"),
+                t.get("status"),
+            )
+            for t in tasks
+        ))
+
+        if snapshot and snapshot != last_snapshot:
+            print()
+            for stage, task_id, state in snapshot:
+                print(f"{stage:16} {task_id:40} {state}")
+            last_snapshot = snapshot
+
+        if any(t.get("status") == "failed" for t in tasks):
+            print("E2E: FAIL (task failed)")
+            return 1
+
+        seen = {t.get("stage") for t in tasks}
+        all_cleaned = bool(tasks) and all(
+            t.get("status") == "cleaned"
+            for t in tasks
+        )
+
+        if set(STAGES) <= seen and all_cleaned:
+            print("E2E: PASS")
+            return 0
+
+        time.sleep(5)
+
+    print("E2E: FAIL (timeout)")
+    return 1
+
+
+def agents_command(project_path=None):
+    project = resolve_project(project_path, create=True)
+    pool = describe_project_pool(project["project_id"])
+    print(json.dumps({"project_name": project["project_name"], "project_root": project["project_root"], **pool}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def slots_command(project_path=None):
+    project = resolve_project(project_path, create=True)
+    slots = list_slots_for_project(project)
+    print(json.dumps({
+        "project_name": project["project_name"],
+        "workspace_id": project["workspace_id"],
+        "slots": slots,
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def slot_bind_command(pane_id, agent, project_path=None):
+    project = resolve_project(project_path, create=True)
+    slots = list_slots_for_project(project)
+    target = next((s for s in slots if s.get("pane_id") == pane_id), None)
+    if not target:
+        print(f"Pane {pane_id} is not a user-created stage Pane in project {project['project_name']}")
+        return 2
+    bind_pane(pane_id, agent)
+    print(f"BOUND pane={pane_id} stage={target.get('stage')} agent={agent}")
+    return 0
+
+
+def slot_unbind_command(pane_id):
+    unbind_pane(pane_id)
+    print(f"UNBOUND pane={pane_id}")
+    return 0
+
+
+def templates_command():
+    templates = list_templates()
+    print("Available Workflow Templates")
+    print("=" * 72)
+    for name, info in sorted(templates.items()):
+        label = info.get("label", name)
+        desc = info.get("description", "")
+        count = info.get("node_count", 0)
+        ver = info.get("version", "1.0")
+        print(f"{name:26} [{ver}] {label} ({count} nodes)")
+        if desc:
+            print(f"  {desc}")
+    print("=" * 72)
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="herdr-factory")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("doctor")
+    sub.add_parser("templates", help="List available workflow templates")
+
+    project_cmd = sub.add_parser("project")
+    project_cmd.add_argument("--project")
+
+    sub.add_parser("projects")
+
+    slots_cmd = sub.add_parser("slots")
+    slots_cmd.add_argument("--project")
+
+    bind_cmd = sub.add_parser("slot-bind")
+    bind_cmd.add_argument("pane_id")
+    bind_cmd.add_argument("agent")
+    bind_cmd.add_argument("--project")
+
+    unbind_cmd = sub.add_parser("slot-unbind")
+    unbind_cmd.add_argument("pane_id")
+
+    agents_cmd = sub.add_parser("agents")
+    agents_cmd.add_argument("--project")
+
+    run_cmd = sub.add_parser("run")
+    run_cmd.add_argument("requirement", nargs="+")
+    run_cmd.add_argument("--workflow-id")
+    run_cmd.add_argument("--project")
+    run_cmd.add_argument("--agent", default="auto")
+    run_cmd.add_argument("--template", default="software-development-v1", help="Workflow template to use")
+
+    status_cmd = sub.add_parser("status")
+    status_cmd.add_argument("workflow_id")
+
+    e2e_cmd = sub.add_parser("e2e")
+    e2e_cmd.add_argument("--project")
+
+    args = parser.parse_args()
+
+    if args.command == "doctor":
+        sys.exit(doctor())
+
+    if args.command == "templates":
+        sys.exit(templates_command())
+
+    if args.command == "project":
+        sys.exit(project_command(args.project))
+
+    if args.command == "projects":
+        sys.exit(projects_command())
+
+    if args.command == "slots":
+        sys.exit(slots_command(args.project))
+
+    if args.command == "slot-bind":
+        sys.exit(slot_bind_command(args.pane_id, args.agent, args.project))
+
+    if args.command == "slot-unbind":
+        sys.exit(slot_unbind_command(args.pane_id))
+
+    if args.command == "agents":
+        sys.exit(agents_command(args.project))
+
+    if args.command == "run":
+        workflow_id = start_workflow(
+            " ".join(args.requirement),
+            args.workflow_id,
+            e2e=False,
+            project_path=args.project,
+            agent_override=args.agent,
+            template=args.template,
+        )
+        sys.exit(0 if workflow_id else 1)
+
+    if args.command == "status":
+        sys.exit(status(args.workflow_id))
+
+    if args.command == "e2e":
+        sys.exit(e2e(args.project))
+
+
+if __name__ == "__main__":
+    main()

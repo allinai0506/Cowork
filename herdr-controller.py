@@ -11,7 +11,8 @@ import time
 SOCKET_PATH = os.path.expanduser("~/.config/herdr/herdr.sock")
 TASKS_FILE = os.path.expanduser("~/.herdr-controller/tasks.json")
 TASK_MANAGER = os.path.expanduser("~/herdr/herdr-task.py")
-from herdr_projects import project_for_workflow
+from herdr_projects import project_for_workflow, workflow_config_for
+from herdr_workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
 
 STAGE_STATE_FILE = os.path.expanduser(
     "~/.herdr-controller/stage-state.json"
@@ -247,33 +248,83 @@ def get_stage_status(
         return None
 
 
+def is_node_complete(workflow_id, node_id):
+    tasks = [
+        t for t in load_tasks()
+        if t.get("workflow_id") == workflow_id
+        and (t.get("node") == node_id or t.get("stage") == node_id)
+    ]
+    if not tasks:
+        return False
+    return all(
+        t.get("status") in (
+            "completed", "committed", "integrated", "cleanup_ready", "cleaned"
+        )
+        for t in tasks
+    )
+
+
 def enqueue_stage_advance(task):
-    workflow_id = task.get(
-        "workflow_id"
-    )
-    stage = task.get(
-        "stage"
-    )
+    workflow_id = task.get("workflow_id")
+    current_node = task.get("node") or task.get("stage")
 
-    if not workflow_id or not stage:
+    if not workflow_id or not current_node:
         return
 
-    status = get_stage_status(
-        workflow_id,
-        stage
-    )
-
-    if not status:
+    if not is_node_complete(workflow_id, current_node):
         return
 
-    if not status.get("complete"):
+    workflow_cfg = workflow_config_for(workflow_id)
+    if workflow_cfg and workflow_cfg.get("nodes"):
+        completed_nodes = {
+            n["id"]
+            for n in workflow_cfg.get("nodes", [])
+            if is_node_complete(workflow_id, n["id"])
+        }
+
+        if is_workflow_completed(workflow_cfg, completed_nodes):
+            print(
+                f"[WORKFLOW COMPLETE] "
+                f"workflow={workflow_id}"
+            )
+            return
+
+        ready_nodes = get_ready_nodes(workflow_cfg, completed_nodes)
+        for ready_node in ready_nodes:
+            ready_id = ready_node["id"]
+            if not mark_stage_advance_queued(workflow_id, ready_id):
+                print(
+                    f"[STAGE ADVANCE SKIP] "
+                    f"workflow={workflow_id} "
+                    f"node={ready_id}"
+                )
+                continue
+
+            coordinator_queue.put(
+                {
+                    "kind": "stage_advance",
+                    "workflow_id": workflow_id,
+                    "stage": current_node,
+                    "node_id": ready_id,
+                    "next_stage": ready_id,
+                    "stage_label": ready_node.get("label", ready_id),
+                    "node": ready_node,
+                }
+            )
+
+            print(
+                f"[STAGE ADVANCE QUEUED] "
+                f"workflow={workflow_id} "
+                f"{current_node} -> {ready_id}"
+            )
         return
 
-    next_stage = status.get(
-        "next_stage"
-    )
+    # Fallback to legacy single-step stage advance
+    status = get_stage_status(workflow_id, current_node)
+    if not status or not status.get("complete"):
+        return
 
-    # wrapup 是最后阶段
+    next_stage = status.get("next_stage")
     if not next_stage:
         print(
             f"[WORKFLOW COMPLETE] "
@@ -281,14 +332,11 @@ def enqueue_stage_advance(task):
         )
         return
 
-    if not mark_stage_advance_queued(
-        workflow_id,
-        stage
-    ):
+    if not mark_stage_advance_queued(workflow_id, current_node):
         print(
             f"[STAGE ADVANCE SKIP] "
             f"workflow={workflow_id} "
-            f"stage={stage}"
+            f"stage={current_node}"
         )
         return
 
@@ -296,18 +344,16 @@ def enqueue_stage_advance(task):
         {
             "kind": "stage_advance",
             "workflow_id": workflow_id,
-            "stage": stage,
-            "stage_label": status.get(
-                "stage_label"
-            ),
+            "stage": current_node,
             "next_stage": next_stage,
+            "stage_label": status.get("stage_label"),
         }
     )
 
     print(
         f"[STAGE ADVANCE QUEUED] "
         f"workflow={workflow_id} "
-        f"{stage} -> {next_stage}"
+        f"{current_node} -> {next_stage}"
     )
 
 
@@ -772,6 +818,7 @@ def coordinator_worker():
             workflow_id = item["workflow_id"]
             stage = item["stage"]
             next_stage = item["next_stage"]
+            target_node_id = item.get("node_id") or next_stage
 
             project_ctx = project_for_workflow(
                 workflow_id
@@ -792,46 +839,56 @@ def coordinator_worker():
                 ""
             )
 
+            node = item.get("node")
+            if not node:
+                wf_cfg = workflow_config_for(workflow_id)
+                if wf_cfg:
+                    node = find_node(wf_cfg, next_stage)
+
             policy = get_stage_policy(
                 next_stage
             )
 
-            purpose = policy.get(
-                "purpose",
-                "未定义"
-            )
-
-            integration_mode = policy.get(
-                "default_integration_mode",
-                "none"
-            )
-
-            task_type = policy.get(
-                "default_task_type",
-                "test"
-            )
+            if node:
+                purpose = node.get("purpose") or policy.get("purpose", "未定义")
+                integration_mode = node.get("default_integration_mode") or policy.get("default_integration_mode", "none")
+                task_type = node.get("default_task_type") or policy.get("default_task_type", "feat")
+                node_label = node.get("label", next_stage)
+                node_type = node.get("node_type", "agent")
+                agent_policy = node.get("agent_policy", {})
+                req_outs = node.get("required_outputs") or policy.get("required_outputs", [])
+                rules_list = node.get("rules") or policy.get("rules", [])
+            else:
+                purpose = policy.get("purpose", "未定义")
+                integration_mode = policy.get("default_integration_mode", "none")
+                task_type = policy.get("default_task_type", "test")
+                node_label = item.get("stage_label", next_stage)
+                node_type = "agent"
+                agent_policy = {}
+                req_outs = policy.get("required_outputs", [])
+                rules_list = policy.get("rules", [])
 
             required_outputs = "\n".join(
-                f"- {item}"
-                for item in policy.get(
-                    "required_outputs",
-                    []
-                )
-            )
+                f"- {out}" for out in req_outs
+            ) or "- 未定义"
 
             rules = "\n".join(
-                f"- {item}"
-                for item in policy.get(
-                    "rules",
-                    []
-                )
-            )
+                f"- {r}" for r in rules_list
+            ) or "- 未定义"
 
-            if not required_outputs:
-                required_outputs = "- 未定义"
-
-            if not rules:
-                rules = "- 未定义"
+            agent_policy_text = ""
+            if agent_policy:
+                pref = ", ".join(agent_policy.get("preferred", [])) or "无"
+                exc = ", ".join(agent_policy.get("exclude", [])) or "无"
+                fix = agent_policy.get("fixed") or "无"
+                agent_policy_text = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Node Agent 策略
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- 优先 Agent: {pref}
+- 排除 Agent: {exc}
+- 固定 Agent: {fix}
+""".strip()
 
             try:
                 while True:
@@ -845,17 +902,18 @@ workflow_id: {workflow_id}
 project_name: {project_name}
 project_root: {project_root}
 base_branch: {base_branch}
-completed_stage: {stage}
-next_stage: {next_stage}
+completed_node: {stage}
+next_node: {next_stage} ({node_label})
+node_type: {node_type}
 
-当前阶段已经完成。
+当前工作流前置依赖已全部完成。
 
-现在进入下一阶段：
+现在进入下一节点：
 
-{next_stage}
+{next_stage} ({node_label})
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-阶段职责
+节点职责
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 {purpose}
@@ -876,6 +934,8 @@ task_type:
 
 {rules}
 
+{agent_policy_text}
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 执行要求
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -884,10 +944,10 @@ task_type:
 
    ~/herdr/herdr-task.py list --workflow-id {workflow_id}
 
-   阅读当前 Workflow 已完成阶段的真实成果。
+   阅读当前 Workflow 已完成节点的真实成果。
 
-2. 根据前面阶段的实际成果，
-   决定当前阶段需要创建几个 Task。
+2. 根据前面节点的实际成果，
+   决定当前节点需要创建几个 Task。
 
 3. 不要固定前端、后端、数据库等角色。
 
@@ -911,10 +971,10 @@ task_type:
    并指定：
 
    --workflow-id {workflow_id}
-   --stage {next_stage}
+   --node {next_stage}
    --source {project_root}
 
-6. 默认使用本阶段 policy：
+6. 默认使用本节点 policy：
 
    task_type={task_type}
    integration_mode={integration_mode}
@@ -934,10 +994,10 @@ task_type:
 
    数量由实际工作决定。
 
-9. 当前阶段所有必要 Task 派发完成后，
+9. 当前节点所有必要 Task 派发完成后，
    结束当前回合。
 
-10. 后续执行、验收、返工、阶段推进，
+10. 后续执行、验收、返工、节点推进，
     继续交给 Controller。
 
 不要等待用户提醒。
@@ -961,7 +1021,7 @@ task_type:
                         if result.returncode == 0:
                             mark_stage_advance_notified(
                                 workflow_id,
-                                stage
+                                target_node_id
                             )
 
                             print(
@@ -972,7 +1032,7 @@ task_type:
                         else:
                             clear_stage_advance(
                                 workflow_id,
-                                stage
+                                target_node_id
                             )
 
                             print(

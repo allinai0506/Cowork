@@ -3,3 +3,6 @@ __pycache__/
 *.log
 .DS_Store
 path-migration-backup-*/
+*.before-*
+pre-workflow-*/
+.pytest_cache/

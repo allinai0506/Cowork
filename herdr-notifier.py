@@ -50,8 +50,19 @@ def reason(task):
 def workflow_complete(tasks):
     if not tasks:
         return False
-    seen = {t.get("stage") for t in tasks}
-    return STAGES.issubset(seen) and all(t.get("status") == "cleaned" for t in tasks)
+    wf_id = tasks[0].get("workflow_id")
+    expected_nodes = set(STAGES)
+    if wf_id:
+        try:
+            from herdr_projects import workflow_config_for
+            cfg = workflow_config_for(wf_id)
+            if cfg and cfg.get("nodes"):
+                expected_nodes = {n["id"] for n in cfg["nodes"]}
+        except Exception:
+            pass
+
+    seen = {t.get("node") or t.get("stage") for t in tasks}
+    return expected_nodes.issubset(seen) and all(t.get("status") == "cleaned" for t in tasks)
 
 def scan(state):
     data = load(TASKS_FILE, {"tasks":[]})
@@ -107,7 +118,7 @@ def scan(state):
             notify(
                 "Herdr Factory · Workflow 完成",
                 f"{project(ts[0])} · {wf}",
-                "requirements → plan → implementation → test → review → wrapup 全部完成"
+                "工作流所有节点已全部完成并通过清理验收"
             )
             completed.add(wf)
 

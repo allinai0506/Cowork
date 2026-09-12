@@ -12,6 +12,8 @@ PROJECTS_FILE = ROOT / "projects.json"
 WORKFLOWS_FILE = ROOT / "workflows.json"
 LEGACY_WORKFLOW_FILE = ROOT / "workflow.json"
 
+from herdr_workflow import load_template, normalize_workflow, find_node
+
 STAGES = [
     ("requirements", "2需求分析", "plan"),
     ("plan", "3计划", "implementation"),
@@ -157,10 +159,26 @@ def workflow_config_for(workflow_id):
     if record and record.get("workflow_file"):
         path = Path(record["workflow_file"]).expanduser()
         if path.exists():
-            return _load(path, None)
+            cfg = _load(path, None)
+            if cfg:
+                return normalize_workflow(cfg)
     if LEGACY_WORKFLOW_FILE.exists():
-        return _load(LEGACY_WORKFLOW_FILE, None)
+        cfg = _load(LEGACY_WORKFLOW_FILE, None)
+        if cfg:
+            return normalize_workflow(cfg)
     return None
+
+
+def save_workflow_config_for(workflow_id, workflow_data):
+    record = project_for_workflow(workflow_id)
+    if record and record.get("workflow_file"):
+        path = Path(record["workflow_file"]).expanduser()
+        _save(path, workflow_data)
+        return True
+    if LEGACY_WORKFLOW_FILE.exists():
+        _save(LEGACY_WORKFLOW_FILE, workflow_data)
+        return True
+    return False
 
 
 def register_workflow(workflow_id, project):
@@ -305,10 +323,13 @@ def import_legacy_project(root, legacy_workflow=None):
     return record
 
 
-def provision_project(root):
+def provision_project(root, template_name="software-development-v1"):
     root = canonical_root(root)
     project_id = project_id_for(root)
     project_name = Path(root).name
+
+    template = load_template(template_name)
+    nodes = template.get("nodes", [])
 
     created = _run_json([
         "herdr",
@@ -343,8 +364,8 @@ def provision_project(root):
 
     _start_coordinator(project_id, coordinator_pane_id)
 
-    stages = []
-    for key, label, next_stage in STAGES:
+    runtime_nodes = []
+    for node in nodes:
         created_tab = _run_json([
             "herdr",
             "tab",
@@ -354,20 +375,24 @@ def provision_project(root):
             "--cwd",
             root,
             "--label",
-            label,
+            node["label"],
             "--no-focus",
         ])
         tab_result = created_tab["result"]
         tab_id = tab_result["tab"]["tab_id"]
         anchor_pane_id = tab_result["root_pane"]["pane_id"]
-        stages.append({
-            "key": key,
-            "label": label,
-            "tab_id": tab_id,
-            "order": len(stages) + 1,
-            "next": next_stage,
-            "anchor_pane_id": anchor_pane_id,
-        })
+        _run([
+            "herdr",
+            "pane",
+            "rename",
+            anchor_pane_id,
+            "Anchor",
+        ], check=False)
+
+        n = dict(node)
+        n["tab_id"] = tab_id
+        n["anchor_pane_id"] = anchor_pane_id
+        runtime_nodes.append(n)
 
     workflow = {
         "project_id": project_id,
@@ -375,13 +400,15 @@ def provision_project(root):
         "project_root": root,
         "base_branch": detect_base_branch(root),
         "workspace_id": workspace_id,
+        "workflow_template": template.get("name", template_name),
         "coordinator": {
             "tab_id": coordinator_tab_id,
             "label": "1总指挥",
             "pane_id": coordinator_pane_id,
         },
-        "stages": stages,
+        "nodes": runtime_nodes,
     }
+    workflow = normalize_workflow(workflow)
 
     project_dir = ROOT / "projects" / project_id
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -407,7 +434,7 @@ def provision_project(root):
     return record
 
 
-def ensure_project(root):
+def ensure_project(root, template_name="software-development-v1"):
     root = canonical_root(root)
     record = project_by_root(root)
 
@@ -436,6 +463,154 @@ def ensure_project(root):
             return record
 
         # Only a genuinely missing Workspace is provisioned again.
-        return provision_project(root)
+        return provision_project(root, template_name=template_name)
 
-    return provision_project(root)
+    return provision_project(root, template_name=template_name)
+
+
+def ensure_node_runtime(workflow_id_or_root, node_id):
+    """Ensure that the Tab and Anchor Pane for a node exist and are healthy.
+
+    If the Tab was closed/deleted, recreate it.
+    If the Anchor Pane was closed/purged, detect or split a new Anchor Pane.
+    Persists repaired runtime mappings to workflow.json.
+    """
+    workflow_id = None
+    project = None
+    workflow_cfg = None
+
+    if project_for_workflow(workflow_id_or_root):
+        workflow_id = workflow_id_or_root
+        project = project_for_workflow(workflow_id)
+        workflow_cfg = workflow_config_for(workflow_id)
+    else:
+        project = project_by_root(workflow_id_or_root)
+        if project:
+            path = Path(project.get("workflow_file", "")).expanduser()
+            workflow_cfg = normalize_workflow(_load(path, None)) if path.exists() else None
+        else:
+            # Maybe it's a project_id or workflow_id that needs lookup in workflows
+            all_wf = load_workflows().get("workflows", {})
+            if workflow_id_or_root in all_wf:
+                workflow_id = workflow_id_or_root
+                project = all_wf[workflow_id]
+                workflow_cfg = workflow_config_for(workflow_id)
+
+    if not workflow_cfg:
+        raise RuntimeError(f"Workflow config missing for: {workflow_id_or_root}")
+
+    workspace_id = workflow_cfg.get("workspace_id")
+    if not workspace_id or not _workspace_alive(workspace_id):
+        raise RuntimeError(f"Herdr workspace is not alive: {workspace_id}")
+
+    project_root = workflow_cfg.get("project_root", os.getcwd())
+
+    # Find node (by id or stage key)
+    node = find_node(workflow_cfg, node_id)
+    if not node:
+        raise RuntimeError(f"Node '{node_id}' not found in workflow definition.")
+
+    tab_id = node.get("tab_id")
+    anchor_pane_id = node.get("anchor_pane_id")
+    label = node.get("label", node_id)
+    repaired = False
+
+    # Check Tab
+    tab_alive = False
+    if tab_id:
+        res = _run(["herdr", "tab", "get", tab_id], check=False)
+        tab_alive = (res.returncode == 0)
+
+    if not tab_alive:
+        created_tab = _run_json([
+            "herdr", "tab", "create",
+            "--workspace", workspace_id,
+            "--cwd", project_root,
+            "--label", label,
+            "--no-focus",
+        ])
+        tab_result = created_tab["result"]
+        tab_id = tab_result["tab"]["tab_id"]
+        anchor_pane_id = tab_result["root_pane"]["pane_id"]
+        _run(["herdr", "pane", "rename", anchor_pane_id, "Anchor"], check=False)
+        node["tab_id"] = tab_id
+        node["anchor_pane_id"] = anchor_pane_id
+        repaired = True
+    else:
+        # Tab is alive, check Anchor Pane
+        anchor_alive = False
+        if anchor_pane_id:
+            res = _run(["herdr", "pane", "get", anchor_pane_id], check=False)
+            anchor_alive = (res.returncode == 0)
+
+        if not anchor_alive:
+            panes_data = _run_json(["herdr", "pane", "list", "--workspace", workspace_id])
+            panes_list = panes_data.get("result", {}).get("panes", [])
+            tab_panes = [p for p in panes_list if p.get("tab_id") == tab_id]
+
+            if tab_panes:
+                anchor_candidates = [p for p in tab_panes if p.get("label") == "Anchor"]
+                if anchor_candidates:
+                    anchor_pane_id = anchor_candidates[0]["pane_id"]
+                else:
+                    parent_pane = tab_panes[0]["pane_id"]
+                    split_res = _run_json([
+                        "herdr", "pane", "split",
+                        parent_pane,
+                        "--direction", "right",
+                        "--cwd", project_root,
+                        "--no-focus",
+                    ])
+                    anchor_pane_id = split_res["result"]["pane"]["pane_id"]
+                    _run(["herdr", "pane", "rename", anchor_pane_id, "Anchor"], check=False)
+
+                node["anchor_pane_id"] = anchor_pane_id
+                repaired = True
+            else:
+                created_tab = _run_json([
+                    "herdr", "tab", "create",
+                    "--workspace", workspace_id,
+                    "--cwd", project_root,
+                    "--label", label,
+                    "--no-focus",
+                ])
+                tab_result = created_tab["result"]
+                tab_id = tab_result["tab"]["tab_id"]
+                anchor_pane_id = tab_result["root_pane"]["pane_id"]
+                _run(["herdr", "pane", "rename", anchor_pane_id, "Anchor"], check=False)
+                node["tab_id"] = tab_id
+                node["anchor_pane_id"] = anchor_pane_id
+                repaired = True
+
+    if repaired:
+        normalized = normalize_workflow(workflow_cfg)
+        for n in normalized.get("nodes", []):
+            if n["id"] == node["id"]:
+                n["tab_id"] = tab_id
+                n["anchor_pane_id"] = anchor_pane_id
+        for s in normalized.get("stages", []):
+            if s["key"] == node["id"]:
+                s["tab_id"] = tab_id
+                s["anchor_pane_id"] = anchor_pane_id
+
+        if workflow_id:
+            save_workflow_config_for(workflow_id, normalized)
+        elif project and project.get("workflow_file"):
+            _save(project["workflow_file"], normalized)
+
+    return {
+        "workspace_id": workspace_id,
+        "project_root": project_root,
+        "node_id": node["id"],
+        "node_label": label,
+        "tab_id": tab_id,
+        "anchor_pane_id": anchor_pane_id,
+        "depends_on": node.get("depends_on", []),
+        "node_type": node.get("node_type", "agent"),
+        "agent_policy": node.get("agent_policy", {}),
+        "purpose": node.get("purpose", ""),
+        "default_integration_mode": node.get("default_integration_mode", "none"),
+        "default_task_type": node.get("default_task_type", "docs"),
+        "required_outputs": node.get("required_outputs", []),
+        "rules": node.get("rules", []),
+    }

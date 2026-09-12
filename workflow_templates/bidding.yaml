@@ -1,0 +1,129 @@
+name: bidding
+label: 标书生成与评审流程
+version: "1.0"
+description: 面向招投标标书制作的多 Agent 协同流程 (招标文件解析 -> 评分项提取 & 历史项目检索 -> 投标策略 -> 标书生成 -> 合规检查 -> 最终审阅)
+
+nodes:
+  - id: tender_parse
+    label: 1招标文件解析
+    node_type: agent
+    depends_on: []
+    purpose: 解析招标文件，提取关键招标要求、资质门槛、商务及技术硬性指标。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, qodercli, opencode]
+    required_outputs:
+      - 招标基本信息表
+      - 商务条款清单
+      - 核心资质要求
+      - 交付与工期约束
+    rules:
+      - 必须保证招标条款无遗漏
+      - 重点标记废标条款（带星号条款）
+
+  - id: scoring_extract
+    label: 2评分项提取
+    node_type: agent
+    depends_on: [tender_parse]
+    parallel: true
+    purpose: 提取详细评分标准与分值分布，建立逐项应答评分索引。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, codex, opencode]
+    required_outputs:
+      - 评分标准细则表
+      - 价格与技术分占比分析
+      - 加分项与减分风险点
+    rules:
+      - 与招标文件逐字逐句比对
+      - 建立评分项追踪矩阵
+
+  - id: history_search
+    label: 3历史项目检索
+    node_type: agent
+    depends_on: [tender_parse]
+    parallel: true
+    purpose: 检索历史投标案例、已沉淀素材库与过往高分方案。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [codex, opencode, claude]
+    required_outputs:
+      - 历史相似案例列表
+      - 可复用技术素材与架构图
+      - 历史投标价格参考
+    rules:
+      - 检索高相关度成功案例
+      - 识别可直接引用的合规资质与软著证明
+
+  - id: strategy
+    label: 4投标策略
+    node_type: agent
+    depends_on: [scoring_extract, history_search]
+    purpose: 结合评分细则与历史经验，制定整体应答策略、技术亮点与报价策略。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, qodercli]
+    required_outputs:
+      - 差异化应答策略
+      - 核心方案亮点与护城河
+      - 报价与风险平衡方案
+    rules:
+      - 策略需逐项针对评分标准的高分点
+      - 明确各章节重点突出内容
+
+  - id: document_generation
+    label: 5标书生成
+    node_type: agent
+    depends_on: [strategy]
+    parallel: true
+    purpose: 按照投标策略分章节撰写商务标与技术标正文。
+    default_integration_mode: git
+    default_task_type: feat
+    agent_policy:
+      preferred: [claude, opencode, codex]
+      parallel: true
+      max_agents: 3
+    required_outputs:
+      - 标书完整章节文档
+      - 技术方案说明
+      - 商务应答表与偏离表
+    rules:
+      - 格式严格符合招标格式要求
+      - 响应表逐条精准对应
+
+  - id: compliance
+    label: 6合规检查
+    node_type: agent
+    depends_on: [document_generation]
+    purpose: 自动核查标书合规性，重点检查废标条款、签字盖章点与格式偏离。
+    default_integration_mode: none
+    default_task_type: test
+    agent_policy:
+      preferred: [codex, claude, agy]
+    required_outputs:
+      - 合规审查报告
+      - 废标项排查确认单
+      - 格式偏离预警清单
+    rules:
+      - 一票否决制：任何潜在废标项必须标红报警
+      - 必须 100% 确认无缺页漏项
+
+  - id: final_review
+    label: 7最终审阅
+    node_type: human
+    depends_on: [compliance]
+    purpose: 项目负责人与专家最终审阅标书全本并确认封标。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude]
+    required_outputs:
+      - 专家审阅意见
+      - 封标审批表
+      - 打印与递交清单
+    rules:
+      - 需人工或负责人显式确认方可归档

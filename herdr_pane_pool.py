@@ -86,15 +86,16 @@ def list_slots_for_project(project):
     if not workflow:
         return []
 
-    stage_by_tab = {
-        stage.get("tab_id"): stage
-        for stage in workflow.get("stages", [])
-        if stage.get("tab_id")
+    items = workflow.get("nodes") or workflow.get("stages", [])
+    node_by_tab = {
+        item.get("tab_id"): item
+        for item in items
+        if item.get("tab_id")
     }
     anchors = {
-        stage.get("anchor_pane_id")
-        for stage in workflow.get("stages", [])
-        if stage.get("anchor_pane_id")
+        item.get("anchor_pane_id")
+        for item in items
+        if item.get("anchor_pane_id")
     }
     claimed = _claimed_panes()
     bindings = _bindings().get("panes", {})
@@ -103,20 +104,23 @@ def list_slots_for_project(project):
     for pane in _pane_list(project["workspace_id"]):
         pane_id = pane.get("pane_id")
         tab_id = pane.get("tab_id")
-        if not pane_id or tab_id not in stage_by_tab:
+        if not pane_id or tab_id not in node_by_tab:
             continue
         if pane_id in anchors or pane_id == project.get("coordinator_pane_id"):
             continue
 
         live = _live_agent(pane_id)
         claimed_by = claimed.get(pane_id)
-        stage = stage_by_tab[tab_id]
+        node = node_by_tab[tab_id]
+        node_id = node.get("id") or node.get("key")
         bound = bindings.get(pane_id, {}).get("agent", "auto")
         slots.append({
             "pane_id": pane_id,
             "tab_id": tab_id,
-            "stage": stage.get("key"),
-            "stage_label": stage.get("label"),
+            "node": node_id,
+            "stage": node_id,
+            "node_label": node.get("label"),
+            "stage_label": node.get("label"),
             "bound_agent": bound,
             "claimed_by": claimed_by,
             "live_agent": live.get("agent") if live else None,
@@ -134,13 +138,13 @@ def acquire_pane_for_task(workflow_id, stage, agent):
 
     exact = [
         s for s in slots
-        if s["available"] and s["stage"] == stage and s["bound_agent"] == agent
+        if s["available"] and (s.get("node") == stage or s.get("stage") == stage) and s["bound_agent"] == agent
     ]
     if exact:
         return exact[0]["pane_id"]
 
     generic = [
         s for s in slots
-        if s["available"] and s["stage"] == stage and s["bound_agent"] in ("auto", "", None)
+        if s["available"] and (s.get("node") == stage or s.get("stage") == stage) and s["bound_agent"] in ("auto", "", None)
     ]
     return generic[0]["pane_id"] if generic else None

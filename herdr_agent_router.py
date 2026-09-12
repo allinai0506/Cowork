@@ -13,6 +13,9 @@ TASKS_FILE = ROOT / "tasks.json"
 RESERVATIONS_FILE = ROOT / "agent-reservations.json"
 ROUTER_LOCK_FILE = ROOT / "agent-router.lock"
 
+from herdr_projects import workflow_config_for
+from herdr_workflow import find_node
+
 DEFAULT_ALLOWED = ["opencode", "codex", "qodercli", "claude", "agy", "pi"]
 
 DEFAULT_STAGE_PREFERENCES = {
@@ -137,13 +140,20 @@ def _active_agent_loads(project_id):
     return loads
 
 
-def _candidate_order(pool, stage, task_type):
+def _candidate_order(pool, stage, task_type, node_policy=None):
+    node_policy = node_policy or {}
+    preferred = list(node_policy.get("preferred", []))
+    excluded = set(node_policy.get("exclude", []))
+
     ordered = []
     for agent in [
+        *preferred,
         *pool.get("stage_preferences", {}).get(stage, []),
         *pool.get("task_type_preferences", {}).get(task_type, []),
         *pool.get("allowed_agents", []),
     ]:
+        if agent in excluded:
+            continue
         if agent not in ordered:
             ordered.append(agent)
     return ordered
@@ -161,6 +171,14 @@ def choose_agent(
     if not project_id:
         return requested if requested and requested != "auto" else "opencode"
 
+    node_policy = {}
+    if workflow_id:
+        wf_cfg = workflow_config_for(workflow_id)
+        if wf_cfg:
+            node = find_node(wf_cfg, stage)
+            if node:
+                node_policy = node.get("agent_policy", {})
+
     pool = ensure_pool_for_project(project_id)
     allowed = set(pool.get("allowed_agents", []))
     disabled = set(pool.get("disabled_agents", []))
@@ -170,6 +188,8 @@ def choose_agent(
         selected = workflow_override
     elif requested and requested != "auto":
         selected = requested
+    elif node_policy.get("fixed"):
+        selected = node_policy["fixed"]
     else:
         selected = None
 
@@ -217,7 +237,7 @@ def choose_agent(
 
         candidates = [
             agent
-            for agent in _candidate_order(pool, stage, task_type)
+            for agent in _candidate_order(pool, stage, task_type, node_policy)
             if (
                 agent in allowed
                 and agent not in disabled

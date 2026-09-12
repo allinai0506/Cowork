@@ -164,21 +164,34 @@ def run(cmd, timeout=12, cwd=None, stdin=None):
             cwd=cwd,
         )
     except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
         return {
             "timeout": True,
-            "stdout": exc.stdout or "",
-            "stderr": exc.stderr or "",
+            "stdout": stdout,
+            "stderr": stderr,
             "returncode": None,
         }
 
 
 def normalize_result(result):
     if isinstance(result, dict):
-        return result
+        stdout = result.get("stdout")
+        stderr = result.get("stderr")
+        stdout = stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else (stdout or "")
+        stderr = stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else (stderr or "")
+        return {
+            "timeout": bool(result.get("timeout")),
+            "stdout": stdout,
+            "stderr": stderr,
+            "returncode": result.get("returncode"),
+        }
+    stdout = result.stdout.decode("utf-8", errors="replace") if isinstance(result.stdout, bytes) else (result.stdout or "")
+    stderr = result.stderr.decode("utf-8", errors="replace") if isinstance(result.stderr, bytes) else (result.stderr or "")
     return {
         "timeout": False,
-        "stdout": result.stdout or "",
-        "stderr": result.stderr or "",
+        "stdout": stdout,
+        "stderr": stderr,
         "returncode": result.returncode,
     }
 

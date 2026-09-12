@@ -12,9 +12,10 @@ import subprocess
 import time
 import shutil
 
-TASKS_FILE = os.path.expanduser("~/.herdr-controller/tasks.json")
-from herdr_projects import project_for_workflow, workflow_config_for
+from herdr_projects import project_for_workflow, workflow_config_for, ensure_node_runtime
+from herdr_workflow import find_node, normalize_workflow
 
+TASKS_FILE = os.path.expanduser("~/.herdr-controller/tasks.json")
 WORKFLOW_FILE = os.path.expanduser("~/.herdr-controller/workflow.json")
 
 TRANSITIONS = {
@@ -40,32 +41,68 @@ def load_workflow(workflow_id=None):
             return workflow
 
     with open(WORKFLOW_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return normalize_workflow(json.load(f))
 
-def resolve_stage(stage_key, workflow_id=None):
+
+def resolve_node(node_id, workflow_id=None):
+    if workflow_id:
+        try:
+            runtime = ensure_node_runtime(workflow_id, node_id)
+            return {
+                "workspace_id": runtime["workspace_id"],
+                "node_id": runtime["node_id"],
+                "stage_key": runtime["node_id"],
+                "stage_label": runtime["node_label"],
+                "node_label": runtime["node_label"],
+                "tab_id": runtime["tab_id"],
+                "anchor_pane_id": runtime["anchor_pane_id"],
+                "depends_on": runtime.get("depends_on", []),
+                "next": None,
+                "agent_policy": runtime.get("agent_policy", {}),
+                "purpose": runtime.get("purpose", ""),
+                "default_integration_mode": runtime.get("default_integration_mode", "none"),
+                "default_task_type": runtime.get("default_task_type", "docs"),
+                "required_outputs": runtime.get("required_outputs", []),
+                "rules": runtime.get("rules", []),
+            }
+        except Exception:
+            # Fallback if Herdr daemon isn't running or during unit testing
+            pass
+
     workflow = load_workflow(workflow_id)
+    node = find_node(workflow, node_id)
+    if node:
+        anchor = node.get("anchor_pane_id")
+        return {
+            "workspace_id": workflow.get("workspace_id", ""),
+            "node_id": node["id"],
+            "stage_key": node["id"],
+            "stage_label": node["label"],
+            "node_label": node["label"],
+            "tab_id": node.get("tab_id"),
+            "anchor_pane_id": anchor,
+            "depends_on": node.get("depends_on", []),
+            "agent_policy": node.get("agent_policy", {}),
+            "next": None,
+        }
 
     for stage in workflow.get("stages", []):
-        if stage.get("key") == stage_key:
-            anchor = stage.get("anchor_pane_id")
-
-            if not anchor:
-                raise RuntimeError(
-                    f"Stage has no anchor_pane_id: {stage_key}"
-                )
-
+        if stage.get("key") == node_id or stage.get("id") == node_id:
             return {
-                "workspace_id": workflow["workspace_id"],
-                "stage_key": stage["key"],
-                "stage_label": stage["label"],
-                "tab_id": stage["tab_id"],
-                "anchor_pane_id": anchor,
+                "workspace_id": workflow.get("workspace_id", ""),
+                "node_id": stage.get("key") or stage.get("id"),
+                "stage_key": stage.get("key") or stage.get("id"),
+                "stage_label": stage.get("label", ""),
+                "node_label": stage.get("label", ""),
+                "tab_id": stage.get("tab_id"),
+                "anchor_pane_id": stage.get("anchor_pane_id"),
                 "next": stage.get("next"),
             }
 
-    raise RuntimeError(
-        f"Unknown workflow stage: {stage_key}"
-    )
+    raise RuntimeError(f"Unknown workflow node/stage: {node_id}")
+
+
+resolve_stage = resolve_node
 
 def load_tasks():
     if not os.path.exists(TASKS_FILE):
@@ -103,10 +140,16 @@ def add_task(args):
         print(f"Task already exists: {args.task_id}")
         sys.exit(1)
 
+    node_id = getattr(args, "node", None) or getattr(args, "stage", None)
+    if not node_id:
+        print("Error: either --node or --stage is required")
+        sys.exit(1)
+
     task = {
         "task_id": args.task_id,
         "workflow_id": args.workflow_id,
-        "stage": args.stage,
+        "node": node_id,
+        "stage": node_id,
         "workspace_id": args.workspace,
         "pane_id": args.pane,
         "agent": args.agent,
@@ -178,8 +221,13 @@ def launch_task(args):
         print(f"Task already exists: {args.task_id}")
         sys.exit(1)
 
-    stage_config = resolve_stage(
-        args.stage,
+    node_id = getattr(args, "node", None) or getattr(args, "stage", None)
+    if not node_id:
+        print("Error: either --node or --stage is required")
+        sys.exit(1)
+
+    stage_config = resolve_node(
+        node_id,
         args.workflow_id
     )
 
@@ -211,7 +259,7 @@ def launch_task(args):
 
     resolved_agent = choose_agent(
         args.workflow_id,
-        args.stage,
+        node_id,
         args.task_type,
         requested_agent,
         reservation_key=args.task_id,
@@ -219,7 +267,7 @@ def launch_task(args):
 
     prebuilt_pane = acquire_pane_for_task(
         args.workflow_id,
-        args.stage,
+        node_id,
         resolved_agent,
     )
 
@@ -330,7 +378,9 @@ def launch_task(args):
         "base_branch": base_branch,
         "coordinator_pane_id": project.get("coordinator_pane_id"),
         "workflow_config": project.get("workflow_file"),
-        "stage": args.stage,
+        "node": node_id,
+        "node_label": stage_config["node_label"],
+        "stage": node_id,
         "stage_label": stage_config["stage_label"],
         "tab_id": stage_config["tab_id"],
         "workspace_id": workspace_id,
@@ -1234,8 +1284,8 @@ def purge_task(task_id):
     print(f"[PURGED] {task_id}")
 
 
-def stage_status(workflow_id, stage_key):
-    stage = resolve_stage(stage_key, workflow_id)
+def node_status(workflow_id, node_key):
+    node = resolve_node(node_key, workflow_id)
 
     data = load_tasks()
 
@@ -1243,17 +1293,21 @@ def stage_status(workflow_id, stage_key):
         task
         for task in data["tasks"]
         if task.get("workflow_id") == workflow_id
-        and task.get("stage") == stage_key
+        and (task.get("node") == node_key or task.get("stage") == node_key)
     ]
 
     if not tasks:
         result = {
             "workflow_id": workflow_id,
-            "stage": stage_key,
-            "stage_label": stage["stage_label"],
+            "node_id": node_key,
+            "node": node_key,
+            "stage": node_key,
+            "node_label": node["node_label"],
+            "stage_label": node["stage_label"],
             "status": "empty",
             "complete": False,
-            "next_stage": stage["next"],
+            "depends_on": node.get("depends_on", []),
+            "next_stage": node.get("next"),
             "tasks": []
         }
 
@@ -1279,15 +1333,19 @@ def stage_status(workflow_id, stage_key):
 
     result = {
         "workflow_id": workflow_id,
-        "stage": stage_key,
-        "stage_label": stage["stage_label"],
+        "node_id": node_key,
+        "node": node_key,
+        "stage": node_key,
+        "node_label": node["node_label"],
+        "stage_label": node["stage_label"],
         "status": (
             "completed"
             if complete
             else "in_progress"
         ),
         "complete": complete,
-        "next_stage": stage["next"],
+        "depends_on": node.get("depends_on", []),
+        "next_stage": node.get("next"),
         "tasks": [
             {
                 "task_id": task["task_id"],
@@ -1304,6 +1362,9 @@ def stage_status(workflow_id, stage_key):
             indent=2
         )
     )
+
+
+stage_status = node_status
 
 def list_tasks(workflow_id=None):
     data = load_tasks()
@@ -1333,7 +1394,8 @@ def main():
     add = sub.add_parser("add")
     add.add_argument("--task-id", required=True)
     add.add_argument("--workflow-id", required=True)
-    add.add_argument("--stage", required=True)
+    add.add_argument("--node", default=None, help="Workflow node ID")
+    add.add_argument("--stage", default=None, help="Workflow stage key (alias for --node)")
     add.add_argument("--workspace", required=True)
     add.add_argument("--pane", required=True)
     add.add_argument("--agent", required=True)
@@ -1353,18 +1415,8 @@ def main():
     launch = sub.add_parser("launch")
     launch.add_argument("--task-id", required=True)
     launch.add_argument("--workflow-id", required=True)
-    launch.add_argument(
-        "--stage",
-        choices=[
-            "requirements",
-            "plan",
-            "implementation",
-            "test",
-            "review",
-            "wrapup"
-        ],
-        required=True
-    )
+    launch.add_argument("--node", default=None, help="Workflow node ID")
+    launch.add_argument("--stage", default=None, help="Workflow stage key (alias for --node)")
     launch.add_argument("--source", required=True)
     launch.add_argument("--agent", default="auto")
     launch.add_argument(
@@ -1423,17 +1475,15 @@ def main():
 
     stage_cmd = sub.add_parser("stage-status")
     stage_cmd.add_argument("workflow_id")
-    stage_cmd.add_argument(
-        "stage",
-        choices=[
-            "requirements",
-            "plan",
-            "implementation",
-            "test",
-            "review",
-            "wrapup"
-        ]
-    )
+    stage_cmd.add_argument("stage")
+
+    node_cmd = sub.add_parser("node-status")
+    node_cmd.add_argument("workflow_id")
+    node_cmd.add_argument("node")
+
+    ensure_cmd = sub.add_parser("ensure-runtime")
+    ensure_cmd.add_argument("workflow_id")
+    ensure_cmd.add_argument("node")
 
     list_cmd = sub.add_parser("list")
     list_cmd.add_argument("--workflow-id")
@@ -1483,6 +1533,19 @@ def main():
             args.workflow_id,
             args.stage
         )
+
+    elif args.command == "node-status":
+        node_status(
+            args.workflow_id,
+            args.node
+        )
+
+    elif args.command == "ensure-runtime":
+        res = ensure_node_runtime(
+            args.workflow_id,
+            args.node
+        )
+        print(json.dumps(res, ensure_ascii=False, indent=2))
 
     elif args.command == "list":
         list_tasks(args.workflow_id)

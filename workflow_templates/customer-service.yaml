@@ -1,0 +1,73 @@
+name: customer-service
+label: 客户投诉响应与处理流程
+version: "1.0"
+description: 面向客户客诉的自动化与人机协同工作流 (客户投诉 -> 情绪判断 -> 原因分析 -> 话术生成 -> 人工审批 -> TTS -> 发送)
+
+nodes:
+  - id: complaint_intake
+    label: 1客户投诉登记
+    node_type: agent
+    depends_on: []
+    purpose: 接收客户投诉原始信息，提取关键要素、客户背景与诉求。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, qodercli]
+
+  - id: sentiment_analysis
+    label: 2情绪判断
+    node_type: agent
+    depends_on: [complaint_intake]
+    purpose: 评估客户情绪等级、紧迫度与升级风险。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, opencode]
+
+  - id: root_cause
+    label: 3原因分析
+    node_type: agent
+    depends_on: [sentiment_analysis]
+    purpose: 关联产品日志、订单履约记录或客服历史，定位问题根因与责任方。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [codex, opencode, claude]
+
+  - id: script_generation
+    label: 4话术生成
+    node_type: agent
+    depends_on: [root_cause]
+    purpose: 根据根因与情绪策略，生成真诚、合规、具备赔付指引的应答话术。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, qodercli]
+
+  - id: human_approval
+    label: 5人工审批
+    node_type: human
+    depends_on: [script_generation]
+    purpose: 客服主管审核安抚话术与补偿方案，人工确认是否放行。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude]
+
+  - id: tts_synthesis
+    label: 6语音合成TTS
+    node_type: tool
+    depends_on: [human_approval]
+    purpose: 将审核通过的答复话术通过 TTS 工具合成为自然语音音频。
+    default_integration_mode: none
+    default_task_type: docs
+
+  - id: dispatch_response
+    label: 7发送与回访
+    node_type: agent
+    depends_on: [tts_synthesis]
+    purpose: 发送答复给客户并启动满意度回访追踪任务。
+    default_integration_mode: none
+    default_task_type: docs
+    agent_policy:
+      preferred: [claude, qodercli]
