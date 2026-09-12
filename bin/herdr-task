@@ -299,15 +299,23 @@ def _normalize_workflow_nodes(workflow):
 
 def _node_task_status_counts(tasks_for_node):
     counts = {
-        "total": len(tasks_for_node),
+        "total": 0,
         "active": 0,
         "blocked": 0,
         "failed": 0,
         "completed": 0,
+        "superseded": 0,
     }
 
     for task in tasks_for_node:
         status = task.get("status")
+        # Superseded tasks (replaced or abandoned) must not pollute the live
+        # totals. Keep this predicate in sync with is_node_complete in
+        # services/herdr-controller.py and node_status below.
+        if status == "superseded" or task.get("superseded_by"):
+            counts["superseded"] += 1
+            continue
+        counts["total"] += 1
         if status in ACTIVE_TASK_STATUSES or (status in ("pending",)):
             counts["active"] += 1
         if status == "blocked":
@@ -594,7 +602,22 @@ def _select_drilldown_task(tasks_for_node):
         if task.get("status") not in TERMINAL_STATUSES
     ]
     if not candidates:
-        return tasks_for_node[0] if tasks_for_node else None
+        # All tasks terminal — prefer the latest authoritative task (the
+        # replacement) so drilldown never lands on a retired one.
+        authoritative = [
+            task for task in tasks_for_node
+            if task.get("status") != "superseded" and not task.get("superseded_by")
+        ]
+        pool = authoritative or tasks_for_node
+        return max(
+            pool,
+            key=lambda task: (
+                _coerce_epoch(task.get("updated_at"))
+                or _coerce_epoch(task.get("last_activity_at"))
+                or _coerce_epoch(task.get("created_at"))
+                or 0
+            ),
+        )
 
     candidates.sort(key=_sort_key, reverse=True)
     return candidates[0]
@@ -618,6 +641,7 @@ def _build_workflow_cards(workflows_tasks, now):
         working = 0
         blocked = 0
         failed = 0
+        superseded = 0
         total = 0
 
         for node_id, node_tasks in sorted(all_nodes.items()):
@@ -628,8 +652,13 @@ def _build_workflow_cards(workflows_tasks, now):
             completed += counts["completed"]
             blocked += counts["blocked"]
             failed += counts["failed"]
+            superseded += counts["superseded"]
             status = "empty"
-            if counts["failed"] > 0:
+            if counts["total"] == 0 and counts["superseded"] > 0:
+                # Every task on this node was replaced or abandoned — surface
+                # it distinctly instead of masquerading as an empty node.
+                status = "superseded"
+            elif counts["failed"] > 0:
                 status = "failed"
             elif counts["blocked"] > 0:
                 status = "blocked"
@@ -651,6 +680,7 @@ def _build_workflow_cards(workflows_tasks, now):
                 "completed": counts["completed"],
                 "blocked": counts["blocked"],
                 "failed": counts["failed"],
+                "superseded": counts["superseded"],
                 "status": status,
                 "drilldown_task": drilldown_task.get("task_id") if drilldown_task else None,
             }
@@ -679,6 +709,7 @@ def _build_workflow_cards(workflows_tasks, now):
                 "completed": completed,
                 "blocked": blocked,
                 "failed": failed,
+                "superseded": superseded,
             },
             "runtime_seconds": round(runtime, 2) if runtime is not None else None,
             "runtime_bucket": _trajectory_bucket(runtime),

@@ -53,3 +53,21 @@ Root-cause analysis identified three compounding failure modes causing DAG advan
   - `coordinator_worker` refactored to a lightweight dispatcher using `ThreadPoolExecutor(max_workers=16)` with per-workflow serialization locks (`_workflow_dispatch_lock`). Each workflow's blocking prompt call runs in its own executor thread, eliminating HoL blocking across workflows.
 
 - **`tests/test_stage_advance_and_supersede.py`**: 17 new regression tests covering all five engineering changes. Full suite: 33 passed, 0 regressions.
+
+## [2026-09-12] fix | Superseded-task stats alignment across ops-center and console
+
+Root cause: the supersede exclusion predicate existed in 4 hand-written copies
+(`is_node_complete`, `node_status`, `_node_task_status_counts`, console
+`stage_summary`); the supersede feature synced only the first two, so the ops
+board counted superseded tasks in the node denominator (→ pending) and the
+console detail page fell to `mixed` (→ 处理中) while the controller had
+already advanced the DAG.
+
+- Updated [[ops-center]] §1: node/workflow `total` now counts only live tasks
+  (`status == "superseded" or superseded_by` excluded, counted separately);
+  fully retired nodes surface a distinct `superseded` status; drilldown picks
+  the latest authoritative task when all tasks are terminal.
+- Automation gate added: `tests/test_stage_advance_and_supersede.py#TestOpsCardParity`
+  pins card aggregation to `is_node_complete` (this stats-drift class recurred
+  for the 2nd time, per lessons-learned discipline #4).
+- Lessons recorded in `docs/lessons/lessons-learned.md` §7.

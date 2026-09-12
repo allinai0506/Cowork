@@ -7,7 +7,7 @@
 `FACT` 输出按以下层次组织：
 
 - `boss`: 工作中的 Agent 数、运行中的 Workflow 数、阻塞 Workflow 和待处理异常数。
-- `workflow_cards`: 每个 Workflow 的节点卡片，包含 active/completed/blocked/failed 计数、运行时长和待下钻任务。
+- `workflow_cards`: 每个 Workflow 的节点卡片，包含 active/completed/blocked/failed/superseded 计数、运行时长和待下钻任务。节点与工作流级 `total` 只含存活任务：`status == "superseded"` 或带 `superseded_by` 的任务单独计入 `superseded`，不计入分母（谓词与 `is_node_complete`/`node_status` 一致）。全部任务被取代且无后继的节点标记为 `superseded` 状态，而不是 `empty`；下钻任务在全终态时取最新的权威任务。
 - `agent_fleet`: 已知 Agent 与任务中出现的 Agent，包含健康状态、当前任务、负载、运行时长、最后结果和运行时状态。
 - `anomalies`: 只列异常，并为每种异常提供建议操作与 `herdr`/`herdr-task` 命令链接。
 
@@ -17,8 +17,11 @@ Evidence:
 - `bin/herdr-task#_ops_center_payload`
 - `bin/herdr-task#_build_boss_summary`
 - `bin/herdr-task#_build_workflow_cards`
+- `bin/herdr-task#_node_task_status_counts`
 - `bin/herdr-task#_build_agent_fleet`
 - `bin/herdr-task#_build_anomalies`
+- `tests/test_herdr_task_ops_center.py#TestSupersededStats`
+- `tests/test_stage_advance_and_supersede.py#TestOpsCardParity`
 
 ## 2. 状态、时长与流动
 

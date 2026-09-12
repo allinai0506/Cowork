@@ -238,3 +238,98 @@ class TestOpsCenterPayload(unittest.TestCase):
         self.assertEqual(agent["runtime_status"], None)
         self.assertTrue(agent["stale"])
         self.assertIn("CONTROLLER_RECOVERY", self._anomaly_kinds(payload))
+
+
+class TestSupersededStats(unittest.TestCase):
+    """Superseded tasks must not pollute ops-center node card totals.
+
+    The predicate here must stay in sync with is_node_complete in
+    services/herdr-controller.py and node_status in bin/herdr-task.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="herdr-superseded-stats-")
+        self.task_file = str(Path(self.tmp.name) / "tasks.json")
+        _ht.TASKS_FILE = self.task_file
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_card_tasks(self, tasks, node="plan"):
+        with open(self.task_file, "w", encoding="utf-8") as f:
+            json.dump(
+                {"tasks": [
+                    dict(t, workflow_id="wf-1", node=node, stage=node)
+                    for t in tasks
+                ]},
+                f,
+            )
+
+    def _card(self):
+        with patch.object(
+            _ht, "_agent_runtime_status", side_effect=lambda _: None
+        ):
+            payload = _ht._ops_center_payload(
+                workflow_id="wf-1", now=1000, include_tasks=False
+            )
+        self.assertEqual(len(payload["workflow_cards"]), 1)
+        return payload["workflow_cards"][0]
+
+    def test_counts_exclude_superseded_tasks(self):
+        counts = _ht._node_task_status_counts([
+            {"task_id": "t1", "status": "cleaned"},
+            {"task_id": "t2", "status": "superseded", "superseded_by": "t3"},
+            {"task_id": "t3", "status": "cleaned"},
+        ])
+        self.assertEqual(counts["total"], 2)
+        self.assertEqual(counts["completed"], 2)
+        self.assertEqual(counts["superseded"], 1)
+
+    def test_counts_exclude_superseded_by_carrying_tasks(self):
+        counts = _ht._node_task_status_counts([
+            {"task_id": "t1", "status": "cleaned", "superseded_by": "t2"},
+        ])
+        self.assertEqual(counts["total"], 0)
+        self.assertEqual(counts["superseded"], 1)
+
+    def test_card_node_completed_despite_superseded_task(self):
+        self._write_card_tasks([
+            {"task_id": "t1", "status": "cleaned"},
+            {"task_id": "t2", "status": "superseded", "superseded_by": "t3"},
+            {"task_id": "t3", "status": "cleaned"},
+        ])
+        node = self._card()["nodes"][0]
+        self.assertEqual(node["status"], "completed")
+        self.assertEqual(node["total"], 2)
+        self.assertEqual(node["completed"], 2)
+        self.assertEqual(node["superseded"], 1)
+
+    def test_card_workflow_totals_exclude_superseded(self):
+        self._write_card_tasks([
+            {"task_id": "t1", "status": "cleaned"},
+            {"task_id": "t2", "status": "superseded", "superseded_by": "t3"},
+            {"task_id": "t3", "status": "cleaned"},
+        ])
+        tasks = self._card()["tasks"]
+        self.assertEqual(tasks["total"], 2)
+        self.assertEqual(tasks["completed"], 2)
+        self.assertEqual(tasks["superseded"], 1)
+
+    def test_card_node_all_superseded_is_marked_superseded(self):
+        self._write_card_tasks([
+            {"task_id": "t1", "status": "superseded", "superseded_by": "t2"},
+        ])
+        node = self._card()["nodes"][0]
+        self.assertEqual(node["status"], "superseded")
+        self.assertEqual(node["total"], 0)
+
+    def test_drilldown_prefers_latest_authoritative_task(self):
+        self._write_card_tasks([
+            {"task_id": "t1", "status": "cleaned",
+             "created_at": 10, "updated_at": 20},
+            {"task_id": "t2", "status": "superseded", "superseded_by": "t3",
+             "created_at": 30, "updated_at": 40},
+            {"task_id": "t3", "status": "cleaned",
+             "created_at": 50, "updated_at": 60},
+        ])
+        self.assertEqual(self._card()["nodes"][0]["drilldown_task"], "t3")

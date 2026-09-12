@@ -300,5 +300,32 @@ class TestStageReset(unittest.TestCase):
             os.unlink(path)
 
 
+# ---------------------------------------------------------------------------
+# 6. ops-center cards vs controller parity
+# ---------------------------------------------------------------------------
+
+class TestOpsCardParity(unittest.TestCase):
+    """Ops-center node cards must agree with is_node_complete on superseded
+    tasks — regression for the 2026-09-12 stats drift (cards counted
+    superseded tasks in the denominator while is_node_complete excluded them).
+    """
+
+    def test_card_counts_match_is_node_complete(self):
+        ctrl = _load_controller("ctrl_ops_parity")
+        tasks = [
+            {"task_id": "t1", "workflow_id": "wf1", "node": "fix", "stage": "fix",
+             "status": "superseded", "superseded_by": "t2"},
+            {"task_id": "t2", "workflow_id": "wf1", "node": "fix", "stage": "fix",
+             "status": "cleaned"},
+        ]
+        ctrl.load_tasks = lambda: tasks
+
+        self.assertTrue(ctrl.is_node_complete("wf1", "fix"))
+        counts = _ht._node_task_status_counts(tasks)
+        self.assertEqual(counts["total"], counts["completed"])
+        self.assertEqual(counts["total"], 1)
+        self.assertEqual(counts["superseded"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

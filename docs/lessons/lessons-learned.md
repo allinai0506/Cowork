@@ -267,3 +267,47 @@ herdr pane read wA:p1 --source visible
 pytest tests/test_agent_router_loads.py
 bash scripts/install-herdr-console.sh
 ```
+
+---
+
+## 7. Superseded 任务统计口径漂移：同一语义多处手写必然漏改
+
+### 问题背景
+
+`herdr-task launch --supersedes` 将 plan-t2 取代为 plan-t2-rev 后，Workflow 实际早已全部完成
+（`stage-status` 判 completed、controller 判 complete、DAG 正常推进到 13/13），但运维驾驶舱的
+节点卡片统计把 superseded 计入分母却不计入 completed，节点落到 `pending`；Workflow 详情页的
+`stage_summary` 则因 superseded 不在任何状态集合里而落到 `mixed`，UI 渲染为"处理中"。
+同一语义（排除被取代任务）在仓库里有 4 处独立手写实现：`is_node_complete`
+（services/herdr-controller.py）、`node_status`（bin/herdr-task）、`_node_task_status_counts`
+（bin/herdr-task）、`stage_summary`（console），supersede 特性落地时只同步了前两处。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 节点卡片把 superseded 计入分母 | 展示聚合层必须与调度判定层使用同一谓词，否则 UI 与事实分裂 | 统一谓词：`status == "superseded" or superseded_by 存在` |
+| console stage_summary 落到 mixed | 状态枚举扩容（新增 superseded）时，所有 if/else 链都要重新审视 else 分支 | 新增终态后，聚合函数必须显式处理或过滤，不允许落入兜底分支 |
+| 口径类缺陷第二次复发 | 这是 lessons 第 6 条（Agent 负载口径）之后的同类问题 | 已按纪律升格为 pytest 门禁：`TestOpsCardParity` 钉死卡片与 `is_node_complete` 的一致性 |
+
+### 操作规范
+
+1. 涉及"被取代任务"的任何统计，统一复用组合谓词 `status == "superseded" or task.get("superseded_by")`，
+   与 `is_node_complete` / `node_status` 逐字一致；修改任一处必须同步其余处。
+2. `_node_task_status_counts` 输出独立的 `superseded` 计数桶，节点/工作流级 `total` 只含存活任务；
+   全退役节点用 `superseded` 状态展示，不得伪装成 `empty` 或 `pending`。
+3. console `stage_summary` 的 `count` 为存活任务数，`tasks` 列表保留全部记录以维持退役任务可见性。
+4. 为口径一致性新增 pytest 门禁后，任何新增统计消费方（新视图/新脚本）都应补对应 parity 用例。
+
+### 验证命令 / 证据
+
+```bash
+pytest tests/test_herdr_task_ops_center.py tests/test_stage_advance_and_supersede.py tests/test_console_stage_summary.py
+bash scripts/install-herdr-console.sh
+curl -s "http://127.0.0.1:8765/api/ops-center?workflow_id=wf-nexusarchive-54433229-20260912-194638"
+```
+
+实际修复证据：`/api/ops-center` 返回 plan 节点 `total:2 completed:2 superseded:1 status:completed`，
+`/api/workflow` 全部 stage 为 `cleaned`（修复前为 `mixed`→"处理中"）；
+drilldown 从最老的 plan-t1 变为权威的 plan-t2-rev。
+数据修补记录：plan-t2 已归一为 cleaned（备份 `~/.herdr-controller/backups/tasks.json.bak-20260912-230513`）。
