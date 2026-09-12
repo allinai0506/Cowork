@@ -1,0 +1,1657 @@
+#!/usr/bin/env python3
+
+import json
+import os
+import queue
+import socket
+import subprocess
+import threading
+import time
+
+SOCKET_PATH = os.path.expanduser("~/.config/herdr/herdr.sock")
+TASKS_FILE = os.path.expanduser("~/.herdr-controller/tasks.json")
+TASK_MANAGER = os.path.expanduser("~/herdr/herdr-task.py")
+from herdr_projects import project_for_workflow
+
+STAGE_STATE_FILE = os.path.expanduser(
+    "~/.herdr-controller/stage-state.json"
+)
+
+STAGE_POLICIES_FILE = os.path.expanduser(
+    "~/.herdr-controller/stage-policies.json"
+)
+
+COORDINATOR_PANE = "w6:p1H"
+
+
+def coordinator_pane_for_workflow(workflow_id=None):
+    if workflow_id:
+        project = project_for_workflow(workflow_id) or {}
+        pane = project.get("coordinator_pane_id")
+        if pane:
+            return pane
+
+    return COORDINATOR_PANE
+
+listeners = {}
+task_sockets = {}
+
+lock = threading.Lock()
+
+coordinator_queue = queue.Queue()
+queued_events = set()
+
+
+# ============================================================
+# Registry
+# ============================================================
+
+def load_tasks():
+    with open(TASKS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f).get("tasks", [])
+
+
+def get_task(task_id):
+    for task in load_tasks():
+        if task["task_id"] == task_id:
+            return task
+    return None
+
+
+def set_task_status(task_id, status):
+    result = subprocess.run(
+        [
+            TASK_MANAGER,
+            "set",
+            task_id,
+            status
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if result.returncode != 0:
+        print(
+            f"[STATE ERROR] {task_id}: "
+            f"{result.stdout.strip() or result.stderr.strip()}"
+        )
+        return False
+
+    print(
+        f"[STATE] "
+        f"{result.stdout.strip()}"
+    )
+
+    return True
+
+
+# ============================================================
+# Stage policies
+# ============================================================
+
+def load_stage_policies():
+    try:
+        with open(
+            STAGE_POLICIES_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            return json.load(f)
+
+    except Exception as e:
+        print(
+            f"[STAGE POLICY ERROR] {e}"
+        )
+        return {}
+
+
+def get_stage_policy(stage_key):
+    policies = load_stage_policies()
+
+    return policies.get(
+        stage_key,
+        {}
+    )
+
+
+
+# ============================================================
+# Workflow stage state
+# ============================================================
+
+def load_stage_state():
+    if not os.path.exists(STAGE_STATE_FILE):
+        return {}
+
+    try:
+        with open(
+            STAGE_STATE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_stage_state(data):
+    tmp = STAGE_STATE_FILE + ".tmp"
+
+    with open(
+        tmp,
+        "w",
+        encoding="utf-8"
+    ) as f:
+        json.dump(
+            data,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    os.replace(
+        tmp,
+        STAGE_STATE_FILE
+    )
+
+
+def stage_advance_key(
+    workflow_id,
+    stage
+):
+    return f"{workflow_id}:{stage}"
+
+
+def mark_stage_advance_queued(
+    workflow_id,
+    stage
+):
+    key = stage_advance_key(
+        workflow_id,
+        stage
+    )
+
+    with lock:
+        state = load_stage_state()
+
+        if state.get(key) in (
+            "queued",
+            "notified"
+        ):
+            return False
+
+        state[key] = "queued"
+        save_stage_state(state)
+
+    return True
+
+
+def mark_stage_advance_notified(
+    workflow_id,
+    stage
+):
+    key = stage_advance_key(
+        workflow_id,
+        stage
+    )
+
+    with lock:
+        state = load_stage_state()
+        state[key] = "notified"
+        save_stage_state(state)
+
+
+def clear_stage_advance(
+    workflow_id,
+    stage
+):
+    key = stage_advance_key(
+        workflow_id,
+        stage
+    )
+
+    with lock:
+        state = load_stage_state()
+        state.pop(key, None)
+        save_stage_state(state)
+
+
+
+# ============================================================
+# Coordinator queue
+# ============================================================
+
+def get_stage_status(
+    workflow_id,
+    stage
+):
+    try:
+        output = subprocess.check_output(
+            [
+                TASK_MANAGER,
+                "stage-status",
+                workflow_id,
+                stage
+            ],
+            text=True
+        )
+
+        return json.loads(output)
+
+    except Exception as e:
+        print(
+            f"[STAGE STATUS ERROR] "
+            f"workflow={workflow_id} "
+            f"stage={stage}: {e}"
+        )
+        return None
+
+
+def enqueue_stage_advance(task):
+    workflow_id = task.get(
+        "workflow_id"
+    )
+    stage = task.get(
+        "stage"
+    )
+
+    if not workflow_id or not stage:
+        return
+
+    status = get_stage_status(
+        workflow_id,
+        stage
+    )
+
+    if not status:
+        return
+
+    if not status.get("complete"):
+        return
+
+    next_stage = status.get(
+        "next_stage"
+    )
+
+    # wrapup 是最后阶段
+    if not next_stage:
+        print(
+            f"[WORKFLOW COMPLETE] "
+            f"workflow={workflow_id}"
+        )
+        return
+
+    if not mark_stage_advance_queued(
+        workflow_id,
+        stage
+    ):
+        print(
+            f"[STAGE ADVANCE SKIP] "
+            f"workflow={workflow_id} "
+            f"stage={stage}"
+        )
+        return
+
+    coordinator_queue.put(
+        {
+            "kind": "stage_advance",
+            "workflow_id": workflow_id,
+            "stage": stage,
+            "stage_label": status.get(
+                "stage_label"
+            ),
+            "next_stage": next_stage,
+        }
+    )
+
+    print(
+        f"[STAGE ADVANCE QUEUED] "
+        f"workflow={workflow_id} "
+        f"{stage} -> {next_stage}"
+    )
+
+
+
+def coordinator_status(workflow_id=None):
+    pane_id = coordinator_pane_for_workflow(
+        workflow_id
+    )
+
+    try:
+        output = subprocess.check_output(
+            [
+                "herdr",
+                "agent",
+                "get",
+                pane_id
+            ],
+            text=True
+        )
+
+        data = json.loads(output)
+
+        return (
+            data["result"]["agent"]
+            .get("agent_status", "unknown")
+        )
+
+    except Exception as e:
+        print(
+            f"[COORDINATOR STATUS ERROR] "
+            f"workflow={workflow_id} "
+            f"pane={pane_id}: {e}"
+        )
+        return "unknown"
+
+def build_coordinator_message(task, event_type):
+    workflow_id = task.get("workflow_id", "unknown")
+    task_id = task["task_id"]
+
+    goal = task.get("goal", "未定义")
+
+    criteria = "\n".join(
+        f"- {item}"
+        for item in task.get(
+            "acceptance_criteria",
+            []
+        )
+    )
+
+    if not criteria:
+        criteria = "- 未定义"
+
+    if event_type == "blocked":
+        return f"""
+HERDR_CONTROLLER_BLOCKED_EVENT
+
+workflow_id: {workflow_id}
+task_id: {task_id}
+stage: {task['stage']}
+pane_id: {task['pane_id']}
+agent: {task['agent']}
+agent_status: blocked
+
+任务目标：
+{goal}
+
+当前 Task 被 Agent 阻塞。
+
+你现在只负责解除阻塞，不允许验收任务。
+
+必须执行：
+
+1. 使用 Herdr 读取 {task['pane_id']} 当前界面和最新输出。
+2. 判断 blocked 的真实原因。
+3. 如果属于低风险、当前任务范围内的正常操作，可以处理审批并让 Agent 继续。
+4. 如果属于高风险操作，不得自动批准，向用户报告风险并保持 blocked。
+5. blocked 阶段不得把 Task 设置为 completed。
+6. blocked 阶段不得进行正式任务验收。
+7. Agent 恢复执行后，Controller 会自动处理 working 状态。
+8. 不要推进阶段。
+
+blocked 只表示等待处理，不代表任务结束。
+""".strip()
+
+    if event_type == "done":
+        return f"""
+HERDR_CONTROLLER_DONE_EVENT
+
+workflow_id: {workflow_id}
+task_id: {task_id}
+stage: {task['stage']}
+pane_id: {task['pane_id']}
+agent: {task['agent']}
+agent_status: done
+
+任务目标：
+{goal}
+
+验收标准：
+{criteria}
+
+Agent 本轮执行已经结束。
+
+现在执行正式验收：
+
+1. 使用 Herdr 读取 {task['pane_id']} 的最终输出。
+
+2. 必须执行：
+   ~/herdr/herdr-task.py verify-baseline {task_id}
+
+3. `verify-baseline` 是判断当前 Task 文件变化的唯一事实来源：
+
+   - `BASELINE_MATCH`
+     表示 Agent 相对于 Task 创建时没有产生新的文件变化。
+
+   - `TASK_CHANGED`
+     后面列出的文件，才是当前 Task 真正产生的变化。
+
+4. 禁止使用普通 `git status` 判断“Agent 是否修改了文件”，
+   因为 CoW Clone 会继承 Task 创建前已经存在的工作区修改。
+
+5. 如果验收标准要求“不得修改任何文件”，必须得到：
+   `BASELINE_MATCH`
+
+6. 如果任务允许修改代码，只检查 `TASK_CHANGED` 中列出的变化
+   是否符合当前 Task 的目标和范围。
+
+7. 根据任务目标和验收标准逐项验证。
+
+8. Agent done 不等于 Task completed。
+
+如果验收通过：
+
+~/herdr/herdr-task.py set {task_id} completed
+
+如果需要返工：
+
+~/herdr/herdr-task.py set {task_id} rework
+
+然后立即重新派发明确的返工任务。
+
+如果任务无法恢复：
+
+~/herdr/herdr-task.py set {task_id} failed
+
+阶段推进前必须执行：
+
+~/herdr/herdr-task.py list --workflow-id {workflow_id}
+
+只能检查当前 workflow_id 下的任务。
+
+禁止使用其他 Workflow 或历史 Task 判断当前阶段门禁。
+
+只有当前 Workflow 当前阶段所有必要 Task 都 completed，
+才能进入下一阶段。
+""".strip()
+
+    return None
+
+
+def enqueue_coordinator_event(task, event_type):
+    key = f"{task['task_id']}:{event_type}"
+
+    with lock:
+        if key in queued_events:
+            print(
+                f"[QUEUE DUPLICATE SKIPPED] {key}"
+            )
+            return
+
+        queued_events.add(key)
+
+    coordinator_queue.put(
+        {
+            "task_id": task["task_id"],
+            "event_type": event_type,
+            "key": key
+        }
+    )
+
+    print(
+        f"[QUEUE] "
+        f"task={task['task_id']} "
+        f"event={event_type}"
+    )
+
+
+def wait_for_coordinator_decision(task_id, timeout=30):
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        task = get_task(task_id)
+
+        if not task:
+            print(
+                f"[DECISION ERROR] "
+                f"task={task_id} missing"
+            )
+            return None
+
+        status = task.get("status")
+
+        if status != "agent_done":
+            print(
+                f"[DECISION] "
+                f"task={task_id} "
+                f"status={status}"
+            )
+            return status
+
+        time.sleep(0.5)
+
+    print(
+        f"[DECISION TIMEOUT] "
+        f"task={task_id} "
+        f"still=agent_done"
+    )
+
+    return "agent_done"
+
+
+def retry_coordinator_decision(task_id):
+    task = get_task(task_id)
+
+    if not task:
+        print(
+            f"[RETRY ERROR] "
+            f"task={task_id} missing"
+        )
+        return None
+
+    if task.get("status") != "agent_done":
+        return task.get("status")
+
+    message = f"""
+HERDR_CONTROLLER_RETRY_EVENT
+
+workflow_id: {task.get('workflow_id', 'unknown')}
+task_id: {task_id}
+stage: {task.get('stage', 'unknown')}
+pane_id: {task.get('pane_id', 'unknown')}
+agent: {task.get('agent', 'unknown')}
+
+这是一次自动重试。
+
+该 Task 仍停留在 agent_done，
+说明上一次验收通知没有完成状态落盘。
+
+请立即只处理这个已有 Task，不要创建新 Task：
+
+1. 读取 Task Registry。
+2. 读取 Agent 最终输出。
+3. 执行：
+   ~/herdr/herdr-task.py verify-baseline {task_id}
+4. 根据任务目标和验收标准完成正式验收。
+5. 必须将 Task 状态更新为以下之一：
+   - completed
+   - rework
+   - failed
+6. 不要只输出文字报告而不更新 Task Registry。
+""".strip()
+
+    print(
+        f"[COORDINATOR RETRY] "
+        f"task={task_id}"
+    )
+
+    result = subprocess.run(
+        [
+            "herdr",
+            "agent",
+            "prompt",
+            coordinator_pane_for_workflow(task.get("workflow_id")),
+            message,
+            "--wait",
+            "--timeout",
+            "120000"
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if result.returncode != 0:
+        print(
+            f"[COORDINATOR RETRY ERROR] "
+            f"task={task_id}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+
+    return wait_for_coordinator_decision(
+        task_id,
+        timeout=30
+    )
+
+def finalize_completed_task(task_id):
+    task = get_task(task_id)
+
+    if not task:
+        print(f"[FINALIZE SKIP] task={task_id} missing")
+        return
+
+    if task.get("status") != "completed":
+        print(
+            f"[FINALIZE SKIP] "
+            f"task={task_id} "
+            f"status={task.get('status')}"
+        )
+        return
+
+    mode = task.get(
+        "integration_mode",
+        "none"
+    )
+
+    print(
+        f"[FINALIZE] "
+        f"task={task_id} "
+        f"integration_mode={mode}"
+    )
+
+    # --------------------------------
+    # 需要 Git 集成
+    # --------------------------------
+    if mode == "git":
+
+        # 1. 将 Task 自己产生的修改安全提交
+        result = subprocess.run(
+            [
+                TASK_MANAGER,
+                "commit",
+                task_id,
+                "--message",
+                f"task: {task_id}"
+            ],
+            text=True,
+            capture_output=True
+        )
+
+        if result.stdout.strip():
+            print(result.stdout.strip())
+
+        if result.returncode != 0:
+            print(
+                f"[COMMIT ERROR] "
+                f"task={task_id}: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+            return
+
+        task = get_task(task_id)
+
+        if not task or task.get("status") != "committed":
+            print(
+                f"[FINALIZE ERROR] "
+                f"task={task_id} "
+                f"did not reach committed"
+            )
+            return
+
+        # 2. Rebase + 导入主仓库 + Integration Branch
+        result = subprocess.run(
+            [
+                TASK_MANAGER,
+                "integrate",
+                task_id
+            ],
+            text=True,
+            capture_output=True
+        )
+
+        if result.stdout.strip():
+            print(result.stdout.strip())
+
+        if result.returncode != 0:
+            print(
+                f"[INTEGRATE ERROR] "
+                f"task={task_id}: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+            return
+
+        task = get_task(task_id)
+
+        if not task or task.get("status") != "integrated":
+            print(
+                f"[FINALIZE ERROR] "
+                f"task={task_id} "
+                f"did not reach integrated"
+            )
+            return
+
+        # 3. 允许清理
+        if not set_task_status(
+            task_id,
+            "cleanup_ready"
+        ):
+            return
+
+    # --------------------------------
+    # 不需要 Git 集成
+    # --------------------------------
+    elif mode == "none":
+        if not set_task_status(
+            task_id,
+            "cleanup_ready"
+        ):
+            return
+
+    else:
+        print(
+            f"[FINALIZE ERROR] "
+            f"task={task_id} "
+            f"unknown integration_mode={mode}"
+        )
+        return
+
+    # --------------------------------
+    # 自动 Cleanup
+    # --------------------------------
+    result = subprocess.run(
+        [
+            TASK_MANAGER,
+            "cleanup",
+            task_id
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if result.stdout.strip():
+        print(result.stdout.strip())
+
+    if result.returncode != 0:
+        print(
+            f"[CLEANUP ERROR] "
+            f"task={task_id}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+        return
+
+    print(
+        f"[FINALIZED] task={task_id}"
+    )
+
+    # Task 最终 cleaned 后检查整个阶段是否已经完成。
+    task = get_task(task_id)
+
+    if task:
+        enqueue_stage_advance(
+            task
+        )
+
+
+def coordinator_worker():
+    while True:
+        item = coordinator_queue.get()
+
+        # ==============================================
+        # Workflow Stage Advance
+        # ==============================================
+        if item.get("kind") == "stage_advance":
+            workflow_id = item["workflow_id"]
+            stage = item["stage"]
+            next_stage = item["next_stage"]
+
+            project_ctx = project_for_workflow(
+                workflow_id
+            ) or {}
+
+            project_name = project_ctx.get(
+                "project_name",
+                "legacy/unknown"
+            )
+
+            project_root = project_ctx.get(
+                "project_root",
+                ""
+            )
+
+            base_branch = project_ctx.get(
+                "base_branch",
+                ""
+            )
+
+            policy = get_stage_policy(
+                next_stage
+            )
+
+            purpose = policy.get(
+                "purpose",
+                "未定义"
+            )
+
+            integration_mode = policy.get(
+                "default_integration_mode",
+                "none"
+            )
+
+            task_type = policy.get(
+                "default_task_type",
+                "test"
+            )
+
+            required_outputs = "\n".join(
+                f"- {item}"
+                for item in policy.get(
+                    "required_outputs",
+                    []
+                )
+            )
+
+            rules = "\n".join(
+                f"- {item}"
+                for item in policy.get(
+                    "rules",
+                    []
+                )
+            )
+
+            if not required_outputs:
+                required_outputs = "- 未定义"
+
+            if not rules:
+                rules = "- 未定义"
+
+            try:
+                while True:
+                    status = coordinator_status(workflow_id)
+
+                    if status in ("idle", "done"):
+                        message = f"""
+HERDR_STAGE_ADVANCE_EVENT
+
+workflow_id: {workflow_id}
+project_name: {project_name}
+project_root: {project_root}
+base_branch: {base_branch}
+completed_stage: {stage}
+next_stage: {next_stage}
+
+当前阶段已经完成。
+
+现在进入下一阶段：
+
+{next_stage}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+阶段职责
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{purpose}
+
+默认配置：
+
+integration_mode:
+{integration_mode}
+
+task_type:
+{task_type}
+
+必须产出：
+
+{required_outputs}
+
+执行规则：
+
+{rules}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+执行要求
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. 首先执行：
+
+   ~/herdr/herdr-task.py list --workflow-id {workflow_id}
+
+   阅读当前 Workflow 已完成阶段的真实成果。
+
+2. 根据前面阶段的实际成果，
+   决定当前阶段需要创建几个 Task。
+
+3. 不要固定前端、后端、数据库等角色。
+
+   Pane = Task。
+
+   Agent 根据 Task 动态选择。
+
+4. 每个 Task 必须明确：
+
+   - task_id
+   - goal
+   - acceptance criteria
+   - agent
+   - task_type
+   - integration_mode
+
+5. 创建 Task 必须使用：
+
+   ~/herdr/herdr-task.py launch
+
+   并指定：
+
+   --workflow-id {workflow_id}
+   --stage {next_stage}
+   --source {project_root}
+
+6. 默认使用本阶段 policy：
+
+   task_type={task_type}
+   integration_mode={integration_mode}
+
+   只有当前 Task 的真实性质明确需要不同配置时，
+   才允许调整。
+
+7. 不允许手工创建：
+
+   - Clone
+   - Pane
+   - Branch
+   - Agent
+
+8. 可以创建一个 Task，
+   也可以创建多个并行 Task。
+
+   数量由实际工作决定。
+
+9. 当前阶段所有必要 Task 派发完成后，
+   结束当前回合。
+
+10. 后续执行、验收、返工、阶段推进，
+    继续交给 Controller。
+
+不要等待用户提醒。
+""".strip()
+
+                        result = subprocess.run(
+                            [
+                                "herdr",
+                                "agent",
+                                "prompt",
+                                coordinator_pane_for_workflow(workflow_id),
+                                message,
+                                "--wait",
+                                "--timeout",
+                                "600000"
+                            ],
+                            text=True,
+                            capture_output=True
+                        )
+
+                        if result.returncode == 0:
+                            mark_stage_advance_notified(
+                                workflow_id,
+                                stage
+                            )
+
+                            print(
+                                f"[STAGE ADVANCED] "
+                                f"workflow={workflow_id} "
+                                f"{stage} -> {next_stage}"
+                            )
+                        else:
+                            clear_stage_advance(
+                                workflow_id,
+                                stage
+                            )
+
+                            print(
+                                f"[STAGE ADVANCE ERROR] "
+                                f"workflow={workflow_id}: "
+                                f"{result.stderr.strip() or result.stdout.strip()}"
+                            )
+
+                        break
+
+                    print(
+                        f"[STAGE ADVANCE WAIT] "
+                        f"coordinator={status} "
+                        f"workflow={workflow_id}"
+                    )
+
+                    time.sleep(1)
+
+            finally:
+                coordinator_queue.task_done()
+
+            continue
+
+        # ==============================================
+        # Normal Task Event
+        # ==============================================
+
+        task_id = item["task_id"]
+        event_type = item["event_type"]
+        key = item["key"]
+
+        expected_status = (
+            "blocked"
+            if event_type == "blocked"
+            else "agent_done"
+        )
+
+        try:
+            while True:
+                task = get_task(task_id)
+
+                if not task:
+                    print(
+                        f"[QUEUE DROP] "
+                        f"task={task_id} missing"
+                    )
+                    break
+
+                current_task_status = task.get("status")
+
+                # 事件在等待期间已经失效
+                if current_task_status != expected_status:
+                    print(
+                        f"[QUEUE STALE] "
+                        f"task={task_id} "
+                        f"expected={expected_status} "
+                        f"actual={current_task_status}"
+                    )
+                    break
+
+                status = coordinator_status(task.get("workflow_id"))
+
+                if status in ("idle", "done"):
+                    message = build_coordinator_message(
+                        task,
+                        event_type
+                    )
+
+                    print(
+                        f"[COORDINATOR READY] "
+                        f"task={task_id} "
+                        f"event={event_type}"
+                    )
+
+                    result = subprocess.run(
+                        [
+                            "herdr",
+                            "agent",
+                            "prompt",
+                            coordinator_pane_for_workflow(task.get("workflow_id")),
+                            message,
+                            "--wait",
+                            "--timeout",
+                            "600000"
+                        ],
+                        text=True,
+                        capture_output=True
+                    )
+
+                    if result.returncode == 0:
+                        print(
+                            f"[COORDINATOR NOTIFIED] "
+                            f"task={task_id} "
+                            f"event={event_type}"
+                        )
+
+                        # done 事件经过总指挥正式验收后，
+                        # 根据 integration_mode 自动集成并清理。
+                        if event_type == "done":
+                            decision = wait_for_coordinator_decision(
+                                task_id
+                            )
+
+                            # 第一次没有形成决策时，只自动重试一次。
+                            if decision == "agent_done":
+                                decision = retry_coordinator_decision(
+                                    task_id
+                                )
+
+                            if decision == "completed":
+                                finalize_completed_task(
+                                    task_id
+                                )
+
+                            elif decision == "rework":
+                                print(
+                                    f"[FINALIZE DEFER] "
+                                    f"task={task_id} "
+                                    f"status=rework"
+                                )
+
+                            elif decision == "failed":
+                                print(
+                                    f"[FINALIZE STOP] "
+                                    f"task={task_id} "
+                                    f"status=failed"
+                                )
+
+                            else:
+                                print(
+                                    f"[FINALIZE WAIT] "
+                                    f"task={task_id} "
+                                    f"status={decision}"
+                                )
+                    else:
+                        print(
+                            "[COORDINATOR ERROR]",
+                            result.stderr.strip()
+                            or result.stdout.strip()
+                        )
+
+                    break
+
+                print(
+                    f"[COORDINATOR BUSY] "
+                    f"status={status} "
+                    f"task={task_id}"
+                )
+
+                time.sleep(1)
+
+        finally:
+            with lock:
+                queued_events.discard(key)
+
+            coordinator_queue.task_done()
+
+
+# ============================================================
+# Agent events
+# ============================================================
+
+def handle_event(task_id, agent_status):
+    task = get_task(task_id)
+
+    if not task:
+        return
+
+    current_status = task.get("status")
+
+    print(
+        f"[TASK] "
+        f"id={task_id} "
+        f"workflow={task.get('workflow_id')} "
+        f"stage={task['stage']} "
+        f"pane={task['pane_id']} "
+        f"agent={task['agent']} "
+        f"status={agent_status} "
+        f"task_status={current_status}"
+    )
+
+    # 终态绝不能被 Agent 普通事件覆盖
+    if current_status in (
+        "completed",
+        "failed"
+    ):
+        return
+
+    if agent_status == "working":
+        if current_status in (
+            "dispatched",
+            "blocked",
+            "rework"
+        ):
+            set_task_status(
+                task_id,
+                "working"
+            )
+
+    elif agent_status == "idle":
+        # Agent 已经实际进入 working 后再回到 idle，
+        # 等价于本轮交互结束。
+        # dispatched -> idle 不算完成，避免尚未执行就误判。
+        if current_status == "working":
+            if set_task_status(
+                task_id,
+                "agent_done"
+            ):
+                task = get_task(task_id)
+
+                enqueue_coordinator_event(
+                    task,
+                    "done"
+                )
+
+    elif agent_status == "blocked":
+        if current_status in (
+            "working",
+            "dispatched",
+            "rework"
+        ):
+            if set_task_status(
+                task_id,
+                "blocked"
+            ):
+                task = get_task(task_id)
+
+                enqueue_coordinator_event(
+                    task,
+                    "blocked"
+                )
+
+    elif agent_status == "done":
+        if current_status == "working":
+            if set_task_status(
+                task_id,
+                "agent_done"
+            ):
+                task = get_task(task_id)
+
+                enqueue_coordinator_event(
+                    task,
+                    "done"
+                )
+
+
+# ============================================================
+# Crash recovery / startup reconciliation
+# ============================================================
+
+def get_agent_runtime_status(pane_id):
+    try:
+        output = subprocess.check_output(
+            [
+                "herdr",
+                "agent",
+                "get",
+                pane_id
+            ],
+            text=True
+        )
+
+        data = json.loads(output)
+
+        return (
+            data["result"]["agent"]
+            .get("agent_status", "unknown")
+        )
+
+    except Exception as e:
+        print(
+            f"[RECOVERY STATUS ERROR] "
+            f"pane={pane_id}: {e}"
+        )
+        return None
+
+
+def reconcile_task_state(task_id):
+    task = get_task(task_id)
+
+    if not task:
+        return
+
+    current = task.get("status")
+
+    if current in (
+        "completed",
+        "committed",
+        "integrated",
+        "cleanup_ready",
+        "cleaned",
+        "failed"
+    ):
+        return
+
+    # Registry 已经知道 Agent 执行结束，
+    # 但 Controller 可能在通知总指挥前重启。
+    if current == "agent_done":
+        print(
+            f"[RECOVERY] "
+            f"task={task_id} "
+            f"registry=agent_done "
+            f"→ restore done event"
+        )
+
+        enqueue_coordinator_event(
+            task,
+            "done"
+        )
+        return
+
+    pane_id = task.get("pane_id")
+
+    if not pane_id:
+        return
+
+    runtime = get_agent_runtime_status(
+        pane_id
+    )
+
+    if runtime is None:
+        return
+
+    print(
+        f"[RECOVERY] "
+        f"task={task_id} "
+        f"registry={current} "
+        f"agent={runtime}"
+    )
+
+    # --------------------------------
+    # Agent 当前正在运行
+    # --------------------------------
+    if runtime == "working":
+        if current in (
+            "dispatched",
+            "blocked",
+            "rework"
+        ):
+            set_task_status(
+                task_id,
+                "working"
+            )
+        return
+
+    # --------------------------------
+    # Agent 当前 blocked
+    # --------------------------------
+    if runtime == "blocked":
+        if current in (
+            "dispatched",
+            "working",
+            "rework"
+        ):
+            if not set_task_status(
+                task_id,
+                "blocked"
+            ):
+                return
+
+        task = get_task(task_id)
+
+        if task and task.get("status") == "blocked":
+            enqueue_coordinator_event(
+                task,
+                "blocked"
+            )
+
+        return
+
+    # --------------------------------
+    # Agent 已经 done，但 Controller
+    # 错过了 working/done 事件
+    # --------------------------------
+    if runtime == "done":
+        current = get_task(task_id).get(
+            "status"
+        )
+
+        if current == "dispatched":
+            if not set_task_status(
+                task_id,
+                "working"
+            ):
+                return
+
+            current = "working"
+
+        elif current in (
+            "blocked",
+            "rework"
+        ):
+            if not set_task_status(
+                task_id,
+                "working"
+            ):
+                return
+
+            current = "working"
+
+        if current == "working":
+            if not set_task_status(
+                task_id,
+                "agent_done"
+            ):
+                return
+
+        task = get_task(task_id)
+
+        if task and task.get("status") == "agent_done":
+            enqueue_coordinator_event(
+                task,
+                "done"
+            )
+
+        return
+
+    # Agent 曾经进入 working，随后 Controller 重启时发现已经 idle，
+    # 视为本轮执行已经结束。
+    if runtime == "idle" and current == "working":
+        if not set_task_status(
+            task_id,
+            "agent_done"
+        ):
+            return
+
+        task = get_task(task_id)
+
+        if task and task.get("status") == "agent_done":
+            enqueue_coordinator_event(
+                task,
+                "done"
+            )
+
+        return
+
+    # dispatched -> idle 不自动推断完成；
+    # unknown 也不自动推断。
+    print(
+        f"[RECOVERY NOOP] "
+        f"task={task_id} "
+        f"agent={runtime}"
+    )
+
+
+
+# ============================================================
+# Per-task Herdr subscriptions
+# ============================================================
+
+def listen_task(task_id):
+    task = get_task(task_id)
+
+    if not task:
+        return
+
+    pane_id = task["pane_id"]
+
+    sock = socket.socket(
+        socket.AF_UNIX,
+        socket.SOCK_STREAM
+    )
+
+    try:
+        sock.connect(SOCKET_PATH)
+
+        with lock:
+            task_sockets[task_id] = sock
+
+        request = {
+            "id": f"task-{task_id}",
+            "method": "events.subscribe",
+            "params": {
+                "subscriptions": [
+                    {
+                        "type":
+                        "pane.agent_status_changed",
+                        "pane_id": pane_id
+                    }
+                ]
+            }
+        }
+
+        sock.sendall(
+            (json.dumps(request) + "\n").encode()
+        )
+
+        file = sock.makefile("r")
+
+        first = file.readline()
+
+        if first:
+            print(
+                f"[SUBSCRIBED] "
+                f"task={task_id} "
+                f"pane={pane_id}"
+            )
+
+            # Controller 重启后立即核对
+            # Registry 与 Agent 当前真实状态。
+            reconcile_task_state(
+                task_id
+            )
+
+        for line in file:
+            if not line:
+                break
+
+            event = json.loads(line)
+
+            if (
+                event.get("event")
+                != "pane.agent_status_changed"
+            ):
+                continue
+
+            status = (
+                event["data"]
+                .get(
+                    "agent_status",
+                    "unknown"
+                )
+            )
+
+            handle_event(
+                task_id,
+                status
+            )
+
+    except Exception as e:
+        print(
+            f"[LISTENER ERROR] "
+            f"task={task_id}: {e}"
+        )
+
+    finally:
+        with lock:
+            task_sockets.pop(
+                task_id,
+                None
+            )
+            listeners.pop(
+                task_id,
+                None
+            )
+
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def start_task_listener(task_id):
+    thread = threading.Thread(
+        target=listen_task,
+        args=(task_id,),
+        daemon=True
+    )
+
+    with lock:
+        listeners[task_id] = thread
+
+    thread.start()
+
+
+def stop_task_listener(task_id):
+    with lock:
+        sock = task_sockets.pop(
+            task_id,
+            None
+        )
+
+    if sock:
+        try:
+            sock.shutdown(
+                socket.SHUT_RDWR
+            )
+        except Exception:
+            pass
+
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+        print(
+            f"[UNSUBSCRIBED] "
+            f"task={task_id}"
+        )
+
+
+# ============================================================
+# Registry watcher
+# ============================================================
+
+def registry_watcher():
+    active_statuses = {
+        "dispatched",
+        "working",
+        "blocked",
+        "agent_done",
+        "rework",
+    }
+
+    while True:
+        try:
+            tasks = load_tasks()
+
+            for task in tasks:
+                task_id = task["task_id"]
+                status = task.get("status")
+
+                if status in (
+                    "completed",
+                    "failed"
+                ):
+                    with lock:
+                        running = (
+                            task_id
+                            in task_sockets
+                        )
+
+                    if running:
+                        stop_task_listener(
+                            task_id
+                        )
+
+                    continue
+
+                if status in active_statuses:
+                    with lock:
+                        already = (
+                            task_id
+                            in listeners
+                        )
+
+                    if not already:
+                        start_task_listener(
+                            task_id
+                        )
+
+        except Exception as e:
+            print(
+                f"[REGISTRY ERROR] {e}"
+            )
+
+        time.sleep(1)
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+    print("[CONTROLLER V12] starting")
+    print(f"[REGISTRY] {TASKS_FILE}")
+    print(
+        f"[COORDINATOR] "
+        f"{COORDINATOR_PANE}"
+    )
+    print(
+        "[QUEUE] coordinator event "
+        "serialization enabled"
+    )
+
+    worker = threading.Thread(
+        target=coordinator_worker,
+        daemon=True
+    )
+    worker.start()
+
+    registry_watcher()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+
+    except KeyboardInterrupt:
+        print(
+            "\n[CONTROLLER V12] stopped"
+        )

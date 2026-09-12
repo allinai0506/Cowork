@@ -1,0 +1,581 @@
+#!/usr/bin/env python3
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import shlex
+import sys
+import time
+from pathlib import Path
+
+
+CLONE_ROOT = Path.home() / ".herdr-controller" / "clones"
+
+
+def run_json(cmd):
+    result = subprocess.run(
+        cmd,
+        text=True,
+        capture_output=True
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip()
+            or result.stdout.strip()
+        )
+
+    return json.loads(result.stdout)
+
+
+def create_clone(source, task_id):
+    source = Path(source).expanduser().resolve()
+    clone = CLONE_ROOT / task_id
+
+    if clone.exists():
+        raise RuntimeError(
+            f"Clone already exists: {clone}"
+        )
+
+    CLONE_ROOT.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    result = subprocess.run(
+        [
+            "cp",
+            "-cR",
+            str(source),
+            str(clone)
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    # macOS cp 可能因为 repo 内的 socket 给出警告，
+    # 但真正的仓库 Clone 已经成功创建。
+    if not (clone / ".git").exists():
+        raise RuntimeError(
+            result.stderr.strip()
+            or "Clone failed"
+        )
+
+    if result.stderr.strip():
+        print(
+            f"[CLONE WARNING] {result.stderr.strip()}",
+            file=sys.stderr
+        )
+
+    return clone
+
+
+def create_task_branch(clone, task_id, agent, task_type, base_branch):
+    slug = task_id.lower().replace("_", "-")
+    branch = f"agent/{agent}/{task_type}-{slug}"
+
+    fetch = subprocess.run(
+        [
+            "git", "-C", str(clone),
+            "fetch", "origin", base_branch
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    remote_exists = subprocess.run(
+        [
+            "git", "-C", str(clone),
+            "show-ref", "--verify", "--quiet",
+            f"refs/remotes/origin/{base_branch}"
+        ]
+    ).returncode == 0
+
+    local_exists = subprocess.run(
+        [
+            "git", "-C", str(clone),
+            "show-ref", "--verify", "--quiet",
+            f"refs/heads/{base_branch}"
+        ]
+    ).returncode == 0
+
+    if fetch.returncode == 0 and remote_exists:
+        base_ref = f"origin/{base_branch}"
+    elif local_exists:
+        base_ref = base_branch
+    else:
+        raise RuntimeError(
+            fetch.stderr.strip()
+            or f"Base branch not found: {base_branch}"
+        )
+
+    result = subprocess.run(
+        [
+            "git", "-C", str(clone),
+            "switch", "-c", branch, base_ref
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip()
+            or result.stdout.strip()
+        )
+
+    return branch
+
+
+def measure_complexity_baseline(clone):
+    # HERDR_OPTIONAL_COMPLEXITY_GATE
+    # Complexity gate is a per-repository capability, not a Herdr requirement.
+    _herdr_repo = Path(clone).expanduser().resolve()
+    _herdr_gate = _herdr_repo / "scripts" / "complexity-gate.cjs"
+    if not _herdr_gate.is_file():
+        return "disabled"
+    result = subprocess.run(
+        [
+            "node",
+            str(Path(clone) / "scripts" / "complexity-gate.cjs"),
+            "--baseline-total",
+            "999999",
+            "--ignore-head-snapshot"
+        ],
+        cwd=str(clone),
+        text=True,
+        capture_output=True
+    )
+
+    output = result.stdout + "\n" + result.stderr
+
+    import re
+
+    match = re.search(
+        r"当前实测:\s*(\d+)\s*条",
+        output
+    )
+
+    if not match:
+        raise RuntimeError(
+            "无法取得 complexity baseline:\n"
+            + output[-2000:]
+        )
+
+    return int(match.group(1))
+
+
+def file_fingerprint(repo, relpath):
+    path = Path(repo) / relpath
+
+    if not path.exists() and not path.is_symlink():
+        return "__MISSING__"
+
+    if path.is_symlink():
+        return "symlink:" + os.readlink(path)
+
+    if not path.is_file():
+        return "__NON_FILE__"
+
+    h = hashlib.sha256()
+
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+
+            if not chunk:
+                break
+
+            h.update(chunk)
+
+    return h.hexdigest()
+
+
+def list_dirty_tracked(repo):
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "diff",
+            "--name-only",
+            "-z",
+            "HEAD",
+            "--"
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip()
+            or result.stdout.strip()
+        )
+
+    return [
+        item
+        for item in result.stdout.split("\0")
+        if item
+    ]
+
+
+def build_baseline_fingerprint(repo):
+    tracked = {}
+
+    for relpath in list_dirty_tracked(repo):
+        tracked[relpath] = file_fingerprint(
+            repo,
+            relpath
+        )
+
+    untracked = {}
+
+    for relpath in list_untracked(repo):
+        # Controller 自己的上下文文件不属于业务变化
+        if relpath == ".agent-task-context":
+            continue
+
+        untracked[relpath] = file_fingerprint(
+            repo,
+            relpath
+        )
+
+    return {
+        "tracked": tracked,
+        "untracked": untracked
+    }
+
+
+def list_untracked(repo):
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z"
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip()
+            or result.stdout.strip()
+        )
+
+    return [
+        item
+        for item in result.stdout.split("\0")
+        if item
+    ]
+
+
+def write_task_context(clone, agent, branch):
+    baseline = measure_complexity_baseline(clone)
+
+    ctx = Path(clone) / ".agent-task-context"
+
+    ctx.write_text(
+        f"agent={agent}\n"
+        f"branch={branch}\n"
+        f"worktree={clone}\n"
+        f"complexity_baseline={baseline}\n",
+        encoding="utf-8"
+    )
+
+    return ctx, baseline
+
+
+def create_pane(parent_pane, clone):
+    data = run_json([
+        "herdr",
+        "pane",
+        "split",
+        parent_pane,
+        "--direction",
+        "right",
+        "--cwd",
+        str(clone),
+        "--no-focus"
+    ])
+
+    return data["result"]["pane"]["pane_id"]
+
+
+def prepare_existing_pane(pane_id, clone):
+    result = subprocess.run(
+        ["herdr", "pane", "run", pane_id, f"cd {shlex.quote(str(clone))}"],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip() or result.stdout.strip() or
+            f"Failed to prepare persistent pane: {pane_id}"
+        )
+    time.sleep(0.5)
+
+
+
+def ensure_claude_workspace_trust(repo):
+    repo = str(Path(repo).expanduser().resolve())
+
+    config = Path.home() / ".claude.json"
+
+    if config.exists():
+        data = json.loads(
+            config.read_text(encoding="utf-8")
+        )
+    else:
+        data = {}
+
+    projects = data.setdefault(
+        "projects",
+        {}
+    )
+
+    project = projects.setdefault(
+        repo,
+        {}
+    )
+
+    project["hasTrustDialogAccepted"] = True
+
+    tmp = config.with_suffix(".json.tmp")
+
+    tmp.write_text(
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2
+        ) + "\n",
+        encoding="utf-8"
+    )
+
+    tmp.replace(config)
+
+    print(
+        f"[CLAUDE PREFLIGHT] trusted={repo}"
+    )
+
+
+def unique_agent_name(task_id, pane_id):
+    base = re.sub(
+        r"[^a-z0-9_-]+",
+        "-",
+        task_id.lower()
+    ).strip("-_")
+
+    if not base or not base[0].isalpha():
+        base = "task-" + base
+
+    suffix = hashlib.sha1(
+        pane_id.encode("utf-8")
+    ).hexdigest()[:6]
+
+    max_base = 32 - 1 - len(suffix)
+
+    return f"{base[:max_base]}-{suffix}"
+
+
+def start_agent(task_id, agent_kind, pane_id, retries=10, delay=0.5):
+    # Temporary safety valve: OpenCode/Bun has crashed on this machine.
+    # Remove ~/.herdr-controller/opencode-disabled to re-enable OpenCode Workers.
+    if (
+        agent_kind == "opencode"
+        and (Path.home() / ".herdr-controller" / "opencode-disabled").exists()
+    ):
+        agent_kind = "pi"
+    last_err = None
+    for attempt in range(retries):
+        try:
+            agent_name = unique_agent_name(
+                task_id,
+                pane_id
+            )
+
+            cmd = [
+                "herdr",
+                "agent",
+                "start",
+                agent_name,
+                "--kind",
+                agent_kind,
+                "--pane",
+                pane_id,
+                "--timeout",
+                "120000"
+            ]
+
+            if agent_kind == "opencode":
+                cmd += ["--", "--auto"]
+
+            data = run_json(cmd)
+            return data["result"]["agent"]
+        except RuntimeError as e:
+            last_err = e
+            if "agent_pane_busy" in str(e) and attempt < retries - 1:
+                time.sleep(delay)
+                continue
+            raise
+    raise last_err
+
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--task-id",
+        required=True
+    )
+
+    parser.add_argument(
+        "--source",
+        required=True
+    )
+
+    parser.add_argument(
+        "--parent-pane"
+    )
+
+    parser.add_argument(
+        "--pane-id"
+    )
+
+    parser.add_argument(
+        "--agent",
+        required=True
+    )
+
+    parser.add_argument(
+        "--task-type",
+        choices=[
+            "fix",
+            "feat",
+            "refactor",
+            "docs",
+            "test",
+            "chore",
+            "perf",
+            "ci"
+        ],
+        default="feat"
+    )
+
+    parser.add_argument(
+        "--base-branch",
+        required=True
+    )
+
+    args = parser.parse_args()
+
+    clone = create_clone(
+        args.source,
+        args.task_id
+    )
+
+    print(f"[CLONE] {clone}")
+
+    branch = create_task_branch(
+        clone,
+        args.task_id,
+        args.agent,
+        args.task_type,
+        args.base_branch
+    )
+
+    print(f"[BRANCH] {branch}")
+
+    # 在写入 .agent-task-context 之前记录完整工作区基线。
+    # 包括：
+    # - Clone 创建时已经存在的 tracked 修改
+    # - Clone 创建时已经存在的 untracked 文件
+    baseline_fingerprint = build_baseline_fingerprint(
+        clone
+    )
+
+    baseline_untracked = sorted(
+        baseline_fingerprint["untracked"].keys()
+    )
+
+    print(
+        f"[BASELINE] "
+        f"tracked={len(baseline_fingerprint['tracked'])} "
+        f"untracked={len(baseline_fingerprint['untracked'])}"
+    )
+
+    ctx, complexity_baseline = write_task_context(
+        clone,
+        args.agent,
+        branch
+    )
+
+    print(f"[CONTEXT] {ctx}")
+    print(f"[COMPLEXITY BASELINE] {complexity_baseline}")
+
+    if args.pane_id:
+        pane_id = args.pane_id
+        prepare_existing_pane(pane_id, clone)
+        pane_source = "prebuilt"
+    else:
+        if not args.parent_pane:
+            raise RuntimeError(
+                "--parent-pane is required when --pane-id is not provided"
+            )
+        pane_id = create_pane(args.parent_pane, clone)
+        pane_source = "dynamic"
+
+    print(f"[PANE] {pane_id}")
+    print(f"[PANE SOURCE] {pane_source}")
+
+    if args.agent == "claude":
+        ensure_claude_workspace_trust(
+            clone
+        )
+
+    agent = start_agent(
+        args.task_id,
+        args.agent,
+        pane_id
+    )
+
+    result = {
+        "task_id": args.task_id,
+        "clone": str(clone),
+        "branch": branch,
+        "baseline_untracked": baseline_untracked,
+        "baseline_fingerprint": baseline_fingerprint,
+        "pane_id": pane_id,
+        "pane_source": pane_source,
+        "agent": agent.get("agent"),
+        "agent_name": agent.get("name"),
+        "status": agent.get("agent_status")
+    }
+
+    print(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2
+        )
+    )
+
+    print(
+        "HERDR_WORKER_RESULT="
+        + json.dumps(
+            result,
+            ensure_ascii=False
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

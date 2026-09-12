@@ -1,0 +1,2903 @@
+
+====================================================================================================
+/Users/user/herdr-factory
+====================================================================================================
+
+--- GLOBALS ---
+15: WORKFLOW_FILE = ROOT / "workflow.json"
+16: POLICIES_FILE = ROOT / "stage-policies.json"
+17: COORDINATOR = "w6:p1H"
+19: STAGES = ["requirements", "plan", "implementation", "test", "review", "wrapup"]
+31: def tasks_for(workflow_id):
+33:     return [t for t in data.get("tasks", []) if t.get("workflow_id") == workflow_id]
+46:         WORKFLOW_FILE,
+51:     for p in [TASKS_FILE, WORKFLOW_FILE, POLICIES_FILE]:
+62:     r = run(["launchctl", "print", SERVICE], check=False)
+66:     r = run(["herdr", "agent", "get", COORDINATOR], check=False)
+71:             add("Coordinator", bool(agent.get("agent")), f"{agent.get('agent')} / {agent.get('agent_status')}")
+73:             add("Coordinator", False, str(e))
+75:         add("Coordinator", False, r.stderr.strip())
+78:         workflow = load_json(WORKFLOW_FILE)
+79:         for stage in workflow["stages"]:
+80:             pane = stage.get("anchor_pane_id")
+82:                 add(f"anchor {stage['key']}", False, "missing")
+85:             add(f"anchor {stage['key']}", r.returncode == 0, pane)
+87:         add("Workflow anchors", False, str(e))
+101: def start_workflow(requirement, workflow_id=None, e2e=False):
+102:     if not workflow_id:
+104:         workflow_id = f"{prefix}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+108:         extra = "E2E mode: all stages must not modify project files; use integration_mode=none and task_type=test."
+110:     prompt = f"""请按照现有 Herdr 正式自动研发流程启动 Workflow。\n\nworkflow_id={workflow_id}\n\n用户需求：\n{requirement}\n\n{extra}\n\n要求：\n1. 从 requirements 阶段开始。\n2. 读取 ~/.herdr-controller/stage-policies.json。\n3. 使用 ~/herdr-task.py launch 创建 Task。\n4. 不允许手工创建 Clone、Pane、Branch、Agent。\n5. 每个 Task 必须有明确 goal 和 acceptance criteria。\n6. 第一阶段 Task 派发完成后结束当前回合。\n7. 后续阶段交给 Controller Stage Advance 自动推进。\n8. 不要等待用户提醒。"""
+112:     r = run(["herdr", "agent", "prompt", COORDINATOR, prompt], check=False)
+116:     print(f"WORKFLOW_ID={workflow_id}")
+117:     return workflow_id
+120: def status(workflow_id):
+121:     tasks = tasks_for(workflow_id)
+123:         print(f"No tasks for workflow: {workflow_id}")
+125:     print(f"Workflow: {workflow_id}")
+127:     for stage in STAGES:
+128:         stage_tasks = [t for t in tasks if t.get("stage") == stage]
+129:         if not stage_tasks:
+130:             print(f"{stage:16} -")
+132:         states = ", ".join(f"{t['task_id']}={t['status']}" for t in stage_tasks)
+133:         print(f"{stage:16} {states}")
+139:     workflow_id = f"e2e-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+141:     if not start_workflow(requirement, workflow_id, e2e=True):
+145:     print(f"E2E started: {workflow_id}")
+150:         tasks = tasks_for(workflow_id)
+151:         snapshot = tuple(sorted((t.get("stage"), t.get("task_id"), t.get("status")) for t in tasks))
+154:             for stage, task_id, state in snapshot:
+155:                 print(f"{stage:16} {task_id:36} {state}")
+162:         seen = {t.get("stage") for t in tasks}
+164:         if set(STAGES) <= seen and all_cleaned:
+179:     run_cmd.add_argument("--workflow-id")
+
+--- FUNCTIONS ---
+
+### tasks_for  lines 31-33
+def tasks_for(workflow_id):
+    data = load_json(TASKS_FILE)
+    return [t for t in data.get("tasks", []) if t.get("workflow_id") == workflow_id]
+
+### doctor  lines 36-98
+def doctor():
+    checks = []
+    def add(name, ok, detail=""):
+        checks.append((name, ok, detail))
+
+    for p in [
+        HOME / "herdr-controller.py",
+        HOME / "herdr-task.py",
+        HOME / "herdr-worker.py",
+        TASKS_FILE,
+        WORKFLOW_FILE,
+        POLICIES_FILE,
+    ]:
+        add(f"file {p.name}", p.exists(), str(p))
+
+    for p in [TASKS_FILE, WORKFLOW_FILE, POLICIES_FILE]:
+        try:
+            load_json(p)
+            add(f"json {p.name}", True)
+        except Exception as e:
+            add(f"json {p.name}", False, str(e))
+
+    r = run(["herdr", "status"], check=False)
+    add("Herdr server", r.returncode == 0 and "status: running" in r.stdout,
+        "running" if "status: running" in r.stdout else "not running")
+
+    r = run(["launchctl", "print", SERVICE], check=False)
+    add("Controller service", r.returncode == 0 and "state = running" in r.stdout,
+        "running" if r.returncode == 0 else "not running")
+
+    r = run(["herdr", "agent", "get", COORDINATOR], check=False)
+    if r.returncode == 0:
+        try:
+            data = json.loads(r.stdout)
+            agent = data["result"]["agent"]
+            add("Coordinator", bool(agent.get("agent")), f"{agent.get('agent')} / {agent.get('agent_status')}")
+        except Exception as e:
+            add("Coordinator", False, str(e))
+    else:
+        add("Coordinator", False, r.stderr.strip())
+
+    try:
+        workflow = load_json(WORKFLOW_FILE)
+        for stage in workflow["stages"]:
+            pane = stage.get("anchor_pane_id")
+            if not pane:
+                add(f"anchor {stage['key']}", False, "missing")
+                continue
+            r = run(["herdr", "pane", "get", pane], check=False)
+            add(f"anchor {stage['key']}", r.returncode == 0, pane)
+    except Exception as e:
+        add("Workflow anchors", False, str(e))
+
+    failed = False
+    print("Herdr Factory Doctor")
+    print("=" * 56)
+    for name, ok, detail in checks:
+        mark = "PASS" if ok else "FAIL"
+        print(f"[{mark}] {name}" + (f" — {detail}" if detail else ""))
+        failed = failed or not ok
+    print("=" * 56)
+    print("DOCTOR: FAIL" if failed else "DOCTOR: PASS")
+    return 1 if failed else 0
+
+### start_workflow  lines 101-117
+def start_workflow(requirement, workflow_id=None, e2e=False):
+    if not workflow_id:
+        prefix = "e2e" if e2e else "wf"
+        workflow_id = f"{prefix}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+    extra = ""
+    if e2e:
+        extra = "E2E mode: all stages must not modify project files; use integration_mode=none and task_type=test."
+
+    prompt = f"""请按照现有 Herdr 正式自动研发流程启动 Workflow。\n\nworkflow_id={workflow_id}\n\n用户需求：\n{requirement}\n\n{extra}\n\n要求：\n1. 从 requirements 阶段开始。\n2. 读取 ~/.herdr-controller/stage-policies.json。\n3. 使用 ~/herdr-task.py launch 创建 Task。\n4. 不允许手工创建 Clone、Pane、Branch、Agent。\n5. 每个 Task 必须有明确 goal 和 acceptance criteria。\n6. 第一阶段 Task 派发完成后结束当前回合。\n7. 后续阶段交给 Controller Stage Advance 自动推进。\n8. 不要等待用户提醒。"""
+
+    r = run(["herdr", "agent", "prompt", COORDINATOR, prompt], check=False)
+    if r.returncode != 0:
+        print(r.stderr.strip() or r.stdout.strip())
+        return None
+    print(f"WORKFLOW_ID={workflow_id}")
+    return workflow_id
+
+### status  lines 120-135
+def status(workflow_id):
+    tasks = tasks_for(workflow_id)
+    if not tasks:
+        print(f"No tasks for workflow: {workflow_id}")
+        return 1
+    print(f"Workflow: {workflow_id}")
+    print("=" * 80)
+    for stage in STAGES:
+        stage_tasks = [t for t in tasks if t.get("stage") == stage]
+        if not stage_tasks:
+            print(f"{stage:16} -")
+            continue
+        states = ", ".join(f"{t['task_id']}={t['status']}" for t in stage_tasks)
+        print(f"{stage:16} {states}")
+    print("=" * 80)
+    return 0
+
+### e2e  lines 138-170
+def e2e():
+    workflow_id = f"e2e-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    requirement = "验证 Herdr Factory 从需求分析、计划、实现、测试、评审到收尾可以全自动推进。这是纯流程测试，不允许修改任何项目文件。"
+    if not start_workflow(requirement, workflow_id, e2e=True):
+        print("E2E: FAIL (start)")
+        return 1
+
+    print(f"E2E started: {workflow_id}")
+    deadline = time.time() + 20 * 60
+    last_snapshot = None
+
+    while time.time() < deadline:
+        tasks = tasks_for(workflow_id)
+        snapshot = tuple(sorted((t.get("stage"), t.get("task_id"), t.get("status")) for t in tasks))
+        if snapshot and snapshot != last_snapshot:
+            print()
+            for stage, task_id, state in snapshot:
+                print(f"{stage:16} {task_id:36} {state}")
+            last_snapshot = snapshot
+
+        if any(t.get("status") == "failed" for t in tasks):
+            print("E2E: FAIL (task failed)")
+            return 1
+
+        seen = {t.get("stage") for t in tasks}
+        all_cleaned = bool(tasks) and all(t.get("status") == "cleaned" for t in tasks)
+        if set(STAGES) <= seen and all_cleaned:
+            print("E2E: PASS")
+            return 0
+        time.sleep(5)
+
+    print("E2E: FAIL (timeout)")
+    return 1
+
+### main  lines 173-193
+def main():
+    parser = argparse.ArgumentParser(prog="herdr-factory")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("doctor")
+    run_cmd = sub.add_parser("run")
+    run_cmd.add_argument("requirement", nargs="+")
+    run_cmd.add_argument("--workflow-id")
+    status_cmd = sub.add_parser("status")
+    status_cmd.add_argument("workflow_id")
+    sub.add_parser("e2e")
+    args = parser.parse_args()
+
+    if args.command == "doctor":
+        sys.exit(doctor())
+    if args.command == "run":
+        workflow_id = start_workflow(" ".join(args.requirement), args.workflow_id)
+        sys.exit(0 if workflow_id else 1)
+    if args.command == "status":
+        sys.exit(status(args.workflow_id))
+    if args.command == "e2e":
+        sys.exit(e2e())
+
+====================================================================================================
+/Users/user/herdr-task.py
+====================================================================================================
+
+--- GLOBALS ---
+14: WORKFLOW_FILE = os.path.expanduser("~/.herdr-controller/workflow.json")
+32: def load_workflow():
+33:     with open(WORKFLOW_FILE, "r", encoding="utf-8") as f:
+37: def resolve_stage(stage_key):
+38:     workflow = load_workflow()
+40:     for stage in workflow.get("stages", []):
+41:         if stage.get("key") == stage_key:
+42:             anchor = stage.get("anchor_pane_id")
+46:                     f"Stage has no anchor_pane_id: {stage_key}"
+50:                 "workspace_id": workflow["workspace_id"],
+51:                 "stage_key": stage["key"],
+52:                 "stage_label": stage["label"],
+53:                 "tab_id": stage["tab_id"],
+54:                 "anchor_pane_id": anchor,
+55:                 "next": stage.get("next"),
+59:         f"Unknown workflow stage: {stage_key}"
+101:         "workflow_id": args.workflow_id,
+102:         "stage": args.stage,
+103:         "workspace_id": args.workspace,
+167: def launch_task(args):
+174:     stage_config = resolve_stage(
+175:         args.stage
+178:     workspace_id = stage_config[
+179:         "workspace_id"
+
+--- FUNCTIONS ---
+
+### load_workflow  lines 32-34
+def load_workflow():
+    with open(WORKFLOW_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+### resolve_stage  lines 37-60
+def resolve_stage(stage_key):
+    workflow = load_workflow()
+
+    for stage in workflow.get("stages", []):
+        if stage.get("key") == stage_key:
+            anchor = stage.get("anchor_pane_id")
+
+            if not anchor:
+                raise RuntimeError(
+                    f"Stage has no anchor_pane_id: {stage_key}"
+                )
+
+            return {
+                "workspace_id": workflow["workspace_id"],
+                "stage_key": stage["key"],
+                "stage_label": stage["label"],
+                "tab_id": stage["tab_id"],
+                "anchor_pane_id": anchor,
+                "next": stage.get("next"),
+            }
+
+    raise RuntimeError(
+        f"Unknown workflow stage: {stage_key}"
+    )
+
+### add_task  lines 92-116
+def add_task(args):
+    data = load_tasks()
+
+    if find_task(data, args.task_id):
+        print(f"Task already exists: {args.task_id}")
+        sys.exit(1)
+
+    task = {
+        "task_id": args.task_id,
+        "workflow_id": args.workflow_id,
+        "stage": args.stage,
+        "workspace_id": args.workspace,
+        "pane_id": args.pane,
+        "agent": args.agent,
+        "clone_path": args.clone,
+        "integration_mode": args.integration_mode,
+        "status": "pending",
+        "goal": args.goal,
+        "acceptance_criteria": args.acceptance,
+    }
+
+    data["tasks"].append(task)
+    save_tasks(data)
+
+    print(f"Task registered: {args.task_id}")
+
+### launch_task  lines 167-305
+def launch_task(args):
+    data = load_tasks()
+
+    if find_task(data, args.task_id):
+        print(f"Task already exists: {args.task_id}")
+        sys.exit(1)
+
+    stage_config = resolve_stage(
+        args.stage
+    )
+
+    workspace_id = stage_config[
+        "workspace_id"
+    ]
+
+    parent_pane = stage_config[
+        "anchor_pane_id"
+    ]
+
+    # integration_mode=git 时，
+    # 源仓库 tracked 文件必须 clean。
+    # untracked 文件允许存在，因为 CoW Clone 需要保留完整上下文。
+    if args.integration_mode == "git":
+        source = os.path.realpath(
+            os.path.expanduser(args.source)
+        )
+
+        tracked_status = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                source,
+                "status",
+                "--porcelain",
+                "--untracked-files=no"
+            ],
+            text=True
+        ).strip()
+
+        if tracked_status:
+            print(
+                "Source repository has tracked changes; "
+                "refusing git-integrated Task:"
+            )
+            print(tracked_status)
+            sys.exit(3)
+
+    # 1. 创建 Clone + Pane + Agent
+    worker = subprocess.run(
+        [
+            os.path.expanduser("~/herdr-worker.py"),
+            "--task-id",
+            args.task_id,
+            "--source",
+            args.source,
+            "--parent-pane",
+            parent_pane,
+            "--agent",
+            args.agent,
+            "--task-type",
+            args.task_type,
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if worker.returncode != 0:
+        print(
+            "Worker failed:",
+            worker.stderr.strip()
+            or worker.stdout.strip()
+        )
+        sys.exit(1)
+
+    worker_result = None
+
+    for line in worker.stdout.splitlines():
+        if line.startswith("HERDR_WORKER_RESULT="):
+            worker_result = json.loads(
+                line.split("=", 1)[1]
+            )
+            break
+
+    if not worker_result:
+        print("Worker result not found")
+        print(worker.stdout)
+        sys.exit(1)
+
+    clone_path = worker_result["clone"]
+    branch = worker_result["branch"]
+    baseline_untracked = worker_result.get(
+        "baseline_untracked",
+        []
+    )
+    baseline_fingerprint = worker_result.get(
+        "baseline_fingerprint",
+        {
+            "tracked": {},
+            "untracked": {}
+        }
+    )
+    pane_id = worker_result["pane_id"]
+
+    print(f"[WORKER] clone={clone_path}")
+    print(f"[WORKER] pane={pane_id}")
+    print(f"[WORKER] agent={args.agent}")
+
+    # 2. 注册 Task
+    data = load_tasks()
+
+    task = {
+        "task_id": args.task_id,
+        "workflow_id": args.workflow_id,
+        "stage": args.stage,
+        "stage_label": stage_config["stage_label"],
+        "tab_id": stage_config["tab_id"],
+        "workspace_id": workspace_id,
+        "pane_id": pane_id,
+        "agent": args.agent,
+        "clone_path": clone_path,
+        "branch": branch,
+        "baseline_untracked": baseline_untracked,
+        "baseline_fingerprint": baseline_fingerprint,
+        "integration_mode": args.integration_mode,
+        "status": "pending",
+        "goal": args.goal,
+        "acceptance_criteria": args.acceptance,
+    }
+
+    data["tasks"].append(task)
+    save_tasks(data)
+
+    print(f"[REGISTERED] {args.task_id}")
+
+    # 3. Dispatch
+    dispatch_task(
+        args.task_id,
+        args.prompt
+    )
+
+### dispatch_task  lines 308-431
+def dispatch_task(task_id, prompt):
+    # Reliable delivery protocol:
+    # 1) try herdr agent prompt
+    # 2) verify lifecycle / prompt marker
+    # 3) if prompt is sitting in the composer, focus + Enter
+    # 4) if it never arrived, focus + send-text + delayed Enter
+    prompt = (
+        prompt
+        + "\n\nHERDR orchestration protocol:\n"
+        + "HERDR_ORCH_TASK:" + task_id + "\n"
+        + "When all requested work is genuinely finished, output on its own line "
+        + "the prefix HERDR_TASK_DONE: followed immediately by this task id. "
+        + "Do not quote it and do not output it before the task is complete.\n"
+    )
+
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    if task["status"] != "pending":
+        print(
+            f"Task cannot dispatch from status: "
+            f"{task['status']}"
+        )
+        sys.exit(2)
+
+    pane_id = task["pane_id"]
+    marker = "HERDR_ORCH_TASK:" + task_id
+
+    def _run(cmd):
+        return subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True
+        )
+
+    def _status():
+        r = _run(["herdr", "agent", "get", pane_id])
+        if r.returncode != 0:
+            return None
+        try:
+            return json.loads(r.stdout)["result"]["agent"].get("agent_status")
+        except Exception:
+            return None
+
+    def _visible():
+        r = _run([
+            "herdr", "pane", "read",
+            pane_id,
+            "--source", "visible"
+        ])
+        return (r.stdout or "") + "\n" + (r.stderr or "")
+
+    def _focus():
+        _run(["herdr", "agent", "focus", pane_id])
+        time.sleep(0.25)
+
+    def _press_enter():
+        return _run([
+            "herdr", "pane", "send-keys",
+            pane_id, "enter"
+        ])
+
+    def _send_full_prompt():
+        _focus()
+        r1 = _run([
+            "herdr", "pane", "send-text",
+            pane_id, prompt
+        ])
+        time.sleep(0.35)
+        r2 = _press_enter()
+        return r1.returncode == 0 and r2.returncode == 0
+
+    set_status(task_id, "dispatched")
+    time.sleep(1.5)
+
+    primary = _run([
+        "herdr",
+        "agent",
+        "prompt",
+        pane_id,
+        prompt
+    ])
+
+    deadline = time.time() + 6
+    while time.time() < deadline:
+        state = _status()
+        screen = _visible()
+
+        if state in {"working", "blocked", "done"}:
+            print(f"[PROMPT DELIVERED] task={task_id} via=agent-prompt state={state}")
+            print(f"Task dispatched: {task_id} -> {pane_id}")
+            return
+
+        if marker in screen and state in {"idle", "unknown", None}:
+            _focus()
+            _press_enter()
+            time.sleep(1.0)
+
+            state2 = _status()
+            if state2 in {"working", "blocked", "done"}:
+                print(f"[PROMPT DELIVERED] task={task_id} via=enter-fallback state={state2}")
+                print(f"Task dispatched: {task_id} -> {pane_id}")
+                return
+
+        time.sleep(0.5)
+
+    if marker not in _visible():
+        ok = _send_full_prompt()
+        if not ok:
+            set_status(task_id, "failed")
+            print(
+                f"Prompt delivery failed for {task_id}: "
+                f"{primary.stderr or primary.stdout}"
+            )
+            sys.exit(3)
+        print(f"[PROMPT FALLBACK] task={task_id} via=send-text+enter")
+    else:
+        print(f"[PROMPT PENDING] task={task_id} marker-visible; sentinel will monitor")
+
+    print(f"Task dispatched: {task_id} -> {pane_id}")
+
+### current_workspace_fingerprint  lines 459-522
+def current_workspace_fingerprint(repo):
+    tracked_result = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo,
+            "diff",
+            "--name-only",
+            "-z",
+            "HEAD",
+            "--"
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if tracked_result.returncode != 0:
+        raise RuntimeError(
+            tracked_result.stderr.strip()
+            or tracked_result.stdout.strip()
+        )
+
+    tracked_paths = [
+        item
+        for item in tracked_result.stdout.split("\0")
+        if item
+    ]
+
+    untracked_result = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z"
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if untracked_result.returncode != 0:
+        raise RuntimeError(
+            untracked_result.stderr.strip()
+            or untracked_result.stdout.strip()
+        )
+
+    untracked_paths = [
+        item
+        for item in untracked_result.stdout.split("\0")
+        if item and item != ".agent-task-context"
+    ]
+
+    return {
+        "tracked": {
+            p: fingerprint_file(repo, p)
+            for p in tracked_paths
+        },
+        "untracked": {
+            p: fingerprint_file(repo, p)
+            for p in untracked_paths
+        }
+    }
+
+### verify_baseline  lines 525-600
+def verify_baseline(task_id):
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    clone = task.get("clone_path")
+
+    if not clone or not os.path.isdir(clone):
+        print(f"Clone not found: {clone}")
+        sys.exit(2)
+
+    baseline = task.get("baseline_fingerprint")
+
+    if baseline is None:
+        print(
+            f"Task has no baseline_fingerprint: "
+            f"{task_id}"
+        )
+        sys.exit(3)
+
+    current = current_workspace_fingerprint(clone)
+
+    changes = []
+
+    for kind in ("tracked", "untracked"):
+        before = baseline.get(kind, {})
+        after = current.get(kind, {})
+
+        all_paths = sorted(
+            set(before.keys()) | set(after.keys())
+        )
+
+        for relpath in all_paths:
+            old = before.get(
+                relpath,
+                "__NOT_PRESENT__"
+            )
+            new = after.get(
+                relpath,
+                "__NOT_PRESENT__"
+            )
+
+            if old != new:
+                changes.append({
+                    "type": kind,
+                    "path": relpath,
+                    "baseline": old,
+                    "current": new
+                })
+
+    if not changes:
+        print("BASELINE_MATCH")
+        return
+
+    print("TASK_CHANGED:")
+
+    for item in changes:
+        print(
+            f"- [{item['type']}] "
+            f"{item['path']}"
+        )
+
+    print(
+        "HERDR_BASELINE_RESULT="
+        + json.dumps(
+            {
+                "task_id": task_id,
+                "baseline_match": False,
+                "changes": changes
+            },
+            ensure_ascii=False
+        )
+    )
+
+### commit_task  lines 603-751
+def commit_task(task_id, message=None):
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    if task["status"] != "completed":
+        print(
+            f"Task cannot commit from status: "
+            f"{task['status']}"
+        )
+        sys.exit(2)
+
+    clone = task.get("clone_path")
+
+    if not clone:
+        print("Task missing clone_path")
+        sys.exit(1)
+
+    clone = os.path.realpath(
+        os.path.expanduser(clone)
+    )
+
+    baseline_untracked = set(
+        task.get("baseline_untracked", [])
+    )
+
+    # 当前 untracked
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            clone,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z"
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if result.returncode != 0:
+        print(result.stderr.strip())
+        sys.exit(1)
+
+    current_untracked = {
+        item
+        for item in result.stdout.split("\0")
+        if item
+    }
+
+    # 只允许提交 Task 新产生的 untracked
+    task_untracked = sorted(
+        current_untracked - baseline_untracked
+    )
+
+    # tracked 文件在 Task 创建前要求 clean，
+    # 因此当前 tracked 修改全部属于该 Task。
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            clone,
+            "add",
+            "-u"
+        ],
+        check=True
+    )
+
+    if task_untracked:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                clone,
+                "add",
+                "--",
+                *task_untracked
+            ],
+            check=True
+        )
+
+    # 必须确实存在 staged changes
+    staged = subprocess.run(
+        [
+            "git",
+            "-C",
+            clone,
+            "diff",
+            "--cached",
+            "--quiet"
+        ]
+    )
+
+    if staged.returncode == 0:
+        print(
+            f"Task has no changes to commit: "
+            f"{task_id}"
+        )
+        sys.exit(3)
+
+    if message is None:
+        message = f"task: {task_id}"
+
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            clone,
+            "commit",
+            "-m",
+            message
+        ],
+        text=True
+    )
+
+    if result.returncode != 0:
+        print(
+            f"Commit failed: {task_id}"
+        )
+        sys.exit(result.returncode)
+
+    commit_hash = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            clone,
+            "rev-parse",
+            "HEAD"
+        ],
+        text=True
+    ).strip()
+
+    # 保存 commit hash
+    data = load_tasks()
+    task = find_task(data, task_id)
+    task["commit"] = commit_hash
+    save_tasks(data)
+
+    set_status(
+        task_id,
+        "committed"
+    )
+
+    print(f"[COMMITTED] {task_id}")
+    print(f"[COMMIT] {commit_hash}")
+
+### integrate_task  lines 754-1035
+def integrate_task(task_id):
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    if task["status"] != "committed":
+        print(
+            f"Task cannot integrate from status: "
+            f"{task['status']}"
+        )
+        sys.exit(2)
+
+    clone = task.get("clone_path")
+    branch = task.get("branch")
+
+    if not clone or not branch:
+        print("Task missing clone_path or branch")
+        sys.exit(1)
+
+    clone = os.path.realpath(
+        os.path.expanduser(clone)
+    )
+
+    # Commit 完成后，Clone 不要求绝对 clean。
+    # CoW Clone 可能继承 Task 创建前已经存在的 untracked 基线文件。
+    # 此处只要求当前工作区重新回到 Task 创建时的 baseline_fingerprint。
+    baseline = task.get("baseline_fingerprint")
+
+    if baseline is None:
+        print(
+            f"Task has no baseline_fingerprint: "
+            f"{task_id}"
+        )
+        sys.exit(3)
+
+    current = current_workspace_fingerprint(
+        clone
+    )
+
+    if current != baseline:
+        print(
+            "Clone working tree differs from "
+            "Task baseline after commit:"
+        )
+
+        before_tracked = baseline.get(
+            "tracked",
+            {}
+        )
+        after_tracked = current.get(
+            "tracked",
+            {}
+        )
+
+        before_untracked = baseline.get(
+            "untracked",
+            {}
+        )
+        after_untracked = current.get(
+            "untracked",
+            {}
+        )
+
+        for kind, before, after in (
+            ("tracked", before_tracked, after_tracked),
+            ("untracked", before_untracked, after_untracked),
+        ):
+            for relpath in sorted(
+                set(before) | set(after)
+            ):
+                if (
+                    before.get(relpath, "__NOT_PRESENT__")
+                    != after.get(relpath, "__NOT_PRESENT__")
+                ):
+                    print(
+                        f"- [{kind}] {relpath}"
+                    )
+
+        sys.exit(3)
+
+    print("[BASELINE RESTORED] working tree matches Task baseline")
+
+    # 更新最新 origin/dev
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            clone,
+            "fetch",
+            "origin",
+            "dev"
+        ],
+        check=True
+    )
+
+    # Task Branch 重放到最新 origin/dev
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            clone,
+            "rebase",
+            "origin/dev"
+        ],
+        check=True
+    )
+
+    # 必须保持 origin/dev -> Task 单向前进
+    relation = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            clone,
+            "rev-list",
+            "--left-right",
+            "--count",
+            "origin/dev...HEAD"
+        ],
+        text=True
+    ).strip().split()
+
+    if len(relation) != 2 or relation[0] != "0":
+        print(
+            "Task branch is not based cleanly "
+            "on latest origin/dev"
+        )
+        sys.exit(4)
+
+    # 主仓库从 source 推导
+    source_repo = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            clone,
+            "remote",
+            "get-url",
+            "origin"
+        ],
+        text=True
+    ).strip()
+
+    # 本机真实主仓库由 Task 的 workspace 项目决定；
+    # 当前 NexusArchive 固定使用此路径。
+    main_repo = "/Users/user/nexusarchive"
+
+    herdr_ref = (
+        f"refs/herdr/tasks/{task_id}"
+    )
+
+    # 导入 Clone Branch 到主仓库对象库
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "fetch",
+            clone,
+            f"{branch}:{herdr_ref}",
+            "--force"
+        ],
+        check=True
+    )
+
+    # 创建/更新主仓库正式 Task Branch
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "branch",
+            "-f",
+            branch,
+            herdr_ref
+        ],
+        check=True
+    )
+
+    integration_branch = (
+        f"herdr/integration-{task_id}"
+    )
+
+    # 主仓库必须处于 dev 且工作区干净
+    main_status = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "status",
+            "--porcelain"
+        ],
+        text=True
+    ).strip()
+
+    if main_status:
+        print("Main repository is not clean")
+        sys.exit(5)
+
+    current_branch = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "branch",
+            "--show-current"
+        ],
+        text=True
+    ).strip()
+
+    if current_branch != "dev":
+        print(
+            f"Main repository must be on dev, "
+            f"current={current_branch}"
+        )
+        sys.exit(6)
+
+    # 创建 Integration Branch
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "switch",
+            "-c",
+            integration_branch,
+            "dev"
+        ],
+        check=True
+    )
+
+    # 只允许 fast-forward
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "merge",
+            "--ff-only",
+            branch
+        ]
+    )
+
+    if result.returncode != 0:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                main_repo,
+                "switch",
+                "dev"
+            ]
+        )
+        print("Integration failed")
+        sys.exit(7)
+
+    # 返回 dev；Integration Branch 保留供 review / PR
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "switch",
+            "dev"
+        ],
+        check=True
+    )
+
+    task["integration_branch"] = integration_branch
+    task["integration_ref"] = herdr_ref
+    save_tasks(data)
+
+    set_status(
+        task_id,
+        "integrated"
+    )
+
+    print(f"[INTEGRATED] {task_id}")
+    print(f"[TASK BRANCH] {branch}")
+    print(f"[INTEGRATION BRANCH] {integration_branch}")
+    print(f"[HERDR REF] {herdr_ref}")
+
+### stage_status  lines 1126-1195
+def stage_status(workflow_id, stage_key):
+    stage = resolve_stage(stage_key)
+
+    data = load_tasks()
+
+    tasks = [
+        task
+        for task in data["tasks"]
+        if task.get("workflow_id") == workflow_id
+        and task.get("stage") == stage_key
+    ]
+
+    if not tasks:
+        result = {
+            "workflow_id": workflow_id,
+            "stage": stage_key,
+            "stage_label": stage["stage_label"],
+            "status": "empty",
+            "complete": False,
+            "next_stage": stage["next"],
+            "tasks": []
+        }
+
+        print(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                indent=2
+            )
+        )
+        return
+
+    complete = all(
+        task.get("status") in (
+            "completed",
+            "committed",
+            "integrated",
+            "cleanup_ready",
+            "cleaned"
+        )
+        for task in tasks
+    )
+
+    result = {
+        "workflow_id": workflow_id,
+        "stage": stage_key,
+        "stage_label": stage["stage_label"],
+        "status": (
+            "completed"
+            if complete
+            else "in_progress"
+        ),
+        "complete": complete,
+        "next_stage": stage["next"],
+        "tasks": [
+            {
+                "task_id": task["task_id"],
+                "status": task["status"]
+            }
+            for task in tasks
+        ]
+    }
+
+    print(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2
+        )
+    )
+
+### list_tasks  lines 1198-1216
+def list_tasks(workflow_id=None):
+    data = load_tasks()
+
+    tasks = data["tasks"]
+
+    if workflow_id:
+        tasks = [
+            task
+            for task in tasks
+            if task.get("workflow_id") == workflow_id
+        ]
+
+    print(
+        json.dumps(
+            {"tasks": tasks},
+            ensure_ascii=False,
+            indent=2
+        )
+    )
+
+### main  lines 1219-1372
+def main():
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    add = sub.add_parser("add")
+    add.add_argument("--task-id", required=True)
+    add.add_argument("--workflow-id", required=True)
+    add.add_argument("--stage", required=True)
+    add.add_argument("--workspace", required=True)
+    add.add_argument("--pane", required=True)
+    add.add_argument("--agent", required=True)
+    add.add_argument("--clone")
+    add.add_argument(
+        "--integration-mode",
+        choices=["git", "none"],
+        default="none"
+    )
+    add.add_argument("--goal", required=True)
+    add.add_argument(
+        "--acceptance",
+        action="append",
+        default=[]
+    )
+
+    launch = sub.add_parser("launch")
+    launch.add_argument("--task-id", required=True)
+    launch.add_argument("--workflow-id", required=True)
+    launch.add_argument(
+        "--stage",
+        choices=[
+            "requirements",
+            "plan",
+            "implementation",
+            "test",
+            "review",
+            "wrapup"
+        ],
+        required=True
+    )
+    launch.add_argument("--source", required=True)
+    launch.add_argument("--agent", required=True)
+    launch.add_argument(
+        "--task-type",
+        choices=[
+            "fix",
+            "feat",
+            "refactor",
+            "docs",
+            "test",
+            "chore",
+            "perf",
+            "ci"
+        ],
+        default="feat"
+    )
+    launch.add_argument(
+        "--integration-mode",
+        choices=["git", "none"],
+        default="none"
+    )
+    launch.add_argument("--goal", required=True)
+    launch.add_argument(
+        "--acceptance",
+        action="append",
+        default=[]
+    )
+    launch.add_argument("--prompt", required=True)
+
+    dispatch = sub.add_parser("dispatch")
+    dispatch.add_argument("task_id")
+    dispatch.add_argument("--prompt", required=True)
+
+    verify_cmd = sub.add_parser("verify-baseline")
+    verify_cmd.add_argument("task_id")
+
+    commit_cmd = sub.add_parser("commit")
+    commit_cmd.add_argument("task_id")
+    commit_cmd.add_argument("--message")
+
+    integrate = sub.add_parser("integrate")
+    integrate.add_argument("task_id")
+
+    cleanup = sub.add_parser("cleanup")
+    cleanup.add_argument("task_id")
+
+    get = sub.add_parser("get")
+    get.add_argument("task_id")
+
+    set_cmd = sub.add_parser("set")
+    set_cmd.add_argument("task_id")
+    set_cmd.add_argument("status")
+
+    stage_cmd = sub.add_parser("stage-status")
+    stage_cmd.add_argument("workflow_id")
+    stage_cmd.add_argument(
+        "stage",
+        choices=[
+            "requirements",
+            "plan",
+            "implementation",
+            "test",
+            "review",
+            "wrapup"
+        ]
+    )
+
+    list_cmd = sub.add_parser("list")
+    list_cmd.add_argument("--workflow-id")
+
+    args = parser.parse_args()
+
+    if args.command == "add":
+        add_task(args)
+
+    elif args.command == "launch":
+        launch_task(args)
+
+    elif args.command == "dispatch":
+        dispatch_task(
+            args.task_id,
+            args.prompt
+        )
+
+    elif args.command == "verify-baseline":
+        verify_baseline(
+            args.task_id
+        )
+
+    elif args.command == "commit":
+        commit_task(
+            args.task_id,
+            args.message
+        )
+
+    elif args.command == "integrate":
+        integrate_task(args.task_id)
+
+    elif args.command == "cleanup":
+        cleanup_task(args.task_id)
+
+    elif args.command == "get":
+        get_task(args.task_id)
+
+    elif args.command == "set":
+        set_status(args.task_id, args.status)
+
+    elif args.command == "stage-status":
+        stage_status(
+            args.workflow_id,
+            args.stage
+        )
+
+    elif args.command == "list":
+        list_tasks(args.workflow_id)
+
+====================================================================================================
+/Users/user/herdr-controller.py
+====================================================================================================
+
+--- GLOBALS ---
+14: STAGE_STATE_FILE = os.path.expanduser(
+15:     "~/.herdr-controller/stage-state.json"
+18: STAGE_POLICIES_FILE = os.path.expanduser(
+19:     "~/.herdr-controller/stage-policies.json"
+22: COORDINATOR_PANE = "w6:p1H"
+29: coordinator_queue = queue.Queue()
+77: # Stage policies
+80: def load_stage_policies():
+83:             STAGE_POLICIES_FILE,
+91:             f"[STAGE POLICY ERROR] {e}"
+96: def get_stage_policy(stage_key):
+97:     policies = load_stage_policies()
+100:         stage_key,
+107: # Workflow stage state
+110: def load_stage_state():
+111:     if not os.path.exists(STAGE_STATE_FILE):
+116:             STAGE_STATE_FILE,
+125: def save_stage_state(data):
+126:     tmp = STAGE_STATE_FILE + ".tmp"
+142:         STAGE_STATE_FILE
+146: def stage_advance_key(
+147:     workflow_id,
+148:     stage
+150:     return f"{workflow_id}:{stage}"
+153: def mark_stage_advance_queued(
+154:     workflow_id,
+155:     stage
+157:     key = stage_advance_key(
+158:         workflow_id,
+159:         stage
+163:         state = load_stage_state()
+172:         save_stage_state(state)
+177: def mark_stage_advance_notified(
+178:     workflow_id,
+179:     stage
+
+--- FUNCTIONS ---
+
+### load_stage_policies  lines 80-93
+def load_stage_policies():
+    try:
+        with open(
+            STAGE_POLICIES_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            return json.load(f)
+
+    except Exception as e:
+        print(
+            f"[STAGE POLICY ERROR] {e}"
+        )
+        return {}
+
+### get_stage_policy  lines 96-102
+def get_stage_policy(stage_key):
+    policies = load_stage_policies()
+
+    return policies.get(
+        stage_key,
+        {}
+    )
+
+### load_stage_state  lines 110-122
+def load_stage_state():
+    if not os.path.exists(STAGE_STATE_FILE):
+        return {}
+
+    try:
+        with open(
+            STAGE_STATE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+### save_stage_state  lines 125-143
+def save_stage_state(data):
+    tmp = STAGE_STATE_FILE + ".tmp"
+
+    with open(
+        tmp,
+        "w",
+        encoding="utf-8"
+    ) as f:
+        json.dump(
+            data,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    os.replace(
+        tmp,
+        STAGE_STATE_FILE
+    )
+
+### stage_advance_key  lines 146-150
+def stage_advance_key(
+    workflow_id,
+    stage
+):
+    return f"{workflow_id}:{stage}"
+
+### mark_stage_advance_queued  lines 153-174
+def mark_stage_advance_queued(
+    workflow_id,
+    stage
+):
+    key = stage_advance_key(
+        workflow_id,
+        stage
+    )
+
+    with lock:
+        state = load_stage_state()
+
+        if state.get(key) in (
+            "queued",
+            "notified"
+        ):
+            return False
+
+        state[key] = "queued"
+        save_stage_state(state)
+
+    return True
+
+### mark_stage_advance_notified  lines 177-189
+def mark_stage_advance_notified(
+    workflow_id,
+    stage
+):
+    key = stage_advance_key(
+        workflow_id,
+        stage
+    )
+
+    with lock:
+        state = load_stage_state()
+        state[key] = "notified"
+        save_stage_state(state)
+
+### clear_stage_advance  lines 192-204
+def clear_stage_advance(
+    workflow_id,
+    stage
+):
+    key = stage_advance_key(
+        workflow_id,
+        stage
+    )
+
+    with lock:
+        state = load_stage_state()
+        state.pop(key, None)
+        save_stage_state(state)
+
+### get_stage_status  lines 212-235
+def get_stage_status(
+    workflow_id,
+    stage
+):
+    try:
+        output = subprocess.check_output(
+            [
+                TASK_MANAGER,
+                "stage-status",
+                workflow_id,
+                stage
+            ],
+            text=True
+        )
+
+        return json.loads(output)
+
+    except Exception as e:
+        print(
+            f"[STAGE STATUS ERROR] "
+            f"workflow={workflow_id} "
+            f"stage={stage}: {e}"
+        )
+        return None
+
+### enqueue_stage_advance  lines 238-299
+def enqueue_stage_advance(task):
+    workflow_id = task.get(
+        "workflow_id"
+    )
+    stage = task.get(
+        "stage"
+    )
+
+    if not workflow_id or not stage:
+        return
+
+    status = get_stage_status(
+        workflow_id,
+        stage
+    )
+
+    if not status:
+        return
+
+    if not status.get("complete"):
+        return
+
+    next_stage = status.get(
+        "next_stage"
+    )
+
+    # wrapup 是最后阶段
+    if not next_stage:
+        print(
+            f"[WORKFLOW COMPLETE] "
+            f"workflow={workflow_id}"
+        )
+        return
+
+    if not mark_stage_advance_queued(
+        workflow_id,
+        stage
+    ):
+        print(
+            f"[STAGE ADVANCE SKIP] "
+            f"workflow={workflow_id} "
+            f"stage={stage}"
+        )
+        return
+
+    coordinator_queue.put(
+        {
+            "kind": "stage_advance",
+            "workflow_id": workflow_id,
+            "stage": stage,
+            "stage_label": status.get(
+                "stage_label"
+            ),
+            "next_stage": next_stage,
+        }
+    )
+
+    print(
+        f"[STAGE ADVANCE QUEUED] "
+        f"workflow={workflow_id} "
+        f"{stage} -> {next_stage}"
+    )
+
+### coordinator_status  lines 303-324
+def coordinator_status():
+    try:
+        output = subprocess.check_output(
+            [
+                "herdr",
+                "agent",
+                "get",
+                COORDINATOR_PANE
+            ],
+            text=True
+        )
+
+        data = json.loads(output)
+
+        return (
+            data["result"]["agent"]
+            .get("agent_status", "unknown")
+        )
+
+    except Exception as e:
+        print(f"[COORDINATOR STATUS ERROR] {e}")
+        return "unknown"
+
+### build_coordinator_message  lines 327-449
+def build_coordinator_message(task, event_type):
+    workflow_id = task.get("workflow_id", "unknown")
+    task_id = task["task_id"]
+
+    goal = task.get("goal", "未定义")
+
+    criteria = "\n".join(
+        f"- {item}"
+        for item in task.get(
+            "acceptance_criteria",
+            []
+        )
+    )
+
+    if not criteria:
+        criteria = "- 未定义"
+
+    if event_type == "blocked":
+        return f"""
+HERDR_CONTROLLER_BLOCKED_EVENT
+
+workflow_id: {workflow_id}
+task_id: {task_id}
+stage: {task['stage']}
+pane_id: {task['pane_id']}
+agent: {task['agent']}
+agent_status: blocked
+
+任务目标：
+{goal}
+
+当前 Task 被 Agent 阻塞。
+
+你现在只负责解除阻塞，不允许验收任务。
+
+必须执行：
+
+1. 使用 Herdr 读取 {task['pane_id']} 当前界面和最新输出。
+2. 判断 blocked 的真实原因。
+3. 如果属于低风险、当前任务范围内的正常操作，可以处理审批并让 Agent 继续。
+4. 如果属于高风险操作，不得自动批准，向用户报告风险并保持 blocked。
+5. blocked 阶段不得把 Task 设置为 completed。
+6. blocked 阶段不得进行正式任务验收。
+7. Agent 恢复执行后，Controller 会自动处理 working 状态。
+8. 不要推进阶段。
+
+blocked 只表示等待处理，不代表任务结束。
+""".strip()
+
+    if event_type == "done":
+        return f"""
+HERDR_CONTROLLER_DONE_EVENT
+
+workflow_id: {workflow_id}
+task_id: {task_id}
+stage: {task['stage']}
+pane_id: {task['pane_id']}
+agent: {task['agent']}
+agent_status: done
+
+任务目标：
+{goal}
+
+验收标准：
+{criteria}
+
+Agent 本轮执行已经结束。
+
+现在执行正式验收：
+
+1. 使用 Herdr 读取 {task['pane_id']} 的最终输出。
+
+2. 必须执行：
+   ~/herdr-task.py verify-baseline {task_id}
+
+3. `verify-baseline` 是判断当前 Task 文件变化的唯一事实来源：
+
+   - `BASELINE_MATCH`
+     表示 Agent 相对于 Task 创建时没有产生新的文件变化。
+
+   - `TASK_CHANGED`
+     后面列出的文件，才是当前 Task 真正产生的变化。
+
+4. 禁止使用普通 `git status` 判断“Agent 是否修改了文件”，
+   因为 CoW Clone 会继承 Task 创建前已经存在的工作区修改。
+
+5. 如果验收标准要求“不得修改任何文件”，必须得到：
+   `BASELINE_MATCH`
+
+6. 如果任务允许修改代码，只检查 `TASK_CHANGED` 中列出的变化
+   是否符合当前 Task 的目标和范围。
+
+7. 根据任务目标和验收标准逐项验证。
+
+8. Agent done 不等于 Task completed。
+
+如果验收通过：
+
+~/herdr-task.py set {task_id} completed
+
+如果需要返工：
+
+~/herdr-task.py set {task_id} rework
+
+然后立即重新派发明确的返工任务。
+
+如果任务无法恢复：
+
+~/herdr-task.py set {task_id} failed
+
+阶段推进前必须执行：
+
+~/herdr-task.py list --workflow-id {workflow_id}
+
+只能检查当前 workflow_id 下的任务。
+
+禁止使用其他 Workflow 或历史 Task 判断当前阶段门禁。
+
+只有当前 Workflow 当前阶段所有必要 Task 都 completed，
+才能进入下一阶段。
+""".strip()
+
+    return None
+
+### enqueue_coordinator_event  lines 452-476
+def enqueue_coordinator_event(task, event_type):
+    key = f"{task['task_id']}:{event_type}"
+
+    with lock:
+        if key in queued_events:
+            print(
+                f"[QUEUE DUPLICATE SKIPPED] {key}"
+            )
+            return
+
+        queued_events.add(key)
+
+    coordinator_queue.put(
+        {
+            "task_id": task["task_id"],
+            "event_type": event_type,
+            "key": key
+        }
+    )
+
+    print(
+        f"[QUEUE] "
+        f"task={task['task_id']} "
+        f"event={event_type}"
+    )
+
+### wait_for_coordinator_decision  lines 479-510
+def wait_for_coordinator_decision(task_id, timeout=30):
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        task = get_task(task_id)
+
+        if not task:
+            print(
+                f"[DECISION ERROR] "
+                f"task={task_id} missing"
+            )
+            return None
+
+        status = task.get("status")
+
+        if status != "agent_done":
+            print(
+                f"[DECISION] "
+                f"task={task_id} "
+                f"status={status}"
+            )
+            return status
+
+        time.sleep(0.5)
+
+    print(
+        f"[DECISION TIMEOUT] "
+        f"task={task_id} "
+        f"still=agent_done"
+    )
+
+    return "agent_done"
+
+### retry_coordinator_decision  lines 513-584
+def retry_coordinator_decision(task_id):
+    task = get_task(task_id)
+
+    if not task:
+        print(
+            f"[RETRY ERROR] "
+            f"task={task_id} missing"
+        )
+        return None
+
+    if task.get("status") != "agent_done":
+        return task.get("status")
+
+    message = f"""
+HERDR_CONTROLLER_RETRY_EVENT
+
+workflow_id: {task.get('workflow_id', 'unknown')}
+task_id: {task_id}
+stage: {task.get('stage', 'unknown')}
+pane_id: {task.get('pane_id', 'unknown')}
+agent: {task.get('agent', 'unknown')}
+
+这是一次自动重试。
+
+该 Task 仍停留在 agent_done，
+说明上一次验收通知没有完成状态落盘。
+
+请立即只处理这个已有 Task，不要创建新 Task：
+
+1. 读取 Task Registry。
+2. 读取 Agent 最终输出。
+3. 执行：
+   ~/herdr-task.py verify-baseline {task_id}
+4. 根据任务目标和验收标准完成正式验收。
+5. 必须将 Task 状态更新为以下之一：
+   - completed
+   - rework
+   - failed
+6. 不要只输出文字报告而不更新 Task Registry。
+""".strip()
+
+    print(
+        f"[COORDINATOR RETRY] "
+        f"task={task_id}"
+    )
+
+    result = subprocess.run(
+        [
+            "herdr",
+            "agent",
+            "prompt",
+            COORDINATOR_PANE,
+            message,
+            "--wait",
+            "--timeout",
+            "120000"
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if result.returncode != 0:
+        print(
+            f"[COORDINATOR RETRY ERROR] "
+            f"task={task_id}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+
+    return wait_for_coordinator_decision(
+        task_id,
+        timeout=30
+    )
+
+### finalize_completed_task  lines 587-743
+def finalize_completed_task(task_id):
+    task = get_task(task_id)
+
+    if not task:
+        print(f"[FINALIZE SKIP] task={task_id} missing")
+        return
+
+    if task.get("status") != "completed":
+        print(
+            f"[FINALIZE SKIP] "
+            f"task={task_id} "
+            f"status={task.get('status')}"
+        )
+        return
+
+    mode = task.get(
+        "integration_mode",
+        "none"
+    )
+
+    print(
+        f"[FINALIZE] "
+        f"task={task_id} "
+        f"integration_mode={mode}"
+    )
+
+    # --------------------------------
+    # 需要 Git 集成
+    # --------------------------------
+    if mode == "git":
+
+        # 1. 将 Task 自己产生的修改安全提交
+        result = subprocess.run(
+            [
+                TASK_MANAGER,
+                "commit",
+                task_id,
+                "--message",
+                f"task: {task_id}"
+            ],
+            text=True,
+            capture_output=True
+        )
+
+        if result.stdout.strip():
+            print(result.stdout.strip())
+
+        if result.returncode != 0:
+            print(
+                f"[COMMIT ERROR] "
+                f"task={task_id}: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+            return
+
+        task = get_task(task_id)
+
+        if not task or task.get("status") != "committed":
+            print(
+                f"[FINALIZE ERROR] "
+                f"task={task_id} "
+                f"did not reach committed"
+            )
+            return
+
+        # 2. Rebase + 导入主仓库 + Integration Branch
+        result = subprocess.run(
+            [
+                TASK_MANAGER,
+                "integrate",
+                task_id
+            ],
+            text=True,
+            capture_output=True
+        )
+
+        if result.stdout.strip():
+            print(result.stdout.strip())
+
+        if result.returncode != 0:
+            print(
+                f"[INTEGRATE ERROR] "
+                f"task={task_id}: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+            return
+
+        task = get_task(task_id)
+
+        if not task or task.get("status") != "integrated":
+            print(
+                f"[FINALIZE ERROR] "
+                f"task={task_id} "
+                f"did not reach integrated"
+            )
+            return
+
+        # 3. 允许清理
+        if not set_task_status(
+            task_id,
+            "cleanup_ready"
+        ):
+            return
+
+    # --------------------------------
+    # 不需要 Git 集成
+    # --------------------------------
+    elif mode == "none":
+        if not set_task_status(
+            task_id,
+            "cleanup_ready"
+        ):
+            return
+
+    else:
+        print(
+            f"[FINALIZE ERROR] "
+            f"task={task_id} "
+            f"unknown integration_mode={mode}"
+        )
+        return
+
+    # --------------------------------
+    # 自动 Cleanup
+    # --------------------------------
+    result = subprocess.run(
+        [
+            TASK_MANAGER,
+            "cleanup",
+            task_id
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if result.stdout.strip():
+        print(result.stdout.strip())
+
+    if result.returncode != 0:
+        print(
+            f"[CLEANUP ERROR] "
+            f"task={task_id}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+        return
+
+    print(
+        f"[FINALIZED] task={task_id}"
+    )
+
+    # Task 最终 cleaned 后检查整个阶段是否已经完成。
+    task = get_task(task_id)
+
+    if task:
+        enqueue_stage_advance(
+            task
+        )
+
+### coordinator_worker  lines 746-1090
+def coordinator_worker():
+    while True:
+        item = coordinator_queue.get()
+
+        # ==============================================
+        # Workflow Stage Advance
+        # ==============================================
+        if item.get("kind") == "stage_advance":
+            workflow_id = item["workflow_id"]
+            stage = item["stage"]
+            next_stage = item["next_stage"]
+
+            policy = get_stage_policy(
+                next_stage
+            )
+
+            purpose = policy.get(
+                "purpose",
+                "未定义"
+            )
+
+            integration_mode = policy.get(
+                "default_integration_mode",
+                "none"
+            )
+
+            task_type = policy.get(
+                "default_task_type",
+                "test"
+            )
+
+            required_outputs = "\n".join(
+                f"- {item}"
+                for item in policy.get(
+                    "required_outputs",
+                    []
+                )
+            )
+
+            rules = "\n".join(
+                f"- {item}"
+                for item in policy.get(
+                    "rules",
+                    []
+                )
+            )
+
+            if not required_outputs:
+                required_outputs = "- 未定义"
+
+            if not rules:
+                rules = "- 未定义"
+
+            try:
+                while True:
+                    status = coordinator_status()
+
+                    if status in ("idle", "done"):
+                        message = f"""
+HERDR_STAGE_ADVANCE_EVENT
+
+workflow_id: {workflow_id}
+completed_stage: {stage}
+next_stage: {next_stage}
+
+当前阶段已经完成。
+
+现在进入下一阶段：
+
+{next_stage}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+阶段职责
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{purpose}
+
+默认配置：
+
+integration_mode:
+{integration_mode}
+
+task_type:
+{task_type}
+
+必须产出：
+
+{required_outputs}
+
+执行规则：
+
+{rules}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+执行要求
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. 首先执行：
+
+   ~/herdr-task.py list --workflow-id {workflow_id}
+
+   阅读当前 Workflow 已完成阶段的真实成果。
+
+2. 根据前面阶段的实际成果，
+   决定当前阶段需要创建几个 Task。
+
+3. 不要固定前端、后端、数据库等角色。
+
+   Pane = Task。
+
+   Agent 根据 Task 动态选择。
+
+4. 每个 Task 必须明确：
+
+   - task_id
+   - goal
+   - acceptance criteria
+   - agent
+   - task_type
+   - integration_mode
+
+5. 创建 Task 必须使用：
+
+   ~/herdr-task.py launch
+
+   并指定：
+
+   --workflow-id {workflow_id}
+   --stage {next_stage}
+
+6. 默认使用本阶段 policy：
+
+   task_type={task_type}
+   integration_mode={integration_mode}
+
+   只有当前 Task 的真实性质明确需要不同配置时，
+   才允许调整。
+
+7. 不允许手工创建：
+
+   - Clone
+   - Pane
+   - Branch
+   - Agent
+
+8. 可以创建一个 Task，
+   也可以创建多个并行 Task。
+
+   数量由实际工作决定。
+
+9. 当前阶段所有必要 Task 派发完成后，
+   结束当前回合。
+
+10. 后续执行、验收、返工、阶段推进，
+    继续交给 Controller。
+
+不要等待用户提醒。
+""".strip()
+
+                        result = subprocess.run(
+                            [
+                                "herdr",
+                                "agent",
+                                "prompt",
+                                COORDINATOR_PANE,
+                                message,
+                                "--wait",
+                                "--timeout",
+                                "600000"
+                            ],
+                            text=True,
+                            capture_output=True
+                        )
+
+                        if result.returncode == 0:
+                            mark_stage_advance_notified(
+                                workflow_id,
+                                stage
+                            )
+
+                            print(
+                                f"[STAGE ADVANCED] "
+                                f"workflow={workflow_id} "
+                                f"{stage} -> {next_stage}"
+                            )
+                        else:
+                            clear_stage_advance(
+                                workflow_id,
+                                stage
+                            )
+
+                            print(
+                                f"[STAGE ADVANCE ERROR] "
+                                f"workflow={workflow_id}: "
+                                f"{result.stderr.strip() or result.stdout.strip()}"
+                            )
+
+                        break
+
+                    print(
+                        f"[STAGE ADVANCE WAIT] "
+                        f"coordinator={status} "
+                        f"workflow={workflow_id}"
+                    )
+
+                    time.sleep(1)
+
+            finally:
+                coordinator_queue.task_done()
+
+            continue
+
+        # ==============================================
+        # Normal Task Event
+        # ==============================================
+
+        task_id = item["task_id"]
+        event_type = item["event_type"]
+        key = item["key"]
+
+        expected_status = (
+            "blocked"
+            if event_type == "blocked"
+            else "agent_done"
+        )
+
+        try:
+            while True:
+                task = get_task(task_id)
+
+                if not task:
+                    print(
+                        f"[QUEUE DROP] "
+                        f"task={task_id} missing"
+                    )
+                    break
+
+                current_task_status = task.get("status")
+
+                # 事件在等待期间已经失效
+                if current_task_status != expected_status:
+                    print(
+                        f"[QUEUE STALE] "
+                        f"task={task_id} "
+                        f"expected={expected_status} "
+                        f"actual={current_task_status}"
+                    )
+                    break
+
+                status = coordinator_status()
+
+                if status in ("idle", "done"):
+                    message = build_coordinator_message(
+                        task,
+                        event_type
+                    )
+
+                    print(
+                        f"[COORDINATOR READY] "
+                        f"task={task_id} "
+                        f"event={event_type}"
+                    )
+
+                    result = subprocess.run(
+                        [
+                            "herdr",
+                            "agent",
+                            "prompt",
+                            COORDINATOR_PANE,
+                            message,
+                            "--wait",
+                            "--timeout",
+                            "600000"
+                        ],
+                        text=True,
+                        capture_output=True
+                    )
+
+                    if result.returncode == 0:
+                        print(
+                            f"[COORDINATOR NOTIFIED] "
+                            f"task={task_id} "
+                            f"event={event_type}"
+                        )
+
+                        # done 事件经过总指挥正式验收后，
+                        # 根据 integration_mode 自动集成并清理。
+                        if event_type == "done":
+                            decision = wait_for_coordinator_decision(
+                                task_id
+                            )
+
+                            # 第一次没有形成决策时，只自动重试一次。
+                            if decision == "agent_done":
+                                decision = retry_coordinator_decision(
+                                    task_id
+                                )
+
+                            if decision == "completed":
+                                finalize_completed_task(
+                                    task_id
+                                )
+
+                            elif decision == "rework":
+                                print(
+                                    f"[FINALIZE DEFER] "
+                                    f"task={task_id} "
+                                    f"status=rework"
+                                )
+
+                            elif decision == "failed":
+                                print(
+                                    f"[FINALIZE STOP] "
+                                    f"task={task_id} "
+                                    f"status=failed"
+                                )
+
+                            else:
+                                print(
+                                    f"[FINALIZE WAIT] "
+                                    f"task={task_id} "
+                                    f"status={decision}"
+                                )
+                    else:
+                        print(
+                            "[COORDINATOR ERROR]",
+                            result.stderr.strip()
+                            or result.stdout.strip()
+                        )
+
+                    break
+
+                print(
+                    f"[COORDINATOR BUSY] "
+                    f"status={status} "
+                    f"task={task_id}"
+                )
+
+                time.sleep(1)
+
+        finally:
+            with lock:
+                queued_events.discard(key)
+
+            coordinator_queue.task_done()
+
+### handle_event  lines 1097-1178
+def handle_event(task_id, agent_status):
+    task = get_task(task_id)
+
+    if not task:
+        return
+
+    current_status = task.get("status")
+
+    print(
+        f"[TASK] "
+        f"id={task_id} "
+        f"workflow={task.get('workflow_id')} "
+        f"stage={task['stage']} "
+        f"pane={task['pane_id']} "
+        f"agent={task['agent']} "
+        f"status={agent_status} "
+        f"task_status={current_status}"
+    )
+
+    # 终态绝不能被 Agent 普通事件覆盖
+    if current_status in (
+        "completed",
+        "failed"
+    ):
+        return
+
+    if agent_status == "working":
+        if current_status in (
+            "dispatched",
+            "blocked",
+            "rework"
+        ):
+            set_task_status(
+                task_id,
+                "working"
+            )
+
+    elif agent_status == "idle":
+        # Agent 已经实际进入 working 后再回到 idle，
+        # 等价于本轮交互结束。
+        # dispatched -> idle 不算完成，避免尚未执行就误判。
+        if current_status == "working":
+            if set_task_status(
+                task_id,
+                "agent_done"
+            ):
+                task = get_task(task_id)
+
+                enqueue_coordinator_event(
+                    task,
+                    "done"
+                )
+
+    elif agent_status == "blocked":
+        if current_status in (
+            "working",
+            "dispatched",
+            "rework"
+        ):
+            if set_task_status(
+                task_id,
+                "blocked"
+            ):
+                task = get_task(task_id)
+
+                enqueue_coordinator_event(
+                    task,
+                    "blocked"
+                )
+
+    elif agent_status == "done":
+        if current_status == "working":
+            if set_task_status(
+                task_id,
+                "agent_done"
+            ):
+                task = get_task(task_id)
+
+                enqueue_coordinator_event(
+                    task,
+                    "done"
+                )
+
+### reconcile_task_state  lines 1212-1377
+def reconcile_task_state(task_id):
+    task = get_task(task_id)
+
+    if not task:
+        return
+
+    current = task.get("status")
+
+    if current in (
+        "completed",
+        "committed",
+        "integrated",
+        "cleanup_ready",
+        "cleaned",
+        "failed"
+    ):
+        return
+
+    # Registry 已经知道 Agent 执行结束，
+    # 但 Controller 可能在通知总指挥前重启。
+    if current == "agent_done":
+        print(
+            f"[RECOVERY] "
+            f"task={task_id} "
+            f"registry=agent_done "
+            f"→ restore done event"
+        )
+
+        enqueue_coordinator_event(
+            task,
+            "done"
+        )
+        return
+
+    pane_id = task.get("pane_id")
+
+    if not pane_id:
+        return
+
+    runtime = get_agent_runtime_status(
+        pane_id
+    )
+
+    if runtime is None:
+        return
+
+    print(
+        f"[RECOVERY] "
+        f"task={task_id} "
+        f"registry={current} "
+        f"agent={runtime}"
+    )
+
+    # --------------------------------
+    # Agent 当前正在运行
+    # --------------------------------
+    if runtime == "working":
+        if current in (
+            "dispatched",
+            "blocked",
+            "rework"
+        ):
+            set_task_status(
+                task_id,
+                "working"
+            )
+        return
+
+    # --------------------------------
+    # Agent 当前 blocked
+    # --------------------------------
+    if runtime == "blocked":
+        if current in (
+            "dispatched",
+            "working",
+            "rework"
+        ):
+            if not set_task_status(
+                task_id,
+                "blocked"
+            ):
+                return
+
+        task = get_task(task_id)
+
+        if task and task.get("status") == "blocked":
+            enqueue_coordinator_event(
+                task,
+                "blocked"
+            )
+
+        return
+
+    # --------------------------------
+    # Agent 已经 done，但 Controller
+    # 错过了 working/done 事件
+    # --------------------------------
+    if runtime == "done":
+        current = get_task(task_id).get(
+            "status"
+        )
+
+        if current == "dispatched":
+            if not set_task_status(
+                task_id,
+                "working"
+            ):
+                return
+
+            current = "working"
+
+        elif current in (
+            "blocked",
+            "rework"
+        ):
+            if not set_task_status(
+                task_id,
+                "working"
+            ):
+                return
+
+            current = "working"
+
+        if current == "working":
+            if not set_task_status(
+                task_id,
+                "agent_done"
+            ):
+                return
+
+        task = get_task(task_id)
+
+        if task and task.get("status") == "agent_done":
+            enqueue_coordinator_event(
+                task,
+                "done"
+            )
+
+        return
+
+    # Agent 曾经进入 working，随后 Controller 重启时发现已经 idle，
+    # 视为本轮执行已经结束。
+    if runtime == "idle" and current == "working":
+        if not set_task_status(
+            task_id,
+            "agent_done"
+        ):
+            return
+
+        task = get_task(task_id)
+
+        if task and task.get("status") == "agent_done":
+            enqueue_coordinator_event(
+                task,
+                "done"
+            )
+
+        return
+
+    # dispatched -> idle 不自动推断完成；
+    # unknown 也不自动推断。
+    print(
+        f"[RECOVERY NOOP] "
+        f"task={task_id} "
+        f"agent={runtime}"
+    )
+
+### main  lines 1588-1606
+def main():
+    print("[CONTROLLER V12] starting")
+    print(f"[REGISTRY] {TASKS_FILE}")
+    print(
+        f"[COORDINATOR] "
+        f"{COORDINATOR_PANE}"
+    )
+    print(
+        "[QUEUE] coordinator event "
+        "serialization enabled"
+    )
+
+    worker = threading.Thread(
+        target=coordinator_worker,
+        daemon=True
+    )
+    worker.start()
+
+    registry_watcher()
+
+====================================================================================================
+/Users/user/herdr-worker.py
+====================================================================================================
+
+--- GLOBALS ---
+32: def create_clone(source, task_id):
+33:     source = Path(source).expanduser().resolve()
+50:             str(source),
+
+--- FUNCTIONS ---
+
+### create_clone  lines 32-71
+def create_clone(source, task_id):
+    source = Path(source).expanduser().resolve()
+    clone = CLONE_ROOT / task_id
+
+    if clone.exists():
+        raise RuntimeError(
+            f"Clone already exists: {clone}"
+        )
+
+    CLONE_ROOT.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    result = subprocess.run(
+        [
+            "cp",
+            "-cR",
+            str(source),
+            str(clone)
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    # macOS cp 可能因为 repo 内的 socket 给出警告，
+    # 但真正的仓库 Clone 已经成功创建。
+    if not (clone / ".git").exists():
+        raise RuntimeError(
+            result.stderr.strip()
+            or "Clone failed"
+        )
+
+    if result.stderr.strip():
+        print(
+            f"[CLONE WARNING] {result.stderr.strip()}",
+            file=sys.stderr
+        )
+
+    return clone
+
+### main  lines 313-435
+def main():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--task-id",
+        required=True
+    )
+
+    parser.add_argument(
+        "--source",
+        required=True
+    )
+
+    parser.add_argument(
+        "--parent-pane",
+        required=True
+    )
+
+    parser.add_argument(
+        "--agent",
+        required=True
+    )
+
+    parser.add_argument(
+        "--task-type",
+        choices=[
+            "fix",
+            "feat",
+            "refactor",
+            "docs",
+            "test",
+            "chore",
+            "perf",
+            "ci"
+        ],
+        default="feat"
+    )
+
+    args = parser.parse_args()
+
+    clone = create_clone(
+        args.source,
+        args.task_id
+    )
+
+    print(f"[CLONE] {clone}")
+
+    branch = create_task_branch(
+        clone,
+        args.task_id,
+        args.agent,
+        args.task_type
+    )
+
+    print(f"[BRANCH] {branch}")
+
+    # 在写入 .agent-task-context 之前记录完整工作区基线。
+    # 包括：
+    # - Clone 创建时已经存在的 tracked 修改
+    # - Clone 创建时已经存在的 untracked 文件
+    baseline_fingerprint = build_baseline_fingerprint(
+        clone
+    )
+
+    baseline_untracked = sorted(
+        baseline_fingerprint["untracked"].keys()
+    )
+
+    print(
+        f"[BASELINE] "
+        f"tracked={len(baseline_fingerprint['tracked'])} "
+        f"untracked={len(baseline_fingerprint['untracked'])}"
+    )
+
+    ctx, complexity_baseline = write_task_context(
+        clone,
+        args.agent,
+        branch
+    )
+
+    print(f"[CONTEXT] {ctx}")
+    print(f"[COMPLEXITY BASELINE] {complexity_baseline}")
+
+    pane_id = create_pane(
+        args.parent_pane,
+        clone
+    )
+
+    print(f"[PANE] {pane_id}")
+
+    agent = start_agent(
+        args.task_id,
+        args.agent,
+        pane_id
+    )
+
+    result = {
+        "task_id": args.task_id,
+        "clone": str(clone),
+        "branch": branch,
+        "baseline_untracked": baseline_untracked,
+        "baseline_fingerprint": baseline_fingerprint,
+        "pane_id": pane_id,
+        "agent": agent.get("agent"),
+        "agent_name": agent.get("name"),
+        "status": agent.get("agent_status")
+    }
+
+    print(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2
+        )
+    )
+
+    print(
+        "HERDR_WORKER_RESULT="
+        + json.dumps(
+            result,
+            ensure_ascii=False
+        )
+    )
+
+DONE

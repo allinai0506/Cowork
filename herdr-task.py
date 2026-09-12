@@ -1,0 +1,1492 @@
+#!/usr/bin/env python3
+from herdr_pane_pool import acquire_pane_for_task
+from herdr_agent_router import choose_agent, release_agent_reservation
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+import subprocess
+import time
+import shutil
+
+TASKS_FILE = os.path.expanduser("~/.herdr-controller/tasks.json")
+from herdr_projects import project_for_workflow, workflow_config_for
+
+WORKFLOW_FILE = os.path.expanduser("~/.herdr-controller/workflow.json")
+
+TRANSITIONS = {
+    "pending": {"dispatched", "failed"},
+    "dispatched": {"working", "blocked", "failed"},
+    "working": {"blocked", "agent_done", "failed"},
+    "blocked": {"working", "failed"},
+    "agent_done": {"completed", "rework", "failed"},
+    "rework": {"working", "blocked", "failed"},
+    "completed": {"committed", "cleanup_ready"},
+    "committed": {"integrated"},
+    "integrated": {"cleanup_ready"},
+    "cleanup_ready": {"cleaned"},
+    "cleaned": set(),
+    "failed": set(),
+}
+
+
+def load_workflow(workflow_id=None):
+    if workflow_id:
+        workflow = workflow_config_for(workflow_id)
+        if workflow:
+            return workflow
+
+    with open(WORKFLOW_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def resolve_stage(stage_key, workflow_id=None):
+    workflow = load_workflow(workflow_id)
+
+    for stage in workflow.get("stages", []):
+        if stage.get("key") == stage_key:
+            anchor = stage.get("anchor_pane_id")
+
+            if not anchor:
+                raise RuntimeError(
+                    f"Stage has no anchor_pane_id: {stage_key}"
+                )
+
+            return {
+                "workspace_id": workflow["workspace_id"],
+                "stage_key": stage["key"],
+                "stage_label": stage["label"],
+                "tab_id": stage["tab_id"],
+                "anchor_pane_id": anchor,
+                "next": stage.get("next"),
+            }
+
+    raise RuntimeError(
+        f"Unknown workflow stage: {stage_key}"
+    )
+
+def load_tasks():
+    if not os.path.exists(TASKS_FILE):
+        return {"tasks": []}
+
+    with open(TASKS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_tasks(data):
+    tmp = TASKS_FILE + ".tmp"
+
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(
+            data,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    os.replace(tmp, TASKS_FILE)
+
+
+def find_task(data, task_id):
+    for task in data["tasks"]:
+        if task["task_id"] == task_id:
+            return task
+    return None
+
+
+def add_task(args):
+    data = load_tasks()
+
+    if find_task(data, args.task_id):
+        print(f"Task already exists: {args.task_id}")
+        sys.exit(1)
+
+    task = {
+        "task_id": args.task_id,
+        "workflow_id": args.workflow_id,
+        "stage": args.stage,
+        "workspace_id": args.workspace,
+        "pane_id": args.pane,
+        "agent": args.agent,
+        "clone_path": args.clone,
+        "integration_mode": args.integration_mode,
+        "status": "pending",
+        "goal": args.goal,
+        "acceptance_criteria": args.acceptance,
+    }
+
+    data["tasks"].append(task)
+    save_tasks(data)
+
+    print(f"Task registered: {args.task_id}")
+
+
+def get_task(task_id):
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    print(
+        json.dumps(
+            task,
+            ensure_ascii=False,
+            indent=2
+        )
+    )
+
+
+def set_status(task_id, new_status):
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    if new_status not in TRANSITIONS:
+        print(f"Invalid status: {new_status}")
+        sys.exit(1)
+
+    old_status = task["status"]
+
+    if old_status == new_status:
+        print(f"{task_id}: already {new_status}")
+        return
+
+    if new_status not in TRANSITIONS.get(old_status, set()):
+        print(
+            f"Illegal transition: "
+            f"{task_id}: {old_status} -> {new_status}"
+        )
+        sys.exit(2)
+
+    task["status"] = new_status
+    save_tasks(data)
+
+    print(f"{task_id}: {old_status} -> {new_status}")
+
+
+def launch_task(args):
+    data = load_tasks()
+
+    if find_task(data, args.task_id):
+        print(f"Task already exists: {args.task_id}")
+        sys.exit(1)
+
+    stage_config = resolve_stage(
+        args.stage,
+        args.workflow_id
+    )
+
+    workspace_id = stage_config[
+        "workspace_id"
+    ]
+
+    parent_pane = stage_config[
+        "anchor_pane_id"
+    ]
+
+    project = project_for_workflow(
+        args.workflow_id
+    ) or {}
+
+    source_repo = os.path.realpath(
+        os.path.expanduser(
+            project.get("project_root")
+            or args.source
+        )
+    )
+
+    base_branch = (
+        project.get("base_branch")
+        or "dev"
+    )
+
+    requested_agent = args.agent if args.agent else "auto"
+
+    resolved_agent = choose_agent(
+        args.workflow_id,
+        args.stage,
+        args.task_type,
+        requested_agent,
+        reservation_key=args.task_id,
+    )
+
+    prebuilt_pane = acquire_pane_for_task(
+        args.workflow_id,
+        args.stage,
+        resolved_agent,
+    )
+
+    # integration_mode=git 时，
+    # 源仓库 tracked 文件必须 clean。
+    # untracked 文件允许存在，因为 CoW Clone 需要保留完整上下文。
+    if args.integration_mode == "git":
+        source = os.path.realpath(
+            os.path.expanduser(args.source)
+        )
+
+        tracked_status = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                source,
+                "status",
+                "--porcelain",
+                "--untracked-files=no"
+            ],
+            text=True
+        ).strip()
+
+        if tracked_status:
+            print(
+                "Source repository has tracked changes; "
+                "refusing git-integrated Task:"
+            )
+            print(tracked_status)
+            sys.exit(3)
+
+    # 1. 创建 Clone + Pane + Agent
+    worker_cmd = [
+        os.path.expanduser("~/herdr/herdr-worker.py"),
+        "--task-id", args.task_id,
+        "--source", args.source,
+        "--agent", resolved_agent,
+        "--task-type", args.task_type,
+        "--base-branch", base_branch,
+    ]
+
+    if prebuilt_pane:
+        worker_cmd += ["--pane-id", prebuilt_pane]
+    else:
+        worker_cmd += ["--parent-pane", parent_pane]
+
+    worker = subprocess.run(
+        worker_cmd,
+        text=True,
+        capture_output=True
+    )
+
+    if worker.returncode != 0:
+        print(
+            "Worker failed:",
+            worker.stderr.strip()
+            or worker.stdout.strip()
+        )
+        sys.exit(1)
+
+    worker_result = None
+
+    for line in worker.stdout.splitlines():
+        if line.startswith("HERDR_WORKER_RESULT="):
+            worker_result = json.loads(
+                line.split("=", 1)[1]
+            )
+            break
+
+    if not worker_result:
+        print("Worker result not found")
+        print(worker.stdout)
+        sys.exit(1)
+
+    clone_path = worker_result["clone"]
+    branch = worker_result["branch"]
+    baseline_untracked = worker_result.get(
+        "baseline_untracked",
+        []
+    )
+    baseline_fingerprint = worker_result.get(
+        "baseline_fingerprint",
+        {
+            "tracked": {},
+            "untracked": {}
+        }
+    )
+    pane_id = worker_result["pane_id"]
+    pane_source = worker_result.get(
+        "pane_source",
+        "dynamic"
+    )
+
+    print(f"[WORKER] clone={clone_path}")
+    print(f"[WORKER] pane={pane_id}")
+    print(f"[WORKER] pane_source={pane_source}")
+    print(f"[WORKER] agent={resolved_agent} requested={requested_agent}")
+
+    # 2. 注册 Task
+    data = load_tasks()
+
+    task = {
+        "task_id": args.task_id,
+        "workflow_id": args.workflow_id,
+        "project_id": project.get("project_id"),
+        "project_name": project.get("project_name"),
+        "source_repo": source_repo,
+        "base_branch": base_branch,
+        "coordinator_pane_id": project.get("coordinator_pane_id"),
+        "workflow_config": project.get("workflow_file"),
+        "stage": args.stage,
+        "stage_label": stage_config["stage_label"],
+        "tab_id": stage_config["tab_id"],
+        "workspace_id": workspace_id,
+        "pane_id": pane_id,
+        "pane_source": pane_source,
+        "pane_persistent": True,
+        "agent": resolved_agent,
+        "requested_agent": requested_agent,
+        "clone_path": clone_path,
+        "branch": branch,
+        "baseline_untracked": baseline_untracked,
+        "baseline_fingerprint": baseline_fingerprint,
+        "integration_mode": args.integration_mode,
+        "status": "pending",
+        "goal": args.goal,
+        "acceptance_criteria": args.acceptance,
+    }
+
+    data["tasks"].append(task)
+    save_tasks(data)
+
+    release_agent_reservation(
+        args.task_id
+    )
+
+    print(f"[REGISTERED] {args.task_id}")
+
+    # 3. Dispatch
+    dispatch_task(
+        args.task_id,
+        args.prompt
+    )
+
+def dispatch_task(task_id, prompt):
+    # Reliable delivery protocol:
+    # 1) try herdr agent prompt
+    # 2) verify lifecycle / prompt marker
+    # 3) if prompt is sitting in the composer, focus + Enter
+    # 4) if it never arrived, focus + send-text + delayed Enter
+    prompt = (
+        prompt
+        + "\n\nHERDR orchestration protocol:\n"
+        + "HERDR_ORCH_TASK:" + task_id + "\n"
+        + "When all requested work is genuinely finished, output on its own line "
+        + "the prefix HERDR_TASK_DONE: followed immediately by this task id. "
+        + "Do not quote it and do not output it before the task is complete.\n"
+    )
+
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    if task["status"] != "pending":
+        print(
+            f"Task cannot dispatch from status: "
+            f"{task['status']}"
+        )
+        sys.exit(2)
+
+    pane_id = task["pane_id"]
+    marker = "HERDR_ORCH_TASK:" + task_id
+
+    def _run(cmd):
+        return subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True
+        )
+
+    def _status():
+        r = _run(["herdr", "agent", "get", pane_id])
+        if r.returncode != 0:
+            return None
+        try:
+            return json.loads(r.stdout)["result"]["agent"].get("agent_status")
+        except Exception:
+            return None
+
+    def _visible():
+        r = _run([
+            "herdr", "pane", "read",
+            pane_id,
+            "--source", "visible"
+        ])
+        return (r.stdout or "") + "\n" + (r.stderr or "")
+
+    def _focus():
+        _run(["herdr", "agent", "focus", pane_id])
+        time.sleep(0.25)
+
+    def _press_enter():
+        return _run([
+            "herdr", "pane", "send-keys",
+            pane_id, "enter"
+        ])
+
+    def _send_full_prompt():
+        _focus()
+        r1 = _run([
+            "herdr", "pane", "send-text",
+            pane_id, prompt
+        ])
+        time.sleep(0.35)
+        r2 = _press_enter()
+        return r1.returncode == 0 and r2.returncode == 0
+
+    set_status(task_id, "dispatched")
+    time.sleep(1.5)
+
+    primary = _run([
+        "herdr",
+        "agent",
+        "prompt",
+        pane_id,
+        prompt
+    ])
+
+    deadline = time.time() + 6
+    while time.time() < deadline:
+        state = _status()
+        screen = _visible()
+
+        if state in {"working", "blocked", "done"}:
+            print(f"[PROMPT DELIVERED] task={task_id} via=agent-prompt state={state}")
+            print(f"Task dispatched: {task_id} -> {pane_id}")
+            return
+
+        if marker in screen and state in {"idle", "unknown", None}:
+            _focus()
+            _press_enter()
+            time.sleep(1.0)
+
+            state2 = _status()
+            if state2 in {"working", "blocked", "done"}:
+                print(f"[PROMPT DELIVERED] task={task_id} via=enter-fallback state={state2}")
+                print(f"Task dispatched: {task_id} -> {pane_id}")
+                return
+
+        time.sleep(0.5)
+
+    if marker not in _visible():
+        ok = _send_full_prompt()
+        if not ok:
+            set_status(task_id, "failed")
+            print(
+                f"Prompt delivery failed for {task_id}: "
+                f"{primary.stderr or primary.stdout}"
+            )
+            sys.exit(3)
+        print(f"[PROMPT FALLBACK] task={task_id} via=send-text+enter")
+    else:
+        print(f"[PROMPT PENDING] task={task_id} marker-visible; sentinel will monitor")
+
+    print(f"Task dispatched: {task_id} -> {pane_id}")
+
+def fingerprint_file(repo, relpath):
+    path = Path(repo) / relpath
+
+    if not path.exists() and not path.is_symlink():
+        return "__MISSING__"
+
+    if path.is_symlink():
+        return "symlink:" + os.readlink(path)
+
+    if not path.is_file():
+        return "__NON_FILE__"
+
+    h = hashlib.sha256()
+
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+
+            if not chunk:
+                break
+
+            h.update(chunk)
+
+    return h.hexdigest()
+
+
+def current_workspace_fingerprint(repo):
+    tracked_result = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo,
+            "diff",
+            "--name-only",
+            "-z",
+            "HEAD",
+            "--"
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if tracked_result.returncode != 0:
+        raise RuntimeError(
+            tracked_result.stderr.strip()
+            or tracked_result.stdout.strip()
+        )
+
+    tracked_paths = [
+        item
+        for item in tracked_result.stdout.split("\0")
+        if item
+    ]
+
+    untracked_result = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z"
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if untracked_result.returncode != 0:
+        raise RuntimeError(
+            untracked_result.stderr.strip()
+            or untracked_result.stdout.strip()
+        )
+
+    untracked_paths = [
+        item
+        for item in untracked_result.stdout.split("\0")
+        if item and item != ".agent-task-context"
+    ]
+
+    return {
+        "tracked": {
+            p: fingerprint_file(repo, p)
+            for p in tracked_paths
+        },
+        "untracked": {
+            p: fingerprint_file(repo, p)
+            for p in untracked_paths
+        }
+    }
+
+
+def verify_baseline(task_id):
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    clone = task.get("clone_path")
+
+    if not clone or not os.path.isdir(clone):
+        print(f"Clone not found: {clone}")
+        sys.exit(2)
+
+    baseline = task.get("baseline_fingerprint")
+
+    if baseline is None:
+        print(
+            f"Task has no baseline_fingerprint: "
+            f"{task_id}"
+        )
+        sys.exit(3)
+
+    current = current_workspace_fingerprint(clone)
+
+    changes = []
+
+    for kind in ("tracked", "untracked"):
+        before = baseline.get(kind, {})
+        after = current.get(kind, {})
+
+        all_paths = sorted(
+            set(before.keys()) | set(after.keys())
+        )
+
+        for relpath in all_paths:
+            old = before.get(
+                relpath,
+                "__NOT_PRESENT__"
+            )
+            new = after.get(
+                relpath,
+                "__NOT_PRESENT__"
+            )
+
+            if old != new:
+                changes.append({
+                    "type": kind,
+                    "path": relpath,
+                    "baseline": old,
+                    "current": new
+                })
+
+    if not changes:
+        print("BASELINE_MATCH")
+        return
+
+    print("TASK_CHANGED:")
+
+    for item in changes:
+        print(
+            f"- [{item['type']}] "
+            f"{item['path']}"
+        )
+
+    print(
+        "HERDR_BASELINE_RESULT="
+        + json.dumps(
+            {
+                "task_id": task_id,
+                "baseline_match": False,
+                "changes": changes
+            },
+            ensure_ascii=False
+        )
+    )
+
+
+def commit_task(task_id, message=None):
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    if task["status"] != "completed":
+        print(
+            f"Task cannot commit from status: "
+            f"{task['status']}"
+        )
+        sys.exit(2)
+
+    clone = task.get("clone_path")
+
+    if not clone:
+        print("Task missing clone_path")
+        sys.exit(1)
+
+    clone = os.path.realpath(
+        os.path.expanduser(clone)
+    )
+
+    baseline_untracked = set(
+        task.get("baseline_untracked", [])
+    )
+
+    # 当前 untracked
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            clone,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z"
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if result.returncode != 0:
+        print(result.stderr.strip())
+        sys.exit(1)
+
+    current_untracked = {
+        item
+        for item in result.stdout.split("\0")
+        if item
+    }
+
+    # 只允许提交 Task 新产生的 untracked
+    task_untracked = sorted(
+        current_untracked - baseline_untracked
+    )
+
+    # tracked 文件在 Task 创建前要求 clean，
+    # 因此当前 tracked 修改全部属于该 Task。
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            clone,
+            "add",
+            "-u"
+        ],
+        check=True
+    )
+
+    if task_untracked:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                clone,
+                "add",
+                "--",
+                *task_untracked
+            ],
+            check=True
+        )
+
+    # 必须确实存在 staged changes
+    staged = subprocess.run(
+        [
+            "git",
+            "-C",
+            clone,
+            "diff",
+            "--cached",
+            "--quiet"
+        ]
+    )
+
+    if staged.returncode == 0:
+        print(
+            f"Task has no changes to commit: "
+            f"{task_id}"
+        )
+        sys.exit(3)
+
+    if message is None:
+        message = f"task: {task_id}"
+
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            clone,
+            "commit",
+            "-m",
+            message
+        ],
+        text=True
+    )
+
+    if result.returncode != 0:
+        print(
+            f"Commit failed: {task_id}"
+        )
+        sys.exit(result.returncode)
+
+    commit_hash = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            clone,
+            "rev-parse",
+            "HEAD"
+        ],
+        text=True
+    ).strip()
+
+    # 保存 commit hash
+    data = load_tasks()
+    task = find_task(data, task_id)
+    task["commit"] = commit_hash
+    save_tasks(data)
+
+    set_status(
+        task_id,
+        "committed"
+    )
+
+    print(f"[COMMITTED] {task_id}")
+    print(f"[COMMIT] {commit_hash}")
+
+
+def integrate_task(task_id):
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    if task["status"] != "committed":
+        print(
+            f"Task cannot integrate from status: "
+            f"{task['status']}"
+        )
+        sys.exit(2)
+
+    clone = task.get("clone_path")
+    branch = task.get("branch")
+
+    if not clone or not branch:
+        print("Task missing clone_path or branch")
+        sys.exit(1)
+
+    clone = os.path.realpath(
+        os.path.expanduser(clone)
+    )
+
+    baseline = task.get("baseline_fingerprint")
+    if baseline is None:
+        print(
+            f"Task has no baseline_fingerprint: "
+            f"{task_id}"
+        )
+        sys.exit(3)
+
+    current = current_workspace_fingerprint(clone)
+
+    if current != baseline:
+        print(
+            "Clone working tree differs from "
+            "Task baseline after commit:"
+        )
+
+        for kind in ("tracked", "untracked"):
+            before = baseline.get(kind, {})
+            after = current.get(kind, {})
+            for relpath in sorted(set(before) | set(after)):
+                if (
+                    before.get(relpath, "__NOT_PRESENT__")
+                    != after.get(relpath, "__NOT_PRESENT__")
+                ):
+                    print(f"- [{kind}] {relpath}")
+
+        sys.exit(3)
+
+    print("[BASELINE RESTORED] working tree matches Task baseline")
+
+    project = project_for_workflow(
+        task.get("workflow_id")
+    ) or {}
+
+    base_branch = (
+        task.get("base_branch")
+        or project.get("base_branch")
+        or "dev"
+    )
+
+    main_repo = (
+        task.get("source_repo")
+        or project.get("project_root")
+    )
+
+    if not main_repo:
+        print("Task missing source_repo/project_root")
+        sys.exit(4)
+
+    main_repo = os.path.realpath(
+        os.path.expanduser(main_repo)
+    )
+
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            clone,
+            "fetch",
+            "origin",
+            base_branch
+        ],
+        check=True
+    )
+
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            clone,
+            "rebase",
+            f"origin/{base_branch}"
+        ],
+        check=True
+    )
+
+    relation = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            clone,
+            "rev-list",
+            "--left-right",
+            "--count",
+            f"origin/{base_branch}...HEAD"
+        ],
+        text=True
+    ).strip().split()
+
+    if len(relation) != 2 or relation[0] != "0":
+        print(
+            "Task branch is not based cleanly "
+            f"on latest origin/{base_branch}"
+        )
+        sys.exit(4)
+
+    herdr_ref = f"refs/herdr/tasks/{task_id}"
+
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "fetch",
+            clone,
+            f"{branch}:{herdr_ref}",
+            "--force"
+        ],
+        check=True
+    )
+
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "branch",
+            "-f",
+            branch,
+            herdr_ref
+        ],
+        check=True
+    )
+
+    integration_branch = (
+        f"herdr/integration-{task_id}"
+    )
+
+    # 主仓库不要求绝对 clean。
+    # 允许保留 Task 创建前就已经存在的 untracked 基线文件；
+    # 但 tracked 修改仍然禁止，以保护用户本地工作。
+    tracked_status = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+        ],
+        text=True
+    ).strip()
+
+    if tracked_status:
+        print("Main repository has tracked changes")
+        print(tracked_status)
+        sys.exit(5)
+
+    baseline_untracked = set(
+        task.get("baseline_untracked", [])
+    )
+
+    current_untracked_raw = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z"
+        ],
+        text=True
+    )
+
+    current_untracked = {
+        item
+        for item in current_untracked_raw.split("\0")
+        if item
+    }
+
+    unexpected_untracked = sorted(
+        current_untracked - baseline_untracked
+    )
+
+    if unexpected_untracked:
+        print("Main repository has unexpected untracked files:")
+        for relpath in unexpected_untracked:
+            print(f"- {relpath}")
+        sys.exit(5)
+
+    current_branch = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "branch",
+            "--show-current"
+        ],
+        text=True
+    ).strip()
+
+    if current_branch != base_branch:
+        print(
+            f"Main repository must be on {base_branch}, "
+            f"current={current_branch}"
+        )
+        sys.exit(6)
+
+    # Task IDs are globally unique per Workflow after multi-project routing,
+    # so an existing integration branch indicates a previous partial attempt.
+    exists = subprocess.run(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "show-ref",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{integration_branch}"
+        ]
+    )
+
+    if exists.returncode == 0:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                main_repo,
+                "branch",
+                "-D",
+                integration_branch
+            ],
+            check=True
+        )
+
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "switch",
+            "-c",
+            integration_branch,
+            base_branch
+        ],
+        check=True
+    )
+
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "merge",
+            "--ff-only",
+            branch
+        ]
+    )
+
+    if result.returncode != 0:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                main_repo,
+                "switch",
+                base_branch
+            ]
+        )
+        print("Integration failed")
+        sys.exit(7)
+
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            main_repo,
+            "switch",
+            base_branch
+        ],
+        check=True
+    )
+
+    data = load_tasks()
+    task = find_task(data, task_id)
+    task["integration_branch"] = integration_branch
+    task["integration_ref"] = herdr_ref
+    task["base_branch"] = base_branch
+    task["source_repo"] = main_repo
+    save_tasks(data)
+
+    set_status(
+        task_id,
+        "integrated"
+    )
+
+    print(f"[INTEGRATED] {task_id}")
+    print(f"[PROJECT] {main_repo}")
+    print(f"[BASE BRANCH] {base_branch}")
+    print(f"[TASK BRANCH] {branch}")
+    print(f"[INTEGRATION BRANCH] {integration_branch}")
+    print(f"[HERDR REF] {herdr_ref}")
+
+def cleanup_task(task_id):
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    if task["status"] != "cleanup_ready":
+        print(
+            f"Task cannot cleanup from status: "
+            f"{task['status']}"
+        )
+        sys.exit(2)
+
+    # Logical cleanup only.
+    # Workspace / Stage Tab / Task Pane / Task Clone are retained.
+    task["resource_retention"] = "persistent"
+    task["pane_retained"] = True
+    task["clone_retained"] = True
+    save_tasks(data)
+
+    set_status(
+        task_id,
+        "cleaned"
+    )
+
+    print(f"[PANE RETAINED] {task.get('pane_id')}")
+    print(f"[CLONE RETAINED] {task.get('clone_path')}")
+    print(f"[LOGICAL CLEANUP] {task_id} -> cleaned")
+
+
+def purge_task(task_id):
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    if task.get("status") not in ("cleaned", "failed"):
+        print(
+            f"Task can only purge from cleaned/failed, "
+            f"current={task.get('status')}"
+        )
+        sys.exit(2)
+
+    pane_id = task.get("pane_id")
+    clone_path = task.get("clone_path")
+
+    if pane_id:
+        subprocess.run(
+            [
+                "herdr",
+                "pane",
+                "close",
+                pane_id
+            ],
+            text=True,
+            capture_output=True
+        )
+        print(f"[PANE PURGED] {pane_id}")
+
+    if clone_path:
+        clone_root = os.path.realpath(
+            os.path.expanduser(
+                "~/.herdr-controller/clones"
+            )
+        )
+        clone_real = os.path.realpath(
+            os.path.expanduser(clone_path)
+        )
+
+        try:
+            common = os.path.commonpath(
+                [clone_root, clone_real]
+            )
+        except ValueError:
+            common = ""
+
+        if (
+            common == clone_root
+            and clone_real != clone_root
+            and os.path.exists(clone_real)
+        ):
+            shutil.rmtree(clone_real)
+            print(f"[CLONE PURGED] {clone_real}")
+        elif os.path.exists(clone_real):
+            print(
+                f"Unsafe clone path, refusing delete: "
+                f"{clone_real}"
+            )
+            sys.exit(3)
+
+    data = load_tasks()
+    task = find_task(data, task_id)
+    task["pane_retained"] = False
+    task["clone_retained"] = False
+    task["resource_retention"] = "purged"
+    save_tasks(data)
+
+    print(f"[PURGED] {task_id}")
+
+
+def stage_status(workflow_id, stage_key):
+    stage = resolve_stage(stage_key, workflow_id)
+
+    data = load_tasks()
+
+    tasks = [
+        task
+        for task in data["tasks"]
+        if task.get("workflow_id") == workflow_id
+        and task.get("stage") == stage_key
+    ]
+
+    if not tasks:
+        result = {
+            "workflow_id": workflow_id,
+            "stage": stage_key,
+            "stage_label": stage["stage_label"],
+            "status": "empty",
+            "complete": False,
+            "next_stage": stage["next"],
+            "tasks": []
+        }
+
+        print(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                indent=2
+            )
+        )
+        return
+
+    complete = all(
+        task.get("status") in (
+            "completed",
+            "committed",
+            "integrated",
+            "cleanup_ready",
+            "cleaned"
+        )
+        for task in tasks
+    )
+
+    result = {
+        "workflow_id": workflow_id,
+        "stage": stage_key,
+        "stage_label": stage["stage_label"],
+        "status": (
+            "completed"
+            if complete
+            else "in_progress"
+        ),
+        "complete": complete,
+        "next_stage": stage["next"],
+        "tasks": [
+            {
+                "task_id": task["task_id"],
+                "status": task["status"]
+            }
+            for task in tasks
+        ]
+    }
+
+    print(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2
+        )
+    )
+
+def list_tasks(workflow_id=None):
+    data = load_tasks()
+
+    tasks = data["tasks"]
+
+    if workflow_id:
+        tasks = [
+            task
+            for task in tasks
+            if task.get("workflow_id") == workflow_id
+        ]
+
+    print(
+        json.dumps(
+            {"tasks": tasks},
+            ensure_ascii=False,
+            indent=2
+        )
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    add = sub.add_parser("add")
+    add.add_argument("--task-id", required=True)
+    add.add_argument("--workflow-id", required=True)
+    add.add_argument("--stage", required=True)
+    add.add_argument("--workspace", required=True)
+    add.add_argument("--pane", required=True)
+    add.add_argument("--agent", required=True)
+    add.add_argument("--clone")
+    add.add_argument(
+        "--integration-mode",
+        choices=["git", "none"],
+        default="none"
+    )
+    add.add_argument("--goal", required=True)
+    add.add_argument(
+        "--acceptance",
+        action="append",
+        default=[]
+    )
+
+    launch = sub.add_parser("launch")
+    launch.add_argument("--task-id", required=True)
+    launch.add_argument("--workflow-id", required=True)
+    launch.add_argument(
+        "--stage",
+        choices=[
+            "requirements",
+            "plan",
+            "implementation",
+            "test",
+            "review",
+            "wrapup"
+        ],
+        required=True
+    )
+    launch.add_argument("--source", required=True)
+    launch.add_argument("--agent", default="auto")
+    launch.add_argument(
+        "--task-type",
+        choices=[
+            "fix",
+            "feat",
+            "refactor",
+            "docs",
+            "test",
+            "chore",
+            "perf",
+            "ci"
+        ],
+        default="feat"
+    )
+    launch.add_argument(
+        "--integration-mode",
+        choices=["git", "none"],
+        default="none"
+    )
+    launch.add_argument("--goal", required=True)
+    launch.add_argument(
+        "--acceptance",
+        action="append",
+        default=[]
+    )
+    launch.add_argument("--prompt", required=True)
+
+    dispatch = sub.add_parser("dispatch")
+    dispatch.add_argument("task_id")
+    dispatch.add_argument("--prompt", required=True)
+
+    verify_cmd = sub.add_parser("verify-baseline")
+    verify_cmd.add_argument("task_id")
+
+    commit_cmd = sub.add_parser("commit")
+    commit_cmd.add_argument("task_id")
+    commit_cmd.add_argument("--message")
+
+    integrate = sub.add_parser("integrate")
+    integrate.add_argument("task_id")
+
+    cleanup = sub.add_parser("cleanup")
+    cleanup.add_argument("task_id")
+
+    purge = sub.add_parser("purge")
+    purge.add_argument("task_id")
+
+    get = sub.add_parser("get")
+    get.add_argument("task_id")
+
+    set_cmd = sub.add_parser("set")
+    set_cmd.add_argument("task_id")
+    set_cmd.add_argument("status")
+
+    stage_cmd = sub.add_parser("stage-status")
+    stage_cmd.add_argument("workflow_id")
+    stage_cmd.add_argument(
+        "stage",
+        choices=[
+            "requirements",
+            "plan",
+            "implementation",
+            "test",
+            "review",
+            "wrapup"
+        ]
+    )
+
+    list_cmd = sub.add_parser("list")
+    list_cmd.add_argument("--workflow-id")
+
+    args = parser.parse_args()
+
+    if args.command == "add":
+        add_task(args)
+
+    elif args.command == "launch":
+        launch_task(args)
+
+    elif args.command == "dispatch":
+        dispatch_task(
+            args.task_id,
+            args.prompt
+        )
+
+    elif args.command == "verify-baseline":
+        verify_baseline(
+            args.task_id
+        )
+
+    elif args.command == "commit":
+        commit_task(
+            args.task_id,
+            args.message
+        )
+
+    elif args.command == "integrate":
+        integrate_task(args.task_id)
+
+    elif args.command == "cleanup":
+        cleanup_task(args.task_id)
+
+    elif args.command == "purge":
+        purge_task(args.task_id)
+
+    elif args.command == "get":
+        get_task(args.task_id)
+
+    elif args.command == "set":
+        set_status(args.task_id, args.status)
+
+    elif args.command == "stage-status":
+        stage_status(
+            args.workflow_id,
+            args.stage
+        )
+
+    elif args.command == "list":
+        list_tasks(args.workflow_id)
+
+
+if __name__ == "__main__":
+    main()
