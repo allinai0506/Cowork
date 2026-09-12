@@ -8,7 +8,7 @@ from pathlib import Path
 HERDR_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERDR_ROOT))
 
-from herdr_workflow import (
+from herdr.workflow import (
     list_templates,
     load_template,
     validate_workflow_dag,
@@ -16,7 +16,7 @@ from herdr_workflow import (
     is_workflow_completed,
     normalize_workflow,
 )
-from herdr_agent_router import choose_agent, _candidate_order
+from herdr.agent_router import choose_agent, _candidate_order
 
 
 class TestWorkflowTemplates(unittest.TestCase):

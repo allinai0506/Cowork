@@ -13,8 +13,12 @@ TASKS_FILE = ROOT / "tasks.json"
 RESERVATIONS_FILE = ROOT / "agent-reservations.json"
 ROUTER_LOCK_FILE = ROOT / "agent-router.lock"
 
-from herdr_projects import workflow_config_for
-from herdr_workflow import find_node
+try:
+    from .projects import workflow_config_for
+    from .workflow import find_node
+except ImportError:
+    from herdr.projects import workflow_config_for
+    from herdr.workflow import find_node
 
 DEFAULT_ALLOWED = ["opencode", "codex", "qodercli", "claude", "agy", "pi"]
 

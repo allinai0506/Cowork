@@ -2,7 +2,10 @@
 import json
 import subprocess
 from pathlib import Path
-from herdr_projects import project_for_workflow
+try:
+    from .projects import project_for_workflow
+except ImportError:
+    from herdr.projects import project_for_workflow
 
 HOME = Path.home()
 ROOT = HOME / ".herdr-controller"

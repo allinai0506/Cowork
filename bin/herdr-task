@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
-from herdr_pane_pool import acquire_pane_for_task
-from herdr_agent_router import choose_agent, release_agent_reservation
-
 import argparse
 import hashlib
 import json
 import os
-import sys
-from pathlib import Path
-import subprocess
-import time
 import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
 
-from herdr_projects import project_for_workflow, workflow_config_for, ensure_node_runtime
-from herdr_workflow import find_node, normalize_workflow
-from herdr_topology import ensure_stage_topology
+HERDR_ROOT = Path(__file__).resolve().parent.parent
+if str(HERDR_ROOT) not in sys.path:
+    sys.path.insert(0, str(HERDR_ROOT))
+
+try:
+    from herdr.pane_pool import acquire_pane_for_task
+    from herdr.agent_router import choose_agent, release_agent_reservation
+    from herdr.projects import project_for_workflow, workflow_config_for, ensure_node_runtime
+    from herdr.workflow import find_node, normalize_workflow
+    from herdr.topology import ensure_stage_topology
+except ImportError:
+    from herdr_pane_pool import acquire_pane_for_task
+    from herdr_agent_router import choose_agent, release_agent_reservation
+    from herdr_projects import project_for_workflow, workflow_config_for, ensure_node_runtime
+    from herdr_workflow import find_node, normalize_workflow
+    from herdr_topology import ensure_stage_topology
 
 TASKS_FILE = os.path.expanduser("~/.herdr-controller/tasks.json")
 WORKFLOW_FILE = os.path.expanduser("~/.herdr-controller/workflow.json")
@@ -314,8 +324,12 @@ def launch_task(args):
             sys.exit(3)
 
     # 1. 创建 Clone + Pane + Agent
+    worker_script = HERDR_ROOT / "services" / "herdr-worker.py"
+    if not worker_script.exists():
+        worker_script = Path(os.path.expanduser("~/herdr/services/herdr-worker.py"))
+
     worker_cmd = [
-        os.path.expanduser("~/herdr/herdr-worker.py"),
+        str(worker_script),
         "--task-id", args.task_id,
         "--source", args.source,
         "--agent", resolved_agent,

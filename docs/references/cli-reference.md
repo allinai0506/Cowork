@@ -79,3 +79,32 @@ herdr-task list --workflow-id <workflow_id>
 # 清理已完成任务的现场 Pane 与工作区分支
 herdr-task cleanup <task_id>
 ```
+
+---
+
+## 3. `herdr-preflight` 命令
+
+Agent 本地环境快速检测与准入控制工具。
+```bash
+# 检查当前项目或所有 Agent 的基础状态
+herdr-preflight
+
+# 输出 JSON 格式
+herdr-preflight --json
+
+# 临时禁用某 Agent
+herdr-preflight --disable pi
+```
+
+---
+
+## 4. `herdr-deep-preflight` 命令
+
+沙盒化真实 Provider 探活与深层探针工具。
+```bash
+# 执行深层探针检测
+herdr-deep-preflight --deep
+
+# 执行检测并在发现硬故障时自动剔除
+herdr-deep-preflight --deep --auto-disable
+```

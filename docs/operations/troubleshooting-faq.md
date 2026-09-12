@@ -38,7 +38,7 @@
 - **原因**：当前机器上所有的 Agent 均未能通过 Deep Preflight 探针测试（例如 API Token 失效或本地未安装对应 CLI）。
 - **排查**：运行 `herdr-factory doctor` 或运行：
   ```bash
-  python3 /Users/user/herdr/herdr_deep_preflight.py --deep
+  herdr-deep-preflight --deep
   ```
   根据具体的报错提示配置相应 Agent 的环境变量或执行登录。
 

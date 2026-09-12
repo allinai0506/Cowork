@@ -41,11 +41,65 @@ Herdr 遵循业界最严格的文档分类标准，所有文档严禁散落存�
 
 ---
 
+## 🏗️ 仓库工程架构规范 (Directory Layout)
+
+Herdr 严格遵循现代分布式系统与 Python 开源工程最佳实践，代码严禁平铺堆放在根目录，按职责分层：
+
+```
+herdr/
+├── bin/                          # CLI 可执行命令行工具集 (PATH 入口)
+│   ├── herdr-factory             # 工作流与项目生命周期控制 CLI
+│   ├── herdr-task                # Task 工单调度、现场分配与节点自愈 CLI
+│   ├── herdr-preflight           # Agent 快速健康体检 CLI
+│   └── herdr-deep-preflight      # Agent 沙盒深层探针 CLI
+├── services/                     # 后台守护进程与常驻服务 (LaunchAgent 管理)
+│   ├── herdr-controller.py       # DAG 依赖推进与协调核心控制器
+│   ├── herdr-sentinel.py         # Tab / Pane 存活巡检与僵死看门狗
+│   ├── herdr-notifier.py         # macOS 原生通知派发服务
+│   └── herdr-worker.py           # 独立 Task 工作区克隆与执行器
+├── herdr/                        # 标准 Python 核心业务库包 (Core Library)
+│   ├── __init__.py               # 包统一导出与向下兼容别名映射
+│   ├── workflow.py               # 工作流定义解析、Kahn 算法 DAG 校验与就绪节点计算
+│   ├── agent_router.py           # Node 级 Agent 策略匹配、探活准入与预占锁路由
+│   ├── pane_pool.py              # 空间现场 Pane 槽位分配与状态绑定
+│   ├── projects.py               # 多项目元数据管理、工作流注册与运行时自愈探活
+│   ├── topology.py               # Node/Stage 拓扑现场动态自愈与 Anchor 重建
+│   ├── preflight.py              # Agent 基础状态检测
+│   └── deep_preflight.py         # Agent 深层沙盒探针
+├── scripts/                      # 运维、安装、迁移与系统辅助脚本
+│   └── herdr-topology-selfheal-install.sh
+├── workflow_templates/           # 声明式工作流 DAG 模板定义 (YAML)
+│   ├── bidding.yaml
+│   ├── customer-service.yaml
+│   └── software-development-v1.yaml
+├── tests/                        # 自动化测试套件
+│   ├── __init__.py
+│   └── test_workflow_engine.py
+├── docs/                         # 分级结构化系统文档体系
+│   ├── architecture/             # 架构设计与空间现场模型
+│   ├── guides/                   # 通用工作流与模板编写指南
+│   ├── product-specs/            # Schema 规范与 Agent 策略标准
+│   ├── operations/               # 守护进程运维手册与排障 FAQ
+│   ├── references/               # CLI 参考手册与归档历史说明
+│   └── context/                  # 系统演进上下文与历史转录文本
+├── pyproject.toml                # PEP 517/621 标准项目构建与依赖配置
+├── README.md                     # 根目录主文档与导航指引
+└── .gitignore                    # 规范版本控制忽略规则
+```
+
+---
+
 ## 快速开始
+
+### 0. 配置命令行 PATH（推荐）
+```bash
+export PATH="$HOME/herdr/bin:$PATH"
+```
 
 ### 1. 查看可用模板
 ```bash
 herdr-factory templates
+# 或直接运行：./bin/herdr-factory templates
 ```
 
 ### 2. 启动工作流

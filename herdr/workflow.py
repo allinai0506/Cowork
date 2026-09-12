@@ -17,7 +17,9 @@ except ImportError:
 
 HOME = Path.home()
 USER_TEMPLATES_DIR = HOME / ".herdr-controller" / "templates"
-BUNDLED_TEMPLATES_DIR = Path(__file__).resolve().parent / "workflow_templates"
+BUNDLED_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "workflow_templates"
+if not BUNDLED_TEMPLATES_DIR.exists():
+    BUNDLED_TEMPLATES_DIR = Path(__file__).resolve().parent / "workflow_templates"
 
 
 def _load_file(path: Path) -> Dict[str, Any]:

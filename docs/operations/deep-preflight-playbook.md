@@ -17,7 +17,7 @@
 
 ## 2. 支持的 Agent 与探针适配机制
 
-系统在 `herdr_deep_preflight.py` 中为各大主流 Agent 提供了专门的无副作用探针：
+系统在 `herdr/deep_preflight.py`（CLI: `herdr-deep-preflight`）中为各大主流 Agent 提供了专门的无副作用探针：
 
 | Agent | 探针适配策略 | 超时时间 | 验收准则 |
 | :--- | :--- | :--- | :--- |
@@ -32,17 +32,19 @@
 
 ## 3. 手动执行与排障
 
-### 3.1 运行全面健康检测
+### 3.1 运行全量沙盒检测
 ```bash
-python3 /Users/user/herdr/herdr_deep_preflight.py --deep
+herdr-deep-preflight --deep
+# 或完整路径：
+python3 /Users/user/herdr/bin/herdr-deep-preflight --deep
 ```
 
 ### 3.2 针对特定项目排查
 ```bash
-python3 /Users/user/herdr/herdr_deep_preflight.py --project-id xiyu-bid-poc --deep
+herdr-deep-preflight --project-id xiyu-bid-poc --deep
 ```
 
-### 3.3 查看 JSON 结果
+### 3.3 输出 JSON 诊断报告
 ```bash
-python3 /Users/user/herdr/herdr_deep_preflight.py --deep --json | jq .
+herdr-deep-preflight --deep --json | jq .
 ```

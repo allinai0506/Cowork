@@ -58,24 +58,24 @@ graph TD
 
 ## 3. 核心子系统与组件职责
 
-### 3.1 工作流引擎 (`herdr_workflow.py`)
+### 3.1 工作流引擎 (`herdr/workflow.py`)
 - **模板发现与加载**：扫描内置模板及用户自定义目录，解析 YAML / JSON。
 - **DAG 依赖校验**：基于 Kahn 算法进行拓扑校验，阻断循环依赖与未知前置节点。
 - **双向归一化**：负责通用 `nodes` 与兼容老版本的 `stages` 结构互相透明同步。
 - **就绪判定 (`get_ready_nodes`)**：根据已完成节点集，实时推导当前可并发派发的新就绪节点列表。
 
-### 3.2 控制器守护进程 (`herdr-controller.py`)
+### 3.2 控制器守护进程 (`services/herdr-controller.py`)
 - **事件循环**：作为后台 LaunchAgent 运行，监控 `tasks.json`。
 - **任务推进**：当某节点下任务完成（状态进入 `cleaned` 或 `completed`）时，结合 DAG 依赖动态推进至下一个节点。
 - **协调器通知**：向 Coordinator Pane (`wX:p1`) 注入下一步的派发指令。
 - **全流程终结**：所有节点完成时，触发系统级完成事件并唤醒 Notifier。
 
-### 3.3 路由与负载均衡器 (`herdr_agent_router.py`)
+### 3.3 路由与负载均衡器 (`herdr/agent_router.py`)
 - **策略继承**：优先解析并注入当前 Node 的 `agent_policy`。
 - **健康约束**：仅从 Workflow Deep Preflight 验证健康的 `healthy_agents` 中挑选。
 - **负载均衡**：基于并发任务数与带 TTL 的 Agent Reservation（锁预占）分摊负载。
 
-### 3.4 运行时自愈系统 (`herdr_projects.py`)
+### 3.4 运行时自愈系统 (`herdr/projects.py`)
 - **逻辑事实 vs 运行时映射**：模板定义是逻辑事实，Tab/Pane ID 仅为运行时映射。
 - **`ensure_node_runtime`**：在每次任务派发前动态探活 Tab 与 Anchor Pane。如遇人为误关，毫秒级自动补全，避免运行时报错。
 

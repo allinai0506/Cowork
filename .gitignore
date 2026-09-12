@@ -7,3 +7,4 @@ path-migration-backup-*/
 pre-workflow-*/
 topology-selfheal-backup-*/
 .pytest_cache/
+backups/

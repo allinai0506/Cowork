@@ -12,7 +12,10 @@ PROJECTS_FILE = ROOT / "projects.json"
 WORKFLOWS_FILE = ROOT / "workflows.json"
 LEGACY_WORKFLOW_FILE = ROOT / "workflow.json"
 
-from herdr_workflow import load_template, normalize_workflow, find_node
+try:
+    from .workflow import load_template, normalize_workflow, find_node
+except ImportError:
+    from herdr.workflow import load_template, normalize_workflow, find_node
 
 STAGES = [
     ("requirements", "2需求分析", "plan"),

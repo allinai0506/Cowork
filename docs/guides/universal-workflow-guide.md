@@ -411,7 +411,7 @@ herdr-factory doctor
 ```
 或直接查看最近一次 Deep Preflight 探针日志：
 ```bash
-python3 /Users/user/herdr/herdr_deep_preflight.py --deep
+herdr-deep-preflight --deep
 ```
 
 ### Q3：现有的旧项目（如 `xiyu-bid-poc`、`nexusarchive`）还能正常工作吗？

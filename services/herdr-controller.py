@@ -9,11 +9,21 @@ import subprocess
 import threading
 import time
 
+import sys
+HERDR_ROOT = Path(__file__).resolve().parent.parent
+if str(HERDR_ROOT) not in sys.path:
+    sys.path.insert(0, str(HERDR_ROOT))
+
 SOCKET_PATH = os.path.expanduser("~/.config/herdr/herdr.sock")
 TASKS_FILE = os.path.expanduser("~/.herdr-controller/tasks.json")
-TASK_MANAGER = os.path.expanduser("~/herdr/herdr-task.py")
-from herdr_projects import project_for_workflow, workflow_config_for
-from herdr_workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
+_task_bin = HERDR_ROOT / "bin" / "herdr-task"
+TASK_MANAGER = str(_task_bin) if _task_bin.exists() else os.path.expanduser("~/herdr/bin/herdr-task")
+try:
+    from herdr.projects import project_for_workflow, workflow_config_for
+    from herdr.workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
+except ImportError:
+    from herdr_projects import project_for_workflow, workflow_config_for
+    from herdr_workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
 
 STAGE_STATE_FILE = os.path.expanduser(
     "~/.herdr-controller/stage-state.json"
@@ -505,7 +515,7 @@ Agent 本轮执行已经结束。
 1. 使用 Herdr 读取 {task['pane_id']} 的最终输出。
 
 2. 必须执行：
-   ~/herdr/herdr-task.py verify-baseline {task_id}
+   ~/herdr/bin/herdr-task verify-baseline {task_id}
 
 3. `verify-baseline` 是判断当前 Task 文件变化的唯一事实来源：
 
@@ -530,21 +540,21 @@ Agent 本轮执行已经结束。
 
 如果验收通过：
 
-~/herdr/herdr-task.py set {task_id} completed
+~/herdr/bin/herdr-task set {task_id} completed
 
 如果需要返工：
 
-~/herdr/herdr-task.py set {task_id} rework
+~/herdr/bin/herdr-task set {task_id} rework
 
 然后立即重新派发明确的返工任务。
 
 如果任务无法恢复：
 
-~/herdr/herdr-task.py set {task_id} failed
+~/herdr/bin/herdr-task set {task_id} failed
 
 阶段推进前必须执行：
 
-~/herdr/herdr-task.py list --workflow-id {workflow_id}
+~/herdr/bin/herdr-task list --workflow-id {workflow_id}
 
 只能检查当前 workflow_id 下的任务。
 
@@ -650,7 +660,7 @@ agent: {task.get('agent', 'unknown')}
 1. 读取 Task Registry。
 2. 读取 Agent 最终输出。
 3. 执行：
-   ~/herdr/herdr-task.py verify-baseline {task_id}
+   ~/herdr/bin/herdr-task verify-baseline {task_id}
 4. 根据任务目标和验收标准完成正式验收。
 5. 必须将 Task 状态更新为以下之一：
    - completed
@@ -994,7 +1004,7 @@ task_type:
 
 1. 首先执行：
 
-   ~/herdr/herdr-task.py list --workflow-id {workflow_id}
+   ~/herdr/bin/herdr-task list --workflow-id {workflow_id}
 
    阅读当前 Workflow 已完成节点的真实成果。
 
@@ -1018,7 +1028,7 @@ task_type:
 
 5. 创建 Task 必须使用：
 
-   ~/herdr/herdr-task.py launch
+   ~/herdr/bin/herdr-task launch
 
    并指定：
 

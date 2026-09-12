@@ -10,10 +10,10 @@
 
 | 服务标识 (Label) | 脚本路径 | 核心职责 |
 | :--- | :--- | :--- |
-| `com.user.herdr-controller` | `/Users/user/herdr/herdr-controller.py` | 任务状态监控、DAG 依赖推进、协调器事件分发。 |
-| `com.user.herdr-notifier` | `/Users/user/herdr/herdr-notifier.py` | 任务与工作流完成时的 macOS 原生系统通知推送。 |
-| `com.user.herdr-sentinel` | `/Users/user/herdr/herdr_sentinel.py` | 工位生命周期监控与空闲/僵死任务守护巡检。 |
-| `com.user.herdr-factory-console` | `/Users/user/herdr/herdr-console.py` | 可视化 Web 控制台服务（默认端口 `8765`）。 |
+| `com.user.herdr-controller` | `/Users/user/herdr/services/herdr-controller.py` | 任务状态监控、DAG 依赖推进、协调器事件分发。 |
+| `com.user.herdr-notifier` | `/Users/user/herdr/services/herdr-notifier.py` | 任务与工作流完成时的 macOS 原生系统通知推送。 |
+| `com.user.herdr-sentinel` | `/Users/user/herdr/services/herdr-sentinel.py` | 工位生命周期监控与空闲/僵死任务守护巡检。 |
+| `com.user.herdr-factory-console` | `/Users/user/.herdr-console/herdr_factory_console.py` | 可视化 Web 控制台服务（默认端口 `8765`）。 |
 
 ---
 
