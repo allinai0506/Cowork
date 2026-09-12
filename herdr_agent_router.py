@@ -173,6 +173,8 @@ def choose_agent(
     else:
         selected = None
 
+    healthy = set(record.get("healthy_agents", []))
+
     if selected:
         if selected not in allowed:
             raise RuntimeError(
@@ -181,6 +183,14 @@ def choose_agent(
         if selected in disabled:
             raise RuntimeError(
                 f"Agent '{selected}' is disabled for project {project_id}"
+            )
+        if healthy and selected not in healthy:
+            status = record.get("unhealthy_agents", {}).get(
+                selected,
+                "NOT_READY",
+            )
+            raise RuntimeError(
+                f"Agent '{selected}' failed Workflow Deep Preflight: {status}"
             )
         return selected
 
@@ -208,7 +218,11 @@ def choose_agent(
         candidates = [
             agent
             for agent in _candidate_order(pool, stage, task_type)
-            if agent in allowed and agent not in disabled
+            if (
+                agent in allowed
+                and agent not in disabled
+                and (not healthy or agent in healthy)
+            )
         ]
 
         if not candidates:
