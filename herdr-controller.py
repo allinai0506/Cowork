@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 import queue
 import socket
 import subprocess
@@ -32,7 +33,7 @@ def coordinator_pane_for_workflow(workflow_id=None):
         if pane:
             return pane
 
-    return COORDINATOR_PANE
+    return None
 
 listeners = {}
 task_sockets = {}
@@ -215,6 +216,16 @@ def clear_stage_advance(
         state = load_stage_state()
         state.pop(key, None)
         save_stage_state(state)
+def reset_queued_stage_states():
+    with lock:
+        state = load_stage_state()
+        changed = False
+        for k in list(state.keys()):
+            if state[k] == "queued":
+                del state[k]
+                changed = True
+        if changed:
+            save_stage_state(state)
 
 
 
@@ -266,16 +277,23 @@ def is_node_complete(workflow_id, node_id):
 
 def enqueue_stage_advance(task):
     workflow_id = task.get("workflow_id")
-    current_node = task.get("node") or task.get("stage")
+    if workflow_id:
+        check_workflow_stage_advance(workflow_id)
 
-    if not workflow_id or not current_node:
+
+def check_workflow_stage_advance(workflow_id):
+    if not workflow_id:
         return
 
-    if not is_node_complete(workflow_id, current_node):
+    pane = coordinator_pane_for_workflow(workflow_id)
+    if not pane:
         return
 
     workflow_cfg = workflow_config_for(workflow_id)
-    if workflow_cfg and workflow_cfg.get("nodes"):
+    if not workflow_cfg:
+        return
+
+    if workflow_cfg.get("nodes"):
         completed_nodes = {
             n["id"]
             for n in workflow_cfg.get("nodes", [])
@@ -293,18 +311,16 @@ def enqueue_stage_advance(task):
         for ready_node in ready_nodes:
             ready_id = ready_node["id"]
             if not mark_stage_advance_queued(workflow_id, ready_id):
-                print(
-                    f"[STAGE ADVANCE SKIP] "
-                    f"workflow={workflow_id} "
-                    f"node={ready_id}"
-                )
                 continue
+
+            deps = ready_node.get("depends_on", [])
+            source_stage = deps[-1] if deps else "start"
 
             coordinator_queue.put(
                 {
                     "kind": "stage_advance",
                     "workflow_id": workflow_id,
-                    "stage": current_node,
+                    "stage": source_stage,
                     "node_id": ready_id,
                     "next_stage": ready_id,
                     "stage_label": ready_node.get("label", ready_id),
@@ -315,46 +331,70 @@ def enqueue_stage_advance(task):
             print(
                 f"[STAGE ADVANCE QUEUED] "
                 f"workflow={workflow_id} "
-                f"{current_node} -> {ready_id}"
+                f"{source_stage} -> {ready_id}"
             )
         return
 
     # Fallback to legacy single-step stage advance
-    status = get_stage_status(workflow_id, current_node)
-    if not status or not status.get("complete"):
-        return
+    for stage in workflow_cfg.get("stages", []):
+        stage_key = stage.get("key") or stage.get("id")
+        if not is_node_complete(workflow_id, stage_key):
+            continue
 
-    next_stage = status.get("next_stage")
-    if not next_stage:
-        print(
-            f"[WORKFLOW COMPLETE] "
-            f"workflow={workflow_id}"
+        next_stage = stage.get("next")
+        if not next_stage:
+            continue
+
+        if not mark_stage_advance_queued(workflow_id, next_stage):
+            continue
+
+        coordinator_queue.put(
+            {
+                "kind": "stage_advance",
+                "workflow_id": workflow_id,
+                "stage": stage_key,
+                "next_stage": next_stage,
+                "stage_label": stage.get("label", stage_key),
+            }
         )
-        return
 
-    if not mark_stage_advance_queued(workflow_id, current_node):
         print(
-            f"[STAGE ADVANCE SKIP] "
+            f"[STAGE ADVANCE QUEUED] "
             f"workflow={workflow_id} "
-            f"stage={current_node}"
+            f"{stage_key} -> {next_stage}"
         )
-        return
 
-    coordinator_queue.put(
-        {
-            "kind": "stage_advance",
-            "workflow_id": workflow_id,
-            "stage": current_node,
-            "next_stage": next_stage,
-            "stage_label": status.get("stage_label"),
-        }
-    )
 
-    print(
-        f"[STAGE ADVANCE QUEUED] "
-        f"workflow={workflow_id} "
-        f"{current_node} -> {next_stage}"
-    )
+def active_registered_workflows():
+    workflows = set()
+    wf_path = Path(os.path.expanduser("~/.herdr-controller/workflows.json"))
+    if wf_path.exists():
+        try:
+            data = json.loads(wf_path.read_text(encoding="utf-8"))
+            workflows.update(data.get("workflows", {}).keys())
+        except Exception:
+            pass
+
+    proj_path = Path(os.path.expanduser("~/.herdr-controller/projects.json"))
+    if proj_path.exists():
+        try:
+            p_data = json.loads(proj_path.read_text(encoding="utf-8"))
+            for p in p_data.get("projects", {}).values():
+                wf = p.get("workflow_id")
+                if wf:
+                    workflows.add(wf)
+        except Exception:
+            pass
+
+    return workflows
+
+
+def check_all_workflows_stage_advance():
+    for wf in active_registered_workflows():
+        try:
+            check_workflow_stage_advance(wf)
+        except Exception as e:
+            print(f"[ADVANCE CHECK ERROR] workflow={wf}: {e}")
 
 
 
@@ -362,6 +402,9 @@ def coordinator_status(workflow_id=None):
     pane_id = coordinator_pane_for_workflow(
         workflow_id
     )
+
+    if not pane_id:
+        return "unknown"
 
     try:
         output = subprocess.check_output(
@@ -816,6 +859,15 @@ def coordinator_worker():
         # ==============================================
         if item.get("kind") == "stage_advance":
             workflow_id = item["workflow_id"]
+            coord_pane = coordinator_pane_for_workflow(workflow_id)
+            if not coord_pane:
+                print(
+                    f"[STAGE ADVANCE SKIP] "
+                    f"no coordinator pane for workflow={workflow_id}"
+                )
+                coordinator_queue.task_done()
+                continue
+
             stage = item["stage"]
             next_stage = item["next_stage"]
             target_node_id = item.get("node_id") or next_stage
@@ -1008,7 +1060,7 @@ task_type:
                                 "herdr",
                                 "agent",
                                 "prompt",
-                                coordinator_pane_for_workflow(workflow_id),
+                                coord_pane,
                                 message,
                                 "--wait",
                                 "--timeout",
@@ -1637,8 +1689,15 @@ def registry_watcher():
         "rework",
     }
 
+    last_advance_check = 0
+
     while True:
         try:
+            now = time.time()
+            if now - last_advance_check >= 2:
+                last_advance_check = now
+                check_all_workflows_stage_advance()
+
             tasks = load_tasks()
 
             for task in tasks:
@@ -1697,6 +1756,8 @@ def main():
         "[QUEUE] coordinator event "
         "serialization enabled"
     )
+
+    reset_queued_stage_states()
 
     worker = threading.Thread(
         target=coordinator_worker,
