@@ -1,0 +1,47 @@
+# Herdr Multi-Agent System Map
+
+> **AI 导航地图与事实来源索引**  
+> 本文件仅作为 AI 注入上下文的导航目录（约 100 行），严禁展开具体实现细节。所有深度上下文必须跟随下方链接查阅。
+
+---
+
+## 1. 核心架构与事实来源 (Source of Truth)
+
+- **系统定位与全局架构**: [`architecture-overview.md`](file:///Users/user/herdr/docs/architecture/architecture-overview.md) — 分层设计、组件职责、状态机。
+- **空间现场模型**: [`tab-node-model.md`](file:///Users/user/herdr/docs/architecture/tab-node-model.md) — Tab=Node, Pane=Workspace, Anchor 锚点现场隔离。
+- **工作流使用手册**: [`universal-workflow-guide.md`](file:///Users/user/herdr/docs/guides/universal-workflow-guide.md) — 端到端工作流调度、派发与自愈实操。
+- **模板开发规范**: [`template-authoring-guide.md`](file:///Users/user/herdr/docs/guides/template-authoring-guide.md) 与 [`workflow-template-schema.md`](file:///Users/user/herdr/docs/product-specs/workflow-template-schema.md) — YAML 语法契约与 DAG 校验规则。
+- **路由与调度策略**: [`agent-policy-spec.md`](file:///Users/user/herdr/docs/product-specs/agent-policy-spec.md) — Node 级 Agent 策略、健康准入、锁预占。
+- **服务运维与守护排障**: [`service-management.md`](file:///Users/user/herdr/docs/operations/service-management.md) 与 [`troubleshooting-faq.md`](file:///Users/user/herdr/docs/operations/troubleshooting-faq.md) — LaunchAgent 启停与死锁救援。
+- **沙盒深度探针**: [`deep-preflight-playbook.md`](file:///Users/user/herdr/docs/operations/deep-preflight-playbook.md) — 各 Agent 无副作用探针机制。
+- **全量 CLI 参考**: [`cli-reference.md`](file:///Users/user/herdr/docs/references/cli-reference.md) — 命令行参数字典。
+
+---
+
+## 2. 代码分层与物理地图 (Codebase Map)
+
+- **`bin/` (CLI 入口)**:
+  - [`herdr-factory`](file:///Users/user/herdr/bin/herdr-factory): 工作流与项目生命周期主入口。
+  - [`herdr-task`](file:///Users/user/herdr/bin/herdr-task): 任务派发、基线验收与运行时自愈工具。
+  - [`herdr-preflight`](file:///Users/user/herdr/bin/herdr-preflight) / [`herdr-deep-preflight`](file:///Users/user/herdr/bin/herdr-deep-preflight): Agent 健康体检与沙盒探活。
+- **`services/` (后台常驻守护进程)**:
+  - [`herdr-controller.py`](file:///Users/user/herdr/services/herdr-controller.py): DAG 依赖推进与协调器分发核心。
+  - [`herdr-sentinel.py`](file:///Users/user/herdr/services/herdr-sentinel.py): Tab/Pane 存活巡检看门狗。
+  - [`herdr-notifier.py`](file:///Users/user/herdr/services/herdr-notifier.py): macOS 原生通知广播。
+  - [`herdr-worker.py`](file:///Users/user/herdr/services/herdr-worker.py): 独立 CoW Git 克隆与工位装配。
+- **`herdr/` (核心业务库包)**:
+  - [`workflow.py`](file:///Users/user/herdr/herdr/workflow.py): Kahn 算法 DAG 拓扑校验、模板解析与就绪节点计算。
+  - [`agent_router.py`](file:///Users/user/herdr/herdr/agent_router.py): Node 级策略匹配、健康准入与 Reservation 并发锁。
+  - [`projects.py`](file:///Users/user/herdr/herdr/projects.py): 多项目注册表与 `ensure_node_runtime` 探活自愈。
+  - [`topology.py`](file:///Users/user/herdr/herdr/topology.py): 拓扑现场动态自愈与 Anchor 重建。
+  - [`pane_pool.py`](file:///Users/user/herdr/herdr/pane_pool.py): Herdr Pane 槽位管理。
+  - [`preflight.py`](file:///Users/user/herdr/herdr/preflight.py) / [`deep_preflight.py`](file:///Users/user/herdr/herdr/deep_preflight.py): 探针实现。
+- **`workflow_templates/`**: 内置 YAML 工作流模板。
+- **`tests/`**: [`test_workflow_engine.py`](file:///Users/user/herdr/tests/test_workflow_engine.py) 核心算法与引擎测试。
+
+---
+
+## 3. 运行与开发约束指针
+
+- **作业规范与红线约束**: 必须严格遵循 [`RULES.md`](file:///Users/user/herdr/RULES.md) 执行开发。
+- **操作入口与环境避坑**: 常用命令与运维陷阱请直接参考 [`CLAUDE.md`](file:///Users/user/herdr/CLAUDE.md)。
