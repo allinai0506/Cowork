@@ -17,11 +17,27 @@
 
 ---
 
-## 快速导航
+## 📖 文档体系导航
 
-- 📖 **[完整使用指南 (UNIVERSAL_WORKFLOW_GUIDE.md)](file:///Users/user/herdr/docs/UNIVERSAL_WORKFLOW_GUIDE.md)**：包含核心模型、内置模板介绍、CLI 命令、自定义模板编写指南、自愈机制与 FAQ。
-- 🏛️ **[架构设计全景文档 (HERDR_FACTORY_README.md)](file:///Users/user/herdr/HERDR_FACTORY_README.md)**：包含系统演进、各模块职责分工与底层实现细节。
-- 🤝 **[多 Agent 协作交接记录 (herdr-multiagent-handoff.md)](file:///Users/user/herdr/herdr-multiagent-handoff.md)**：多 Agent 体系演进过程与各阶段决策。
+Herdr 遵循业界最严格的文档分类标准，所有文档严禁散落存放在 `docs` 根目录，全部按职责严格分门别类：
+
+- **架构设计 (`docs/architecture/`)**
+  - [系统全局架构设计](file:///Users/user/herdr/docs/architecture/architecture-overview.md)：系统定位、分层模型与核心子系统职责。
+  - [Tab=Workflow Node 架构模型](file:///Users/user/herdr/docs/architecture/tab-node-model.md)：空间现场模型、Anchor 母体机制与逻辑运行时解耦。
+- **实操指南 (`docs/guides/`)**
+  - [通用工作流使用指南](file:///Users/user/herdr/docs/guides/universal-workflow-guide.md)：从模板启动、任务派发、状态监控到自愈机制的完整手册。
+  - [模板编写实战指南](file:///Users/user/herdr/docs/guides/template-authoring-guide.md)：自定义 DAG 工作流模板从 0 到 1 编写与调试。
+- **产品与数据规范 (`docs/product-specs/`)**
+  - [工作流模板 Schema 规范](file:///Users/user/herdr/docs/product-specs/workflow-template-schema.md)：YAML/JSON 字段契约、数据类型与 DAG 校验边界。
+  - [Agent 策略与路由规范](file:///Users/user/herdr/docs/product-specs/agent-policy-spec.md)：Node 级 Agent 策略、健康准入与预占锁。
+- **运维与排障手册 (`docs/operations/`)**
+  - [后台守护进程运维手册](file:///Users/user/herdr/docs/operations/service-management.md)：LaunchAgent 管理、重启命令与日志追踪。
+  - [Deep Preflight 探针手册](file:///Users/user/herdr/docs/operations/deep-preflight-playbook.md)：各主流 Agent 沙盒试跑机制与探针适配。
+  - [故障自愈与疑难排解 FAQ](file:///Users/user/herdr/docs/operations/troubleshooting-faq.md)：现场误关恢复、调度汇聚阻断与死锁恢复。
+- **命令与参考资料 (`docs/references/`)**
+  - [CLI 全量命令参考手册](file:///Users/user/herdr/docs/references/cli-reference.md)：`herdr-factory` 与 `herdr-task` 所有子命令与选项。
+- **演进与交接记录 (`docs/handoffs/`)**
+  - [多 Agent 研发系统交接记录](file:///Users/user/herdr/docs/handoffs/multiagent-handoff.md)：多 Agent 体系演进过程与历史决策。
 
 ---
 

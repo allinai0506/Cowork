@@ -1,0 +1,91 @@
+# 工作流模板编写进阶实战指南 (Template Authoring Guide)
+
+> 本文档指导开发者如何从零构建、调试和发布自定义的 Herdr Workflow 模板。
+
+---
+
+## 1. 模板存放规范
+
+Herdr 支持在以下两级路径加载工作流模板：
+1. **全局/用户模板目录**：`~/.herdr-controller/templates/<name>.yaml`
+2. **仓库/内置模板目录**：`workflow_templates/<name>.yaml`
+
+> 优先级：当两者重名时，用户目录的模板优先覆盖内置模板。
+
+---
+
+## 2. 模板结构快速骨架
+
+```yaml
+name: contract-review           # 唯一标识符，英文小写与横杠
+label: 商业合同审查与风险评估   # 人类可读名称，展示在 UI/CLI
+version: "1.0"                 # 版本号
+description: 面向法务与商务的合同文本解析、合规条款初审与终审流程
+
+nodes:
+  - id: contract_ingest
+    label: 合同文本解析与要素提取
+    node_type: agent
+    purpose: 提取合同主体、标的、金额与履行期限
+    default_task_type: explore
+    agent_policy:
+      preferred:
+        - claude
+        - opencode
+
+  - id: legal_compliance
+    label: 法规与红线条款审查
+    node_type: agent
+    depends_on:
+      - contract_ingest
+    purpose: 审核违约责任、争议管辖与不可抗力条款
+    default_task_type: review
+    agent_policy:
+      fixed: claude
+
+  - id: business_risk
+    label: 商务条款与付款风险对标
+    node_type: agent
+    depends_on:
+      - contract_ingest
+    purpose: 审查付款节点、账期风险及违约金比例
+    default_task_type: review
+    parallel: true
+
+  - id: final_approval
+    label: 综合审查意见汇总
+    node_type: agent
+    depends_on:
+      - legal_compliance
+      - business_risk
+    purpose: 汇聚法务与商务意见，输出最终签字版审核报告
+    agent_policy:
+      preferred:
+        - claude
+    required_outputs:
+      - docs/review/CONTRACT_AUDIT_REPORT.md
+```
+
+---
+
+## 3. 编写技巧与最佳实践
+
+### 3.1 充分利用并发与汇聚
+- 善用 `depends_on` 构建并行分支（如上述 `legal_compliance` 与 `business_risk` 在 `contract_ingest` 完成后会并发执行）。
+- 汇聚节点（如 `final_approval`）只要把所有前置分支的 `id` 填入 `depends_on`，系统会自动挂起等待全部前置完成。
+
+### 3.2 节点 Agent 策略设置建议
+- **对严谨性要求高的节点**（如架构评审、合规审核、最终把关）：使用 `fixed: claude`。
+- **对代码实现/并行搬砖要求高的节点**：使用 `preferred: [opencode, codex, qodercli]` 并设置 `parallel: true`。
+
+### 3.3 模板本地调试流程
+1. 将模板存入 `~/.herdr-controller/templates/my-template.yaml`；
+2. 运行 `herdr-factory templates`，确认列表中能正常读取其标签、节点数量；
+3. 运行自动化测试检查 DAG 逻辑：
+   ```bash
+   pytest -v tests/test_workflow_engine.py
+   ```
+4. 在测试项目中执行试跑：
+   ```bash
+   herdr-factory run "试跑测试任务" --template my-template
+   ```
