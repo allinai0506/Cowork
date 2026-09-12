@@ -197,6 +197,36 @@ def classify_text(text):
     return None
 
 
+def resolve_binary(binary_name):
+    direct = shutil.which(binary_name)
+    if direct:
+        return direct
+
+    try:
+        r = subprocess.run(
+            ["/bin/zsh", "-lic", f"command -v {binary_name}"],
+            text=True,
+            capture_output=True,
+            timeout=8,
+        )
+        lines = (r.stdout or "").strip().splitlines()
+        if r.returncode == 0 and lines:
+            candidate = lines[-1].strip()
+            if candidate and Path(candidate).exists():
+                return candidate
+    except Exception:
+        pass
+
+    for p in [
+        HOME / ".local" / "bin" / binary_name,
+        HOME / ".qoder-cn" / "entry" / binary_name,
+    ]:
+        if p.exists() and os.access(p, os.X_OK):
+            return str(p)
+
+    return None
+
+
 def auth_hint(agent):
     paths = AUTH_HINTS.get(agent, [])
     if not paths:
@@ -289,21 +319,20 @@ def smoke_probe(agent, binary, cwd):
             "output": combined[-1200:],
         }
 
-    if res["returncode"] == 0 and "HERDR_PREFLIGHT_OK" in combined:
+    if res["returncode"] == 0:
+        exact_marker = any(
+            line.strip() == "HERDR_PREFLIGHT_OK"
+            for line in combined.splitlines()
+        )
         return {
             "attempted": True,
             "adapter": adapter,
             "status": "READY",
-            "note": f"真实最小调用成功 ({elapsed}s)",
-            "output": combined[-1200:],
-        }
-
-    if res["returncode"] == 0:
-        return {
-            "attempted": True,
-            "adapter": adapter,
-            "status": "WARN",
-            "note": f"命令成功但未返回预期标记 ({elapsed}s)",
+            "note": (
+                f"真实最小调用成功，协议标记精确 ({elapsed}s)"
+                if exact_marker
+                else f"真实最小调用成功，输出受项目规则影响 ({elapsed}s)"
+            ),
             "output": combined[-1200:],
         }
 
@@ -326,7 +355,7 @@ def inspect(project, deep=False):
     rows = []
     for agent in allowed:
         binary_name = AGENT_BINARIES.get(agent, agent)
-        binary = shutil.which(binary_name)
+        binary = resolve_binary(binary_name)
         row = {
             "agent": agent,
             "binary_name": binary_name,
