@@ -15,6 +15,7 @@
 - **服务运维与守护排障**: [`service-management.md`](file:///Users/user/herdr/docs/operations/service-management.md) 与 [`troubleshooting-faq.md`](file:///Users/user/herdr/docs/operations/troubleshooting-faq.md) — LaunchAgent 启停与死锁救援。
 - **沙盒深度探针**: [`deep-preflight-playbook.md`](file:///Users/user/herdr/docs/operations/deep-preflight-playbook.md) — 各 Agent 无副作用探针机制。
 - **全量 CLI 参考**: [`cli-reference.md`](file:///Users/user/herdr/docs/references/cli-reference.md) — 命令行参数字典。
+- **Agent 交付演进**: [`walkthroughs/`](file:///Users/user/herdr/docs/walkthroughs/README.md) — 各类 Agent 任务交付演进报告与 Walkthrough 归档。
 
 ---
 

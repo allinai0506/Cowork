@@ -105,6 +105,7 @@ herdr/
 - **架构设计**: [系统全局架构设计](file:///Users/user/herdr/docs/architecture/architecture-overview.md) 与 [Tab=Workflow Node 架构模型](file:///Users/user/herdr/docs/architecture/tab-node-model.md)。
 - **实操手册**: [通用工作流使用指南](file:///Users/user/herdr/docs/guides/universal-workflow-guide.md) 与 [模板编写实战指南](file:///Users/user/herdr/docs/guides/template-authoring-guide.md)。
 - **运维排障**: [后台服务运维手册](file:///Users/user/herdr/docs/operations/service-management.md) 与 [故障自愈 FAQ](file:///Users/user/herdr/docs/operations/troubleshooting-faq.md)。
+- **交付演进**: [Agent 交付演进 Walkthrough](file:///Users/user/herdr/docs/walkthroughs/README.md) — 各类 Agent 任务交付演进报告与 Walkthrough 归档。
 
 ---
 
