@@ -14,4 +14,4 @@ if [[ "${1:-}" != "--no-restart" ]]; then
   launchctl kickstart -k "gui/$(id -u)/com.user.herdr-factory-console"
 fi
 
-echo "Herdr Factory Console synced to ${target_dir}"
+echo "共事工厂控制台已同步到 ${target_dir}"
