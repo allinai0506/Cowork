@@ -1,0 +1,443 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+HOME = Path.home()
+HERDR_DIR = HOME / "herdr"
+ROOT = HOME / ".herdr-controller"
+PROJECTS = ROOT / "projects.json"
+POOLS = ROOT / "agent-pools.json"
+
+# Internal Factory agent id -> actual local CLI binary.
+AGENT_BINARIES = {
+    "opencode": "opencode",
+    "codex": "codex",
+    "claude": "claude",
+    "qodercli": "qodercn",
+    "agy": "agy",
+    "pi": "pi",
+}
+
+AGENTS = list(AGENT_BINARIES)
+
+# Known local config hints. Missing config is never treated as definitive auth failure
+# unless the provider has a stable, known local auth file.
+AUTH_HINTS = {
+    "opencode": [HOME / ".config" / "opencode"],
+    "codex": [HOME / ".codex" / "auth.json"],
+    "claude": [HOME / ".claude.json"],
+    "qodercli": [HOME / ".qoder-cn"],
+    "agy": [],
+    "pi": [HOME / ".pi" / "agent" / "auth.json"],
+}
+
+# These patterns are intentionally conservative. We only classify an error when
+# the CLI itself reports a clear blocker.
+TOKEN_PATTERNS = [
+    r"token.*(exhaust|limit|quota)",
+    r"(quota|credits?).*(exhaust|limit|insufficient)",
+    r"insufficient.*(quota|credits?)",
+    r"rate.?limit",
+    r"usage limit",
+    r"no.*tokens?",
+]
+AUTH_PATTERNS = [
+    r"not logged in",
+    r"authentication required",
+    r"unauthorized",
+    r"invalid api key",
+    r"invalid.*token",
+    r"login required",
+    r"please log in",
+]
+TRUST_PATTERNS = [
+    r"do you trust",
+    r"project you created or one you trust",
+    r"workspace trust",
+]
+UPDATE_PATTERNS = [
+    r"update available",
+    r"upgrade available",
+]
+
+
+def load_json(path, default):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def save_json(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def project_by_root(root):
+    root = str(Path(root).expanduser().resolve())
+    ps = load_json(PROJECTS, {"projects": {}}).get("projects", {})
+    if isinstance(ps, dict):
+        for pid, p in ps.items():
+            if p.get("project_root") == root:
+                row = dict(p)
+                row.setdefault("project_id", pid)
+                return row
+    return None
+
+
+def current_project():
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        if r.returncode == 0:
+            return project_by_root(r.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def project_by_id(project_id):
+    ps = load_json(PROJECTS, {"projects": {}}).get("projects", {})
+    if isinstance(ps, dict) and project_id in ps:
+        p = dict(ps[project_id])
+        p.setdefault("project_id", project_id)
+        return p
+    return None
+
+
+def project_pool(project_id):
+    pools = load_json(POOLS, {"projects": {}}).get("projects", {})
+    return pools.get(project_id, {}) if isinstance(pools, dict) else {}
+
+
+def set_disabled(project_id, agent, disabled):
+    data = load_json(POOLS, {"projects": {}})
+    pool = data.setdefault("projects", {}).setdefault(project_id, {})
+    current = set(pool.get("disabled_agents", []))
+    if disabled:
+        current.add(agent)
+    else:
+        current.discard(agent)
+    pool["disabled_agents"] = sorted(current)
+    save_json(POOLS, data)
+
+
+def run(cmd, timeout=12, cwd=None, stdin=None):
+    try:
+        return subprocess.run(
+            cmd,
+            text=True,
+            input=stdin,
+            capture_output=True,
+            timeout=timeout,
+            cwd=cwd,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "timeout": True,
+            "stdout": exc.stdout or "",
+            "stderr": exc.stderr or "",
+            "returncode": None,
+        }
+
+
+def normalize_result(result):
+    if isinstance(result, dict):
+        return result
+    return {
+        "timeout": False,
+        "stdout": result.stdout or "",
+        "stderr": result.stderr or "",
+        "returncode": result.returncode,
+    }
+
+
+def classify_text(text):
+    low = text.lower()
+    checks = [
+        ("TOKEN_EXHAUSTED", TOKEN_PATTERNS),
+        ("AUTH_REQUIRED", AUTH_PATTERNS),
+        ("TRUST_REQUIRED", TRUST_PATTERNS),
+        ("UPDATE_BLOCKED", UPDATE_PATTERNS),
+    ]
+    for status, patterns in checks:
+        if any(re.search(p, low, re.I) for p in patterns):
+            return status
+    return None
+
+
+def auth_hint(agent):
+    paths = AUTH_HINTS.get(agent, [])
+    if not paths:
+        return "unknown"
+    return "present" if any(p.exists() for p in paths) else "missing"
+
+
+def version_probe(agent, binary):
+    res = normalize_result(run([binary, "--version"], timeout=8))
+    text = (res["stdout"] or res["stderr"]).strip()
+    if res["timeout"]:
+        return False, "timeout"
+    return res["returncode"] == 0, (text.splitlines()[0][:160] if text else "")
+
+
+def help_probe(binary):
+    for args in (["--help"], ["help"]):
+        res = normalize_result(run([binary] + args, timeout=8))
+        text = (res["stdout"] + "\n" + res["stderr"]).strip()
+        if text:
+            return text
+    return ""
+
+
+def choose_smoke_command(agent, binary, cwd):
+    """
+    Return a conservative non-interactive smoke command only when we know the
+    installed CLI exposes a supported non-interactive mode.
+
+    This deliberately avoids inventing flags for unknown CLIs.
+    """
+    help_text = help_probe(binary).lower()
+    prompt = "Reply with exactly HERDR_PREFLIGHT_OK and nothing else."
+
+    if agent == "codex":
+        # Codex CLI supports `exec` for non-interactive execution.
+        if re.search(r"\bexec\b", help_text):
+            return [binary, "exec", "--skip-git-repo-check", prompt], "codex exec"
+
+    if agent == "claude":
+        # Claude Code commonly exposes --print / -p.
+        if "--print" in help_text:
+            return [binary, "--print", prompt], "claude --print"
+        if re.search(r"(^|\s)-p([,\s]|$)", help_text):
+            return [binary, "-p", prompt], "claude -p"
+
+    if agent == "opencode":
+        # OpenCode exposes `run` in current CLI builds.
+        if re.search(r"\brun\b", help_text):
+            return [binary, "run", prompt], "opencode run"
+
+    # qodercn / agy / pi vary by release and packaging. We intentionally do not
+    # guess a real-request flag. Their deep state remains UNKNOWN until we add
+    # an adapter based on their local `--help`.
+    return None, "no safe non-interactive adapter"
+
+
+def smoke_probe(agent, binary, cwd):
+    cmd, adapter = choose_smoke_command(agent, binary, cwd)
+    if not cmd:
+        return {
+            "attempted": False,
+            "adapter": adapter,
+            "status": "UNKNOWN",
+            "note": "未执行真实请求：当前版本没有确认安全的非交互调用方式",
+            "output": "",
+        }
+
+    started = time.time()
+    res = normalize_result(run(cmd, timeout=35, cwd=cwd))
+    elapsed = round(time.time() - started, 2)
+    combined = (res["stdout"] + "\n" + res["stderr"]).strip()
+    classification = classify_text(combined)
+
+    if res["timeout"]:
+        return {
+            "attempted": True,
+            "adapter": adapter,
+            "status": "TIMEOUT",
+            "note": f"真实最小调用超时 ({elapsed}s)",
+            "output": combined[-1200:],
+        }
+
+    if classification:
+        return {
+            "attempted": True,
+            "adapter": adapter,
+            "status": classification,
+            "note": f"CLI 报告阻塞 ({elapsed}s)",
+            "output": combined[-1200:],
+        }
+
+    if res["returncode"] == 0 and "HERDR_PREFLIGHT_OK" in combined:
+        return {
+            "attempted": True,
+            "adapter": adapter,
+            "status": "READY",
+            "note": f"真实最小调用成功 ({elapsed}s)",
+            "output": combined[-1200:],
+        }
+
+    if res["returncode"] == 0:
+        return {
+            "attempted": True,
+            "adapter": adapter,
+            "status": "WARN",
+            "note": f"命令成功但未返回预期标记 ({elapsed}s)",
+            "output": combined[-1200:],
+        }
+
+    return {
+        "attempted": True,
+        "adapter": adapter,
+        "status": "ERROR",
+        "note": f"真实最小调用失败 code={res['returncode']} ({elapsed}s)",
+        "output": combined[-1200:],
+    }
+
+
+def inspect(project, deep=False):
+    project_id = project.get("project_id") if project else None
+    project_root = project.get("project_root") if project else os.getcwd()
+    pool = project_pool(project_id) if project_id else {}
+    allowed = pool.get("allowed_agents", AGENTS)
+    disabled = set(pool.get("disabled_agents", []))
+
+    rows = []
+    for agent in allowed:
+        binary_name = AGENT_BINARIES.get(agent, agent)
+        binary = shutil.which(binary_name)
+        row = {
+            "agent": agent,
+            "binary_name": binary_name,
+            "binary": binary,
+            "disabled": agent in disabled,
+            "auth_hint": auth_hint(agent),
+            "version": "",
+            "shallow_status": "",
+            "deep": None,
+        }
+
+        if not binary:
+            row["shallow_status"] = "MISSING"
+            row["final_status"] = "DISABLED" if agent in disabled else "MISSING"
+            rows.append(row)
+            continue
+
+        ok, version = version_probe(agent, binary)
+        row["version"] = version
+        if agent in disabled:
+            row["shallow_status"] = "DISABLED"
+        elif not ok:
+            row["shallow_status"] = "WARN"
+        elif row["auth_hint"] == "missing":
+            row["shallow_status"] = "WARN"
+        else:
+            row["shallow_status"] = "READY"
+
+        if deep and agent not in disabled and binary:
+            row["deep"] = smoke_probe(agent, binary, project_root)
+
+        if agent in disabled:
+            row["final_status"] = "DISABLED"
+        elif row["deep"] and row["deep"]["attempted"]:
+            row["final_status"] = row["deep"]["status"]
+        elif row["shallow_status"] in {"MISSING", "WARN"}:
+            row["final_status"] = row["shallow_status"]
+        else:
+            row["final_status"] = "READY" if not deep else "UNKNOWN"
+
+        rows.append(row)
+
+    return rows
+
+
+def print_table(rows, project_id, deep):
+    print()
+    print(f"Project: {project_id or '(unregistered)'}")
+    print(f"Mode: {'DEEP' if deep else 'SHALLOW'}")
+    print("=" * 112)
+    print(f"{'Agent':<12} {'Final':<17} {'CLI':<8} {'Auth':<9} {'Adapter / Version'}")
+    print("-" * 112)
+    for r in rows:
+        deep_info = r.get("deep")
+        adapter = deep_info.get("adapter") if deep_info else ""
+        note = r.get("version") or r.get("binary") or "not installed"
+        if deep_info:
+            note = f"{adapter} | {deep_info.get('note','')}"
+        cli = "OK" if r.get("binary") else "MISS"
+        print(f"{r['agent']:<12} {r['final_status']:<17} {cli:<8} {r['auth_hint']:<9} {note[:64]}")
+    print()
+
+    if deep:
+        unknown = [r["agent"] for r in rows if r["final_status"] == "UNKNOWN"]
+        if unknown:
+            print("未做真实请求的 Agent:", ", ".join(unknown))
+            print("原因：当前版本没有确认安全的非交互调用适配器，不会猜测 CLI 参数。")
+            print()
+
+        bad = [
+            r for r in rows
+            if r["final_status"] in {
+                "TOKEN_EXHAUSTED", "AUTH_REQUIRED", "TRUST_REQUIRED",
+                "UPDATE_BLOCKED", "TIMEOUT", "ERROR", "MISSING"
+            }
+        ]
+        if bad:
+            print("建议从 Router 候选中暂时禁用:")
+            print("  " + ", ".join(r["agent"] for r in bad))
+        else:
+            print("没有检测到明确的运行阻塞。")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Herdr Factory Deep Agent Preflight")
+    ap.add_argument("--project-id")
+    ap.add_argument("--project-root")
+    ap.add_argument("--deep", action="store_true", help="Perform minimal real provider calls where a safe adapter is known")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--auto-disable", action="store_true", help="Disable only agents with explicit hard failures from deep probes")
+    args = ap.parse_args()
+
+    if args.project_id:
+        project = project_by_id(args.project_id)
+    elif args.project_root:
+        project = project_by_root(args.project_root)
+    else:
+        project = current_project()
+
+    if not project:
+        raise SystemExit("当前目录不是已注册 Factory 项目；请进入项目目录或传 --project-id/--project-root")
+
+    rows = inspect(project, deep=args.deep)
+
+    if args.auto_disable and args.deep:
+        hard = {
+            "TOKEN_EXHAUSTED", "AUTH_REQUIRED", "TRUST_REQUIRED",
+            "UPDATE_BLOCKED", "ERROR", "MISSING"
+        }
+        changed = []
+        for r in rows:
+            if r["final_status"] in hard and not r["disabled"]:
+                set_disabled(project["project_id"], r["agent"], True)
+                changed.append(r["agent"])
+        if changed:
+            print("AUTO_DISABLED:", ", ".join(changed))
+
+    if args.json:
+        print(json.dumps({
+            "project_id": project["project_id"],
+            "project_root": project["project_root"],
+            "mode": "deep" if args.deep else "shallow",
+            "agents": rows,
+        }, ensure_ascii=False, indent=2))
+    else:
+        print_table(rows, project["project_id"], args.deep)
+
+
+if __name__ == "__main__":
+    main()
