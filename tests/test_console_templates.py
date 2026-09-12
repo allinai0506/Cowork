@@ -211,7 +211,7 @@ class TestTermTranslation(unittest.TestCase):
     def test_confirmed_terms_are_translated(self):
         for snippet in (
             ">执行者 / 任务 实时看板<",
-            ">执行者池<",
+            ">执行者阵容<",
             ">常驻智能体工位<",
             "执行者舰队",
             ">执行者自检<",
