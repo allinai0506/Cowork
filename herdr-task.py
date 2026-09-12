@@ -49,6 +49,12 @@ def resolve_node(node_id, workflow_id=None):
     if workflow_id:
         try:
             runtime = ensure_node_runtime(workflow_id, node_id)
+            wf = load_workflow(workflow_id)
+            next_stage = None
+            for s in wf.get("stages", []):
+                if (s.get("key") or s.get("id")) == node_id:
+                    next_stage = s.get("next")
+                    break
             return {
                 "workspace_id": runtime["workspace_id"],
                 "node_id": runtime["node_id"],
@@ -58,7 +64,7 @@ def resolve_node(node_id, workflow_id=None):
                 "tab_id": runtime["tab_id"],
                 "anchor_pane_id": runtime["anchor_pane_id"],
                 "depends_on": runtime.get("depends_on", []),
-                "next": None,
+                "next": next_stage,
                 "agent_policy": runtime.get("agent_policy", {}),
                 "purpose": runtime.get("purpose", ""),
                 "default_integration_mode": runtime.get("default_integration_mode", "none"),
@@ -74,6 +80,11 @@ def resolve_node(node_id, workflow_id=None):
     node = find_node(workflow, node_id)
     if node:
         anchor = node.get("anchor_pane_id")
+        next_stage = None
+        for s in workflow.get("stages", []):
+            if (s.get("key") or s.get("id")) == node_id:
+                next_stage = s.get("next")
+                break
         return {
             "workspace_id": workflow.get("workspace_id", ""),
             "node_id": node["id"],
@@ -84,7 +95,7 @@ def resolve_node(node_id, workflow_id=None):
             "anchor_pane_id": anchor,
             "depends_on": node.get("depends_on", []),
             "agent_policy": node.get("agent_policy", {}),
-            "next": None,
+            "next": next_stage,
         }
 
     for stage in workflow.get("stages", []):
