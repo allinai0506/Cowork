@@ -579,13 +579,33 @@ def test_end_to_end_single_source_of_truth_without_workflows_json(store_env, mon
     ctrl_spec = importlib.util.spec_from_file_location("controller_e2e_mod", "services/herdr-controller.py")
     ctrl = importlib.util.module_from_spec(ctrl_spec)
     ctrl_spec.loader.exec_module(ctrl)
-
     active_reg = ctrl.active_registered_workflows()
     assert wid in active_reg
 
     wf_entry = ctrl._workflow_entry(wid)
     assert wf_entry.get("workflow_id") == wid
     assert wf_entry.get("agent_override") == "claude"
+
+    # 9. bin/herdr-factory functions work directly with StateStore
+    import importlib.machinery
+    factory_loader = importlib.machinery.SourceFileLoader("factory_e2e_mod", str(Path("bin/herdr-factory").resolve()))
+    factory_spec = importlib.util.spec_from_loader("factory_e2e_mod", factory_loader)
+    factory = importlib.util.module_from_spec(factory_spec)
+    factory_loader.exec_module(factory)
+
+    store.save_task({
+        "task_id": "task-factory-e2e",
+        "workflow_id": wid,
+        "status": "working",
+    })
+    wf_tasks = factory.tasks_for(wid)
+    assert len(wf_tasks) == 1
+    assert wf_tasks[0]["task_id"] == "task-factory-e2e"
+
+    factory.pause_workflow(wid)
+    assert store.get_workflow(wid)["status"] == "paused"
+    factory.resume_workflow(wid)
+    assert store.get_workflow(wid)["status"] == "running"
 
 
 
