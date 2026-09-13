@@ -3542,6 +3542,14 @@ def main():
     steer_queue_cmd = sub.add_parser("steer-queue")
     steer_queue_cmd.add_argument("task_id")
 
+    project_cmd = sub.add_parser("project")
+    project_cmd.add_argument("task_id")
+    project_cmd.add_argument("--json", action="store_true", help="输出完整 JSON 数据")
+
+    artifacts_cmd = sub.add_parser("artifacts")
+    artifacts_cmd.add_argument("task_id")
+    artifacts_cmd.add_argument("--json", action="store_true", help="输出完整 JSON 数据")
+
     args = parser.parse_args()
 
     if args.command == "add":
@@ -3696,6 +3704,52 @@ def main():
         else:
             for s in steers:
                 print(f"- [{s['status']}] {s['steer_id']} (urgent={s['urgent']}): {s['instruction']}")
+
+    elif args.command == "project":
+        import herdr.projection as herdr_projection
+        try:
+            res = herdr_projection.project_task(args.task_id)
+            if getattr(args, "json", False):
+                print(json.dumps(res, ensure_ascii=False, indent=2))
+            else:
+                print(f"=== 任务白盒简报 [{res['task_id']}] ===")
+                print(f"状态: {res['status']} | 执行者: {res.get('agent', '-')}")
+                print(f"当前意图: {res.get('intent', '-')}")
+                if res.get("blockers"):
+                    print(f"⚠️ 卡点告警: {', '.join(res['blockers'])}")
+                print("\n[动态路标]")
+                for m in res.get("milestones", []):
+                    st = "✓" if m["status"] == "completed" else (">" if m["status"] == "in_progress" else " ")
+                    print(f"  [{st}] {m['label']}")
+                print("\n[产物列表]")
+                for a in res.get("artifacts", []):
+                    print(f"  - [{a.get('kind')}] {a.get('name')}: {a.get('summary')}")
+                print("\n[近期动态]")
+                for act in res.get("recent_activity", []):
+                    print(f"  • {act}")
+        except Exception as e:
+            print(f"Error projecting task: {e}")
+            sys.exit(1)
+
+    elif args.command == "artifacts":
+        import herdr.projection as herdr_projection
+        try:
+            res = herdr_projection.project_task(args.task_id)
+            artifacts = res.get("artifacts", [])
+            if getattr(args, "json", False):
+                print(json.dumps(artifacts, ensure_ascii=False, indent=2))
+            else:
+                print(f"=== 任务产物清单 [{res['task_id']}] ===")
+                if not artifacts:
+                    print("暂无产物生成")
+                for a in artifacts:
+                    print(f"[{a.get('kind')}] {a.get('name')}")
+                    print(f"  摘要: {a.get('summary')}")
+                    if a.get("path"):
+                        print(f"  路径: {a.get('path')}")
+        except Exception as e:
+            print(f"Error collecting artifacts: {e}")
+            sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -39,6 +39,7 @@
 | **编写或修改自动化测试** | [[dag-workflow-engine]] | `tests/test_workflow_engine.py` |
 | **工作流外部受控元语与快照回溯** | [[dag-workflow-engine]], [[task-lifecycle]] | `herdr/kernel.py`, `console/herdr_factory_console.py` |
 | **工位实时打断与插话纠偏 (Steering Mesh)** | [[task-lifecycle]] | `herdr/steering.py`, `bin/herdr-task:steer` |
+| **白盒遥测、语义提炼与产物投影 (Projection Engine)** | [[task-lifecycle]] | `herdr/projection.py`, `console/herdr_factory_console.py` |
 | **更新或扩展 Wiki 本身** | [[WIKI]] / [[log]] | `wiki/WIKI.md` |
 
 ---
