@@ -153,7 +153,27 @@ def test_project_task(projection_env):
     assert "milestones" in proj
     assert "artifacts" in proj
     assert proj["blocker"] is None
-    assert "recent_activity" in proj
+    assert proj["blockers"] == []
+    assert isinstance(proj["recent_activity"], list)
+    assert len(proj["recent_activity"]) >= 1
+
+
+def test_extract_task_blockers():
+    # 1. State-based blocker
+    task_blocked = {"status": "blocked", "sentinel_reason": "No disk space"}
+    b1 = projection.extract_task_blockers(task_blocked, "")
+    assert "No disk space" in b1
+
+    # 2. Terminal marker blocker
+    task_normal = {"status": "working"}
+    term_marker = "Log 1\n[BLOCKER] Missing AWS credentials\nLog 2"
+    b2 = projection.extract_task_blockers(task_normal, term_marker)
+    assert "Missing AWS credentials" in b2
+
+    # 3. Crash signature blocker
+    term_crash = "Traceback (most recent call last):\n  File 'a.py'\nModuleNotFoundError: No module named 'foobar'"
+    b3 = projection.extract_task_blockers(task_normal, term_crash)
+    assert any("依赖缺失: ModuleNotFoundError" in b for b in b3)
 
 
 def test_project_workflow(projection_env):

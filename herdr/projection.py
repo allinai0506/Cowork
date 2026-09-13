@@ -207,6 +207,7 @@ def collect_task_artifacts(task: Dict[str, Any]) -> List[Dict[str, Any]]:
         })
 
     # Search for other markdown deliverables in docs/ or root
+    doc_count = 0
     for doc_candidate in clone_path.glob("docs/**/*.md"):
         if ".herdr-loop" not in str(doc_candidate):
             rel = doc_candidate.relative_to(clone_path)
@@ -216,18 +217,63 @@ def collect_task_artifacts(task: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "path": str(doc_candidate),
                 "summary": f"设计与交付文档 ({rel})",
             })
+            doc_count += 1
+            if doc_count >= 15:
+                break
 
     return artifacts
 
 
-def extract_recent_activity(clean_text: str, max_lines: int = 5) -> str:
+def extract_recent_activity(clean_text: str, max_lines: int = 5) -> List[str]:
     """Extract clean recent activity log lines from terminal buffer."""
     if not clean_text:
-        return ""
+        return []
     lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
     if not lines:
-        return ""
-    return "\n".join(lines[-max_lines:])
+        return []
+    return lines[-max_lines:]
+
+
+def extract_task_blockers(task: Dict[str, Any], clean_text: str) -> List[str]:
+    """Extract structured blocker alerts from task state and terminal output."""
+    blockers: List[str] = []
+    status = task.get("status")
+
+    if status == "blocked":
+        blockers.append(task.get("sentinel_reason") or "工位遇到阻碍，已上报仲裁")
+    elif status == "interrupted":
+        blockers.append(f"已制动暂停: {task.get('interrupt_reason') or '人工干预'}")
+
+    if not clean_text:
+        return blockers
+
+    # 1. Explicit marker [HERDR_TASK_BLOCKER] or [BLOCKER]
+    marker_match = re.search(r"\[(?:HERDR_TASK_)?BLOCKER\][:\s]*(.+)", clean_text, re.IGNORECASE)
+    if marker_match:
+        blockers.append(marker_match.group(1).strip())
+    elif "HERDR_TASK_BLOCKER" in clean_text:
+        blockers.append("终端输出阻碍标记 HERDR_TASK_BLOCKER")
+
+    # 2. Fatal runtime error signatures in recent log tail
+    tail_lines = [l.strip() for l in clean_text.splitlines() if l.strip()][-12:]
+    tail_text = "\n".join(tail_lines)
+
+    import_err = re.search(r"(?:ModuleNotFoundError|ImportError):\s*([^\n\r]+)", tail_text)
+    if import_err:
+        blockers.append(f"依赖缺失: {import_err.group(0).strip()}")
+
+    syntax_err = re.search(r"(?:SyntaxError):\s*([^\n\r]+)", tail_text)
+    if syntax_err:
+        blockers.append(f"语法错误: {syntax_err.group(0).strip()}")
+
+    # Deduplicate while preserving order
+    deduped: List[str] = []
+    seen = set()
+    for b in blockers:
+        if b not in seen:
+            seen.add(b)
+            deduped.append(b)
+    return deduped
 
 
 def project_task(task_id: str) -> Dict[str, Any]:
@@ -244,16 +290,8 @@ def project_task(task_id: str) -> Dict[str, Any]:
     intent = extract_task_intent(task, clean_terminal)
     milestones = extract_task_milestones(task, clean_terminal)
     artifacts = collect_task_artifacts(task)
-
-    # Detect blockers
-    blocker = None
-    if task.get("status") == "blocked":
-        blocker = task.get("sentinel_reason") or "工位遇到阻碍，已上报仲裁"
-    elif task.get("status") == "interrupted":
-        blocker = f"已制动暂停: {task.get('interrupt_reason') or '人工干预'}"
-    elif "HERDR_TASK_BLOCKER" in clean_terminal:
-        blocker = "终端输出阻碍标记 HERDR_TASK_BLOCKER"
-
+    blockers = extract_task_blockers(task, clean_terminal)
+    blocker = blockers[0] if blockers else None
     recent_activity = extract_recent_activity(clean_terminal, max_lines=6)
 
     return {
@@ -268,6 +306,7 @@ def project_task(task_id: str) -> Dict[str, Any]:
         "milestones": milestones,
         "artifacts": artifacts,
         "blocker": blocker,
+        "blockers": blockers,
         "recent_activity": recent_activity,
         "projected_at": time.time(),
     }
