@@ -274,7 +274,7 @@ class TestStageReset(unittest.TestCase):
             "wf-b:test": "notified",
         })
         try:
-            with patch("os.path.expanduser", return_value=path):
+            with patch.object(_ht, "STAGE_STATE_FILE", path):
                 _ht.stage_reset("wf-a")
             with open(path) as f:
                 state = json.load(f)
@@ -290,7 +290,7 @@ class TestStageReset(unittest.TestCase):
             "wf-a:review": "queued",
         })
         try:
-            with patch("os.path.expanduser", return_value=path):
+            with patch.object(_ht, "STAGE_STATE_FILE", path):
                 _ht.stage_reset("wf-a", "test")
             with open(path) as f:
                 state = json.load(f)

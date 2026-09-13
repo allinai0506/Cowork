@@ -103,3 +103,46 @@ Evidence:
 Evidence:
 - `workflow_templates/software-development-v1.yaml:rules`
 - `workflow_templates/bidding.yaml:rules`
+
+---
+
+## 5. 物理收尾与证据固化 (Physical Teardown)
+
+`FACT` 任务遵循"生而隔离,死而清零"生命周期:出生时独立 pane + CoW clone +
+全新 agent 会话;验收收敛后由 `finalize` / `close-workflow` 执行物理销毁。
+上下文只在任务体内生存,跨任务唯一合法信息通道是固化产物(git commits /
+integration branch / 转写证据 / 任务记录)。pane 从不复用——
+`_claimed_panes` 的永久占用是该原则的执行机制,而非缺陷。
+
+### 5.1 finalize 序列(幂等)
+
+1. **闸门**:仅允许非活跃状态;`failed` 需 `--force`。
+2. **证据先行**:herdr 不持久化终端 scrollback,销毁 pane 前必须
+   `pane read --source recent-unwrapped` dump 到
+   `~/.herdr-controller/logs/tasks/<task_id>/terminal.log`(+ `meta.json` 含 agent_session)。
+3. `pane close`;4. clone 处理;5. 状态沿 `completed→cleanup_ready→cleaned` 推进。
+
+### 5.2 clone 删除安全档位
+
+- 有 `integration_ref/branch`(已完成 integrate)或 `superseded` → 可删;
+- `committed` 未 integrate → 拒删(commit 仅存于 clone);
+- mode=none 的 docs/test/review 任务无 integration 通道 → 默认保留,
+  `--purge-clones` 显式授权后才删。
+
+### 5.3 close-workflow 与共享 tab 守卫
+
+`herdr-task close-workflow <wf>`:活跃任务闸门 → 逐任务 finalize → 关阶段 tab →
+标记 workflows.json `completed` → 清 stage-state → 输出收尾报告。
+- **共享 tab 连带销毁守卫**:连续 workflow 常复用同一 workspace 的阶段 tab,
+  关 tab 前必须校验 tab 内全部存活 pane 均属本 workflow(锚点 + 本 workflow 任务);
+  有外来 pane 或 pane list 不可用时跳过该 tab 并写入报告 `tabs_skipped`。
+- **总指挥 pane 例外**:默认保留至知识沉淀 + PR 合并后由
+  `--include-coordinator` 关闭。
+- **自动触发**:Controller 在 `is_workflow_completed` 时后台调用
+  `close-workflow`(in-flight 防重入 + status=completed 短路);
+  零任务的已登记运行视为平凡完成。
+
+Evidence:
+- `bin/herdr-task#finalize_task` `#close_workflow` `#_tab_foreign_panes` `#dump_transcript`
+- `services/herdr-controller.py#maybe_close_completed_workflow`
+- `docs/walkthroughs/20260913-workflow-finalize.md`

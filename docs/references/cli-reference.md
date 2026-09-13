@@ -82,9 +82,32 @@ herdr-task status <task_id>
 # 列出当前工作流的所有任务
 herdr-task list --workflow-id <workflow_id>
 
-# 清理已完成任务的现场 Pane 与工作区分支
+# 逻辑清理(仅状态归档,pane/clone 保留)
 herdr-task cleanup <task_id>
 ```
+
+### 2.6 `herdr-task finalize`
+单任务物理收尾:转写落盘 → 关 pane → 删 clone → 状态推进到 cleaned。幂等。
+```bash
+herdr-task finalize <task_id> [--force] [--purge-clones]
+```
+- `<task_id>`：目标任务。仅允许非活跃状态(`completed`/`committed`/`integrated`/`cleanup_ready`/`cleaned`/`superseded`)。
+- `--force`：允许收尾 `failed` 任务(失败现场默认保留供排障)。
+- `--purge-clones`：无 integration 证据(mode=none 的 docs 任务等)时也强制删除 clone。
+- 证据:终端转写写入 `~/.herdr-controller/logs/tasks/<task_id>/terminal.log` 与 `meta.json`。
+- clone 删除安全规则:有 `integration_ref` 或 `superseded` 才删;`committed` 未 integrate 拒删。
+
+### 2.7 `herdr-task close-workflow`
+工作流一键收尾(自动+手动两用):闸门校验 → 逐任务 finalize → 关阶段 tab → 标记完成 → 输出收尾报告。幂等。
+```bash
+herdr-task close-workflow <workflow_id> [--include-coordinator] [--purge-clones] [--dry-run]
+```
+- 闸门:存在活跃任务(`pending`/`dispatched`/`working`/`blocked`/`agent_done`/`rework`)时中止。
+- `failed` 任务默认保留现场,报告中列 `retained-failed`。
+- 关阶段 tab 前校验 tab 内无其他 workflow 的外来 pane,否则跳过并写入报告 `tabs_skipped`。
+- 总指挥 pane 默认保留;知识沉淀并合并 PR 后用 `--include-coordinator` 一并关闭。
+- 自动触发:Controller 在 `[WORKFLOW COMPLETE]` 时自动调用(等价于不带 flags)。
+- 零任务的已登记 workflow 视为平凡完成,直接标记。
 
 ---
 

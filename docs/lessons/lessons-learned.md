@@ -356,3 +356,55 @@ env -i HOME=$HOME PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:
 实际修复证据：`/api/project` 返回六 Agent 全部 `ready`，binary 均为绝对路径
 （codex/claude→`~/.volta/bin`，qodercli→`~/.qoder-cn/entry/qodercn`，agy→`~/.local/bin/agy`）；
 最后一条命令模拟 LaunchAgent 精简 PATH，解析同样成功。
+
+## 9. "清空"类机制的结构性失效:pane 复用从未发生,清理应做在生命周期终点而非复用入口
+
+### 问题背景
+
+工作流结束后每个阶段 tab 遗留 2+ pane,agent 上下文无限累积。系统里存在的
+"清空设置"(dispatch 前向 pane 发送 `/clear`,`bin/herdr-task` dispatch_task)
+每次派发都在执行,却从未产生过清空效果——因为它的设计前提是"复用旧 pane",
+而 `herdr/pane_pool.py:_claimed_panes` 对 tasks.json 中所有带 pane_id 的任务
+永久占用(不过滤状态、pane_id 永不释放),`acquire_pane_for_task` 永远找不到
+可用 pane,于是每个任务都拿到全新 pane,`/clear` 每次都打在空白容器上。
+同时 `herdr` 不持久化终端 scrollback(CLI 已无 `--source logfile`,旧引用失效),
+pane 一关画面即失,销毁与证据天然冲突。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| /clear 每次执行却从未生效 | 清理机制挂在"复用入口"上,而复用通道被另一处代码结构性堵死——两个模块各自正确,组合起来是死代码 | 评审清理/重置类机制时,先验证它的**触发前提**在真实链路里是否成立,而不是只验证机制本身会执行 |
+| 用 /clear 复用容器防上下文污染 | 清空旧容器永远清不干净(agent 私有命令、磁盘 session、scrollback 残留),这是幻觉温床 | 隔离靠"生新死灭"(新 pane + 新会话 + 用后销毁),不靠清空复用;跨任务只传固化产物 |
+| pane/clone 保留被当成默认 | "保留现场"是显式例外(排障),销毁才是默认;默认保留会让上下文与磁盘单调膨胀 | 资源生命周期必须有终点:验收收敛 → 证据固化 → 销毁活体 |
+| 关共享 tab 连带销毁其他 workflow 的 pane 且无证据 | 共享资源的批量销毁必须先验证归属,否则会误伤"不在本次操作范围内"的现场 | 破坏性批量操作前枚举受影响对象并校验所有权;无法枚举时放弃操作 |
+
+### 操作规范
+
+1. 任务收尾统一走 `herdr-task finalize <task_id>`(单任务)或
+   `herdr-task close-workflow <wf>`(批量/自动);固定顺序:**转写 dump →
+   pane close → 分档删 clone → 状态推进**,证据在
+   `~/.herdr-controller/logs/tasks/<task_id>/`。
+2. clone 删除前必须满足:有 `integration_ref`(已完成 integrate)或 `superseded`;
+   `committed` 未 integrate 拒删;mode=none 任务需 `--purge-clones` 显式授权。
+3. 关闭阶段 tab 前必须经 `_tab_foreign_panes` 校验归属;pane list 失败时
+   宁可跳过不可盲关。
+4. failed 任务现场默认保留(`--force` 才收);总指挥 pane 保留到知识沉淀
+   与 PR 合并之后,用 `close-workflow --include-coordinator` 收口。
+5. 禁止恢复"pane 复用 + 清空"路线:`_claimed_panes` 永久占用是隔离原则的
+   执行机制;若未来引入复用,必须连同 per-agent clear 映射与 session 重启
+   一起设计,并重开评审。
+
+### 验证命令 / 证据
+
+```bash
+pytest tests/test_workflow_finalize.py tests/test_stage_advance_and_supersede.py
+herdr-task close-workflow wf-nexusarchive-54433229-20260912-232500 --dry-run
+herdr-task close-workflow wf-nexusarchive-54433229-20260912-232500
+```
+
+实际收尾证据:15 份 `~/.herdr-controller/logs/tasks/nx09122325-*/terminal.log` 落盘;
+5 个 clone 删除(3 集成 + 2 superseded)、10 个 docs clone 按安全档保留;
+wA 现场 24 pane/7 tab → 1 pane(总指挥)/1 tab;controller 自动收尾使
+9/9 历史 workflow 到达 `completed`。决策全记录:
+`docs/walkthroughs/20260913-workflow-finalize.md`。

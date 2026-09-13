@@ -84,3 +84,18 @@ LaunchAgents' minimal PATH (codex/claude/qodercli/agy shown 未安装 while inst
   for `AGENT_BINARIES`); preflight/deep_preflight keep only `AUTH_HINTS`/`VERSION_ARGS`.
 - Lessons recorded in `docs/lessons/lessons-learned.md` §8 (3rd recurrence of
   the same-semantics-multi-implementation class).
+
+## [2026-09-13] feat | Physical teardown lifecycle: finalize / close-workflow
+Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),上下文随
+活体无限累积;dispatch 前的 `/clear` 因 `_claimed_panes` 永久占用 pane 而结构性
+空转(pane 复用从未发生)。确立"生而隔离,死而清零"生命周期并落地:
+- Added [[task-lifecycle]] §5:finalize 序列(证据转写先行 → pane close →
+  分档 clone 删除 → 状态推进)与 close-workflow 批量收尾(活跃闸门 /
+  failed 保留 / 共享 tab 外来 pane 守卫 / 总指挥 pane 保留至知识沉淀后)。
+- Controller 在 `[WORKFLOW COMPLETE]` 自动触发 close-workflow(防重入);
+  purge 门槛放宽到非 ACTIVE(修 superseded 终态无法 purge 的死锁)。
+- 新命令文档见 `docs/references/cli-reference.md` §2.6/2.7;决策与权衡
+  (含上线当天抓到的共享 tab 连带销毁 bug)详见
+  `docs/walkthroughs/20260913-workflow-finalize.md`;教训沉淀 §9。
+- 验证:134 tests passed;真实端到端——wf-…-232500 手动收尾 + 历史 workflow
+  自动收尾,9/9 workflows completed,pane 24→1。

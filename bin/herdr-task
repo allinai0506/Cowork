@@ -19,12 +19,14 @@ try:
     from herdr.projects import project_for_workflow, workflow_config_for, ensure_node_runtime
     from herdr.workflow import find_node, normalize_workflow
     from herdr.topology import ensure_stage_topology
+    from herdr.agent_binary import resolve_binary
 except ImportError:
     from herdr_pane_pool import acquire_pane_for_task
     from herdr_agent_router import choose_agent, release_agent_reservation
     from herdr_projects import project_for_workflow, workflow_config_for, ensure_node_runtime
     from herdr_workflow import find_node, normalize_workflow
     from herdr_topology import ensure_stage_topology
+    from herdr_agent_binary import resolve_binary
 
 TASKS_FILE = os.path.expanduser("~/.herdr-controller/tasks.json")
 WORKFLOW_FILE = os.path.expanduser("~/.herdr-controller/workflow.json")
@@ -76,6 +78,23 @@ TERMINAL_STATUSES = {
     *COMPLETED_TASK_STATUSES,
     "failed",
     "superseded",
+}
+
+CONTROLLER_ROOT = os.path.expanduser("~/.herdr-controller")
+WORKFLOWS_FILE = os.path.join(CONTROLLER_ROOT, "workflows.json")
+STAGE_STATE_FILE = os.path.join(CONTROLLER_ROOT, "stage-state.json")
+CLONE_ROOT = os.path.realpath(os.path.join(CONTROLLER_ROOT, "clones"))
+EVIDENCE_ROOT = os.path.join(CONTROLLER_ROOT, "logs", "tasks")
+
+# 收尾(physical teardown)只允许触碰非活跃任务;
+# pending 虽不在 ACTIVE_TASK_STATUSES 里,但尚未派发,同样禁止销毁。
+TEARDOWN_BLOCKING_STATUSES = {*ACTIVE_TASK_STATUSES, "pending"}
+
+# 验收后向 cleaned 推进用的合法转移(必须与 TRANSITIONS 一致)。
+FINALIZE_ADVANCE = {
+    "completed": "cleanup_ready",
+    "integrated": "cleanup_ready",
+    "cleanup_ready": "cleaned",
 }
 
 ANOMALY_ACTIONS = {
@@ -2165,9 +2184,9 @@ def purge_task(task_id):
         print(f"Task not found: {task_id}")
         sys.exit(1)
 
-    if task.get("status") not in ("cleaned", "failed"):
+    if task.get("status") in TEARDOWN_BLOCKING_STATUSES:
         print(
-            f"Task can only purge from cleaned/failed, "
+            f"Task can only purge from a settled status, "
             f"current={task.get('status')}"
         )
         sys.exit(2)
@@ -2189,33 +2208,12 @@ def purge_task(task_id):
         print(f"[PANE PURGED] {pane_id}")
 
     if clone_path:
-        clone_root = os.path.realpath(
-            os.path.expanduser(
-                "~/.herdr-controller/clones"
-            )
-        )
-        clone_real = os.path.realpath(
-            os.path.expanduser(clone_path)
-        )
-
-        try:
-            common = os.path.commonpath(
-                [clone_root, clone_real]
-            )
-        except ValueError:
-            common = ""
-
-        if (
-            common == clone_root
-            and clone_real != clone_root
-            and os.path.exists(clone_real)
-        ):
-            shutil.rmtree(clone_real)
-            print(f"[CLONE PURGED] {clone_real}")
-        elif os.path.exists(clone_real):
+        if delete_clone_safely(clone_path):
+            print(f"[CLONE PURGED] {clone_path}")
+        elif os.path.exists(clone_path):
             print(
                 f"Unsafe clone path, refusing delete: "
-                f"{clone_real}"
+                f"{clone_path}"
             )
             sys.exit(3)
 
@@ -2227,6 +2225,448 @@ def purge_task(task_id):
     save_tasks(data)
 
     print(f"[PURGED] {task_id}")
+
+
+# ---------------------------------------------------------------------------
+# Physical teardown (finalize / close-workflow)
+#
+# 设计原则:任务生而隔离(独立 pane + CoW clone + 全新会话),
+# 死而清零。上下文只在任务体内生存,跨任务唯一合法通道是固化产物。
+# 销毁前必须先把 pane 终端转写固化为证据(herdr 不持久化 scrollback)。
+# ---------------------------------------------------------------------------
+
+def _herdr(*args):
+    """调用 herdr CLI;显式解析绝对路径以兼容 LaunchAgent 精简 PATH。"""
+    binary = resolve_binary("herdr") or "herdr"
+    return subprocess.run(
+        [binary, *args],
+        text=True,
+        capture_output=True,
+    )
+
+
+def delete_clone_safely(clone_path):
+    """删除 CoW clone;仅允许 ~/.herdr-controller/clones 下的路径。"""
+    if not clone_path:
+        return False
+    clone_real = os.path.realpath(os.path.expanduser(clone_path))
+    try:
+        common = os.path.commonpath([CLONE_ROOT, clone_real])
+    except ValueError:
+        return False
+    if common != CLONE_ROOT or clone_real == CLONE_ROOT:
+        return False
+    if not os.path.exists(clone_real):
+        return False
+    shutil.rmtree(clone_real)
+    return True
+
+
+def clone_deletable(task):
+    """clone 承载的成果是否已安全沉淀。
+
+    integration_ref/branch 存在说明 Controller 已完成 integrate;
+    superseded 任务从未交付,由替代任务负责成果。其余情况
+    (如 mode=none 的 docs 任务)成果只存在于 clone 与终端转写中,
+    默认保留 clone,由 --purge-clones 显式授权删除。
+    """
+    if task.get("integration_ref") or task.get("integration_branch"):
+        return True, "integrated"
+    if task.get("status") == "superseded":
+        return True, "superseded"
+    if task.get("status") == "committed":
+        return False, "committed but not integrated — run herdr-task integrate first"
+    return False, "no integration evidence"
+
+
+def dump_transcript(task):
+    """把 pane 终端转写落盘为验收证据;尽力而为,失败不阻塞。"""
+    pane_id = task.get("pane_id")
+    if not pane_id:
+        return None
+    read = _herdr(
+        "pane", "read", pane_id,
+        "--source", "recent-unwrapped",
+        "--lines", "20000",
+    )
+    if read.returncode != 0 or not read.stdout.strip():
+        return None
+
+    task_dir = os.path.join(EVIDENCE_ROOT, task.get("task_id", "unknown"))
+    os.makedirs(task_dir, exist_ok=True)
+    path = os.path.join(task_dir, "terminal.log")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(read.stdout)
+
+    meta = {
+        "task_id": task.get("task_id"),
+        "pane_id": pane_id,
+        "agent": task.get("agent"),
+        "dumped_at": _now(),
+        "agent_session": None,
+    }
+    info = _herdr("pane", "get", pane_id)
+    try:
+        pane = json.loads(info.stdout)["result"]["pane"]
+        meta["agent_session"] = pane.get("agent_session")
+    except Exception:
+        pass
+    with open(os.path.join(task_dir, "meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    return path
+
+
+def close_pane(pane_id):
+    if not pane_id:
+        return False
+    return _herdr("pane", "close", pane_id).returncode == 0
+
+
+def _advance_to_cleaned(task_id, status):
+    """按 FINALIZE_ADVANCE 链把已验收任务推进到 cleaned。"""
+    while status in FINALIZE_ADVANCE:
+        nxt = FINALIZE_ADVANCE[status]
+        try:
+            set_status(task_id, nxt)
+        except SystemExit:
+            break
+        status = nxt
+    return status
+
+
+def _finalize_one(task, purge_clones=False, dry_run=False):
+    """对单个已收敛任务执行物理收尾,返回报告行。幂等。"""
+    task_id = task.get("task_id")
+    status = task.get("status")
+    pane_id = task.get("pane_id")
+
+    row = {
+        "task_id": task_id,
+        "agent": task.get("agent"),
+        "stage": task.get("stage"),
+        "status": status,
+        "pane_id": pane_id,
+        "clone_path": task.get("clone_path"),
+        "pane_closed": False,
+        "evidence": None,
+        "clone_deleted": False,
+        "clone_retained_reason": None,
+        "action": "finalized",
+    }
+
+    deletable, reason = clone_deletable(task)
+
+    if dry_run:
+        row["action"] = "dry-run"
+        row["pane_closed"] = bool(pane_id)
+        row["clone_deleted"] = bool(
+            task.get("clone_path") and (deletable or purge_clones)
+        )
+        if not deletable and not purge_clones:
+            row["clone_retained_reason"] = reason
+        return row
+
+    row["evidence"] = dump_transcript(task)
+    row["pane_closed"] = close_pane(pane_id)
+
+    if task.get("clone_path"):
+        if deletable or purge_clones:
+            row["clone_deleted"] = delete_clone_safely(task["clone_path"])
+            if not row["clone_deleted"]:
+                row["clone_retained_reason"] = "clone path absent or unsafe"
+        else:
+            row["clone_retained_reason"] = reason
+
+    if status in FINALIZE_ADVANCE:
+        row["status"] = _advance_to_cleaned(task_id, status)
+
+    data = load_tasks()
+    record = find_task(data, task_id)
+    if record:
+        record["pane_retained"] = False
+        record["resource_retention"] = "purged"
+        if row["evidence"]:
+            record["evidence"] = row["evidence"]
+        save_tasks(data)
+    return row
+
+
+def finalize_task(task_id, force=False, purge_clones=False):
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    status = task.get("status")
+    blocked = status in TEARDOWN_BLOCKING_STATUSES
+    if blocked or (status == "failed" and not force):
+        print(
+            f"Task cannot finalize while {status}; "
+            "only settled tasks can be torn down "
+            "(use --force for failed tasks)."
+        )
+        sys.exit(2)
+
+    row = _finalize_one(task, purge_clones=purge_clones)
+
+    print(f"[FINALIZE] {task_id} status={row['status']} "
+          f"pane_closed={row['pane_closed']}")
+    if row["evidence"]:
+        print(f"[EVIDENCE] {row['evidence']}")
+    if row["clone_deleted"]:
+        print(f"[CLONE PURGED] {task.get('clone_path')}")
+    elif row["clone_retained_reason"]:
+        print(
+            f"[CLONE RETAINED] {task.get('clone_path')} "
+            f"({row['clone_retained_reason']}; "
+            "use --purge-clones to force)"
+        )
+    print(f"[FINALIZED] {task_id}")
+    return row
+
+
+def _load_workflow_entry(workflow_id):
+    if not os.path.exists(WORKFLOWS_FILE):
+        return None, {}
+    try:
+        with open(WORKFLOWS_FILE, "r", encoding="utf-8") as f:
+            entries = json.load(f).get("workflows", {})
+    except (json.JSONDecodeError, OSError):
+        return None, {}
+    return entries.get(workflow_id), entries
+
+
+def _mark_workflow_completed(workflow_id):
+    entry, entries = _load_workflow_entry(workflow_id)
+    if entry is None:
+        print(f"[WORKFLOW RECORD] no entry for {workflow_id}; skip marking")
+        return
+    entry["status"] = "completed"
+    entry["completed_at"] = _now()
+    tmp = WORKFLOWS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, WORKFLOWS_FILE)
+
+
+def _workflow_stage_tabs(workflow_id, tasks):
+    """从项目 workflow 配置解析阶段 tab 与归属 pane 集合。
+
+    返回 dict:tab_ids / coordinator_pane / workspace_id / owned_pane_ids。
+    """
+    empty = {
+        "tab_ids": [],
+        "coordinator_pane": None,
+        "workspace_id": None,
+        "owned_pane_ids": set(),
+    }
+    project = project_for_workflow(workflow_id) or {}
+    cfg_file = (
+        project.get("workflow_file")
+        or next(
+            (t.get("workflow_config") for t in tasks if t.get("workflow_config")),
+            None,
+        )
+    )
+    if not cfg_file or not os.path.exists(cfg_file):
+        return empty
+    try:
+        with open(cfg_file, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return empty
+
+    items = cfg.get("nodes") or cfg.get("stages", [])
+    tab_ids = sorted({
+        item.get("tab_id") for item in items if item.get("tab_id")
+    })
+    owned_pane_ids = {
+        item.get("anchor_pane_id")
+        for item in items
+        if item.get("anchor_pane_id")
+    }
+    owned_pane_ids |= {
+        t.get("pane_id") for t in tasks if t.get("pane_id")
+    }
+    return {
+        "tab_ids": tab_ids,
+        "coordinator_pane": (cfg.get("coordinator") or {}).get("pane_id"),
+        "workspace_id": cfg.get("workspace_id"),
+        "owned_pane_ids": owned_pane_ids,
+    }
+
+
+def _live_workspace_panes(workspace_id):
+    """返回 workspace 存活 pane 列表;不可用时返回 None(宁可保留现场)。"""
+    listing = _herdr("pane", "list", "--workspace", workspace_id)
+    if listing.returncode != 0:
+        return None
+    try:
+        result = json.loads(listing.stdout).get("result", {})
+        panes = result.get("panes", result) if isinstance(result, dict) else result
+        return panes or []
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _foreign_panes_in_tab(live_panes, tab_id, owned_pane_ids):
+    """筛选 tab 内不属于本 workflow 的存活 pane。
+
+    阶段 tab 可能被连续多个 workflow 复用;关闭 tab 会连带销毁
+    共存的其他现场,所以有外来 pane 时必须放弃关 tab。
+    """
+    return sorted(
+        pane_id
+        for pane in (live_panes or [])
+        if pane.get("tab_id") == tab_id
+        and (pane_id := pane.get("pane_id"))
+        and pane_id not in owned_pane_ids
+    )
+
+
+def close_workflow(
+    workflow_id,
+    include_coordinator=False,
+    purge_clones=False,
+    dry_run=False,
+):
+    data = load_tasks()
+    tasks = [
+        t for t in data["tasks"]
+        if t.get("workflow_id") == workflow_id
+    ]
+    entry, _ = _load_workflow_entry(workflow_id)
+    if not tasks and entry is None:
+        print(f"Unknown workflow (no tasks, no record): {workflow_id}")
+        sys.exit(1)
+
+    if not tasks:
+        # 中止在注册任何 Task 之前的运行:没有可销毁的资源,
+        # 视为平凡完成,仅做登记与状态清理。
+        print(f"[CLOSE REPORT] workflow={workflow_id} (no tasks)")
+        if not dry_run:
+            _mark_workflow_completed(workflow_id)
+            stage_reset(workflow_id)
+            print(f"[WORKFLOW CLOSED] {workflow_id}")
+        else:
+            print("[DRY RUN] no changes were made")
+        return {
+            "workflow_id": workflow_id,
+            "dry_run": dry_run,
+            "tasks": [],
+            "tabs_closed": [],
+            "tabs_skipped": {},
+            "coordinator_closed": False,
+            "include_coordinator": include_coordinator,
+        }
+
+    blocking = [
+        t["task_id"] for t in tasks
+        if t.get("status") in TEARDOWN_BLOCKING_STATUSES
+    ]
+    if blocking:
+        print(
+            "[CLOSE ABORT] workflow has unsettled tasks: "
+            + ", ".join(blocking)
+        )
+        sys.exit(2)
+
+    if dry_run:
+        print(f"[DRY RUN] close-workflow {workflow_id}")
+
+    report = {
+        "workflow_id": workflow_id,
+        "dry_run": dry_run,
+        "tasks": [],
+        "tabs_closed": [],
+        "tabs_skipped": {},
+        "coordinator_closed": False,
+        "include_coordinator": include_coordinator,
+    }
+
+    for task in tasks:
+        if task.get("status") == "failed":
+            report["tasks"].append({
+                "task_id": task.get("task_id"),
+                "status": "failed",
+                "action": "retained-failed",
+                "clone_retained_reason": "failed task kept for debugging",
+            })
+            continue
+        report["tasks"].append(
+            _finalize_one(task, purge_clones=purge_clones, dry_run=dry_run)
+        )
+
+    topo = _workflow_stage_tabs(workflow_id, tasks)
+    live_panes = (
+        _live_workspace_panes(topo["workspace_id"])
+        if topo["workspace_id"] else None
+    )
+    for tab_id in topo["tab_ids"]:
+        if not topo["workspace_id"]:
+            report["tabs_skipped"][tab_id] = (
+                "workspace unknown; cannot verify ownership"
+            )
+            continue
+        if live_panes is None:
+            report["tabs_skipped"][tab_id] = "pane list unavailable"
+            continue
+        foreign = _foreign_panes_in_tab(
+            live_panes, tab_id, topo["owned_pane_ids"]
+        )
+        if foreign:
+            report["tabs_skipped"][tab_id] = (
+                f"shared with foreign panes: {foreign}"
+            )
+            continue
+        if dry_run:
+            report["tabs_closed"].append(tab_id)
+        elif _herdr("tab", "close", tab_id).returncode == 0:
+            report["tabs_closed"].append(tab_id)
+    if not dry_run:
+        _mark_workflow_completed(workflow_id)
+        stage_reset(workflow_id)
+
+    coordinator_pane = (
+        topo.get("coordinator_pane")
+        or (entry or {}).get("coordinator_pane_id")
+    )
+    if include_coordinator and not dry_run:
+        report["coordinator_closed"] = close_pane(coordinator_pane)
+
+    # ---- 收尾报告 ----
+    print(f"[CLOSE REPORT] workflow={workflow_id} dry_run={dry_run}")
+    for row in report["tasks"]:
+        line = (
+            f"  {row.get('task_id')} status={row.get('status')} "
+            f"action={row.get('action')}"
+        )
+        if row.get("evidence"):
+            line += f" evidence={row['evidence']}"
+        if row.get("clone_retained_reason"):
+            line += f" clone_retained({row['clone_retained_reason']})"
+        print(line)
+    print(f"  tabs_closed={report['tabs_closed'] or '[]'}")
+    if report.get("tabs_skipped"):
+        for tab_id, reason in report["tabs_skipped"].items():
+            print(f"  tab_skipped={tab_id} ({reason})")
+    if include_coordinator:
+        print(f"  coordinator_closed={report['coordinator_closed']}")
+    else:
+        print(
+            "  [COORDINATOR KEPT] "
+            f"pane={coordinator_pane or 'unknown'} — "
+            "完成知识沉淀并合并 PR 后,运行 "
+            f"herdr-task close-workflow {workflow_id} --include-coordinator"
+        )
+
+    if dry_run:
+        print("[DRY RUN] no changes were made")
+    else:
+        print(f"[WORKFLOW CLOSED] {workflow_id}")
+    return report
 
 
 def node_status(workflow_id, node_key):
@@ -2364,7 +2804,7 @@ def stage_reset(workflow_id, stage=None):
     preventing the Controller from re-triggering stage advance events.
     Use when a workflow is stuck and manual intervention is needed.
     """
-    stage_path = os.path.expanduser("~/.herdr-controller/stage-state.json")
+    stage_path = STAGE_STATE_FILE
     if not os.path.exists(stage_path):
         print("stage-state.json not found — nothing to reset.")
         return
@@ -2511,6 +2951,41 @@ def main():
     purge = sub.add_parser("purge")
     purge.add_argument("task_id")
 
+    finalize = sub.add_parser("finalize")
+    finalize.add_argument("task_id")
+    finalize.add_argument(
+        "--force",
+        action="store_true",
+        help="allow tearing down failed tasks (debugging现场默认保留)",
+    )
+    finalize.add_argument(
+        "--purge-clones",
+        dest="purge_clones",
+        action="store_true",
+        help="delete clones even without integration evidence",
+    )
+
+    close_wf = sub.add_parser("close-workflow")
+    close_wf.add_argument("workflow_id")
+    close_wf.add_argument(
+        "--include-coordinator",
+        dest="include_coordinator",
+        action="store_true",
+        help="also close the coordinator pane (run AFTER knowledge capture)",
+    )
+    close_wf.add_argument(
+        "--purge-clones",
+        dest="purge_clones",
+        action="store_true",
+        help="delete clones even without integration evidence",
+    )
+    close_wf.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="show the teardown plan without touching anything",
+    )
+
     get = sub.add_parser("get")
     get.add_argument("task_id")
 
@@ -2590,6 +3065,21 @@ def main():
 
     elif args.command == "purge":
         purge_task(args.task_id)
+
+    elif args.command == "finalize":
+        finalize_task(
+            args.task_id,
+            force=args.force,
+            purge_clones=args.purge_clones,
+        )
+
+    elif args.command == "close-workflow":
+        close_workflow(
+            args.workflow_id,
+            include_coordinator=args.include_coordinator,
+            purge_clones=args.purge_clones,
+            dry_run=args.dry_run,
+        )
 
     elif args.command == "get":
         get_task(args.task_id)

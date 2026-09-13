@@ -36,6 +36,54 @@ STAGE_POLICIES_FILE = os.path.expanduser(
 
 COORDINATOR_PANE = "w6:p1H"
 
+WORKFLOWS_FILE = os.path.expanduser("~/.herdr-controller/workflows.json")
+
+# 已触发过 close-workflow 的 workflow,防止轮询期间重复派发。
+_workflow_close_inflight = set()
+
+
+def maybe_close_completed_workflow(workflow_id):
+    """Workflow 全部节点完成后,自动执行物理收尾(关 pane/删 clone/归档)。
+
+    close-workflow 自带幂等与终态闸门;这里只负责防重入派发。
+    """
+    if not workflow_id or workflow_id in _workflow_close_inflight:
+        return
+    try:
+        with open(WORKFLOWS_FILE, "r", encoding="utf-8") as f:
+            entry = json.load(f).get("workflows", {}).get(workflow_id) or {}
+        if entry.get("status") == "completed":
+            return
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    _workflow_close_inflight.add(workflow_id)
+
+    def _run():
+        try:
+            result = subprocess.run(
+                [TASK_MANAGER, "close-workflow", workflow_id],
+                text=True,
+                capture_output=True,
+                timeout=900,
+            )
+            if result.stdout.strip():
+                print(result.stdout.strip())
+            if result.returncode != 0:
+                print(
+                    f"[WORKFLOW CLOSE ERROR] "
+                    f"workflow={workflow_id}: "
+                    f"{result.stderr.strip() or result.stdout.strip()}"
+                )
+        finally:
+            _workflow_close_inflight.discard(workflow_id)
+
+    threading.Thread(
+        target=_run,
+        daemon=True,
+        name=f"wf-close-{workflow_id}",
+    ).start()
+
 
 def coordinator_pane_for_workflow(workflow_id=None):
     if workflow_id:
@@ -405,6 +453,7 @@ def check_workflow_stage_advance(workflow_id):
                 f"[WORKFLOW COMPLETE] "
                 f"workflow={workflow_id}"
             )
+            maybe_close_completed_workflow(workflow_id)
             return
 
         ready_nodes = get_ready_nodes(workflow_cfg, completed_nodes)
