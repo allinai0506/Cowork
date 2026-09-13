@@ -247,6 +247,21 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 全量 317 个测试用例 100% 通过；
   - 执行 `scripts/install-herdr-console.sh` 同步部署至 `~/.herdr-console`。
 
+## [2026-09-13] test | Universal Runtime End-to-End Dogfooding & Integration
+完成通用人机协同底座全链路实战端到端集成测试与演练（E2E Dogfooding）：
+- **全链路场景闭环打通**：
+  - 以跨领域商业研报模板 `business-research-v1.yaml` 为载体，全面串联元模型解析、内核控制原语、工位插话与制动、4D 遥测投影、成果会签室审批放行与驳回回滚；
+  - 验证多阶段架构在复杂异构场景下的确定性协同。
+- **端到端集成测试套件 (`tests/test_universal_substrate_e2e.py`)**：
+  - 覆盖模板加载与 DAG 校验、工作流暂停/恢复、在途非阻塞插话与紧急制动夺回调度权、4D 投影提炼、会签批准与驳回返工循环、检查点快照灾难恢复；
+  - 4 项关键集成用例全绿通过。
+- **独立可执行实战演练工具 (`scripts/verify-universal-runtime-e2e.py`)**：
+  - 零依赖独立实战演练 CLI，支持开发者与 CI 管道随时一键拉起沙盒并验证五大阶段全部核心原语。
+- **质量防护与工程治理**：
+  - 沉淀通用工程教训 §27（跨阶段全链路集成测试的持久化沙盒隔离陷阱）；
+  - 全仓自动化回归测试达 321 项用例，100% 通过。
+
+
 
 
 

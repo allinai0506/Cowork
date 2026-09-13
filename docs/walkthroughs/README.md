@@ -18,3 +18,10 @@
    - [`20260912-console-template-library.md`](file:///Users/user/herdr/docs/walkthroughs/20260912-console-template-library.md)：共事工厂控制台工作流模板库（页面编排）交付与实现决策记录。
    - [`20260912-agent-binary-resolution.md`](file:///Users/user/herdr/docs/walkthroughs/20260912-agent-binary-resolution.md)：Agent CLI 二进制解析治本修复（执行者阵容误判"未安装"）的决策与权衡记录。
    - [`20260913-workflow-finalize.md`](file:///Users/user/herdr/docs/walkthroughs/20260913-workflow-finalize.md)：工作流物理收尾机制（finalize / close-workflow）设计思维链、安全权衡与真实工作流端到端验证记录。
+   - [`20260913-agentic-loop-five-pillars.md`](file:///Users/user/herdr/docs/walkthroughs/20260913-agentic-loop-five-pillars.md)：自主循环五大支柱架构设计与落地报告。
+   - [`20260913-phase1-kernel-control-primitives.md`](file:///Users/user/herdr/docs/walkthroughs/20260913-phase1-kernel-control-primitives.md)：通用底座阶段一：内核控制原语与检查点机制。
+   - [`20260913-phase2-steering-and-intervention.md`](file:///Users/user/herdr/docs/walkthroughs/20260913-phase2-steering-and-intervention.md)：通用底座阶段二：双轨干预与工位插话网格 (Steering Mesh)。
+   - [`20260913-phase3-telemetry-projection-engine.md`](file:///Users/user/herdr/docs/walkthroughs/20260913-phase3-telemetry-projection-engine.md)：通用底座阶段三：语义提炼与白盒投影引擎 (Projection Engine)。
+   - [`20260913-phase4-dynamic-config-and-mcp-mesh.md`](file:///Users/user/herdr/docs/walkthroughs/20260913-phase4-dynamic-config-and-mcp-mesh.md)：通用底座阶段四：通用配置驱动与受控 MCP 能力容器。
+   - [`20260913-phase5-universal-studio-ui.md`](file:///Users/user/herdr/docs/walkthroughs/20260913-phase5-universal-studio-ui.md)：通用底座阶段五：通用人机对等协同工作舱 (Universal Studio UI)。
+   - [`20260913-universal-runtime-e2e-dogfooding.md`](file:///Users/user/herdr/docs/walkthroughs/20260913-universal-runtime-e2e-dogfooding.md)：通用底座全链路端到端集成实操与自动化演练报告。
