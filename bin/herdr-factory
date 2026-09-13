@@ -31,9 +31,11 @@ try:
         workflow_creation_lock,
     )
     from herdr.workflow import list_templates, load_template, get_ready_nodes
+    from herdr import kernel
 except ImportError:
     from herdr_pane_pool import list_slots_for_project, bind_pane, unbind_pane
     from herdr_agent_router import ensure_pool_for_project, describe_project_pool, set_workflow_agent_override
+    from herdr_kernel import *
     from herdr_projects import (
         detect_git_root,
         ensure_project,
@@ -488,6 +490,75 @@ def resume_workflow(workflow_id):
     return _update_workflow_status(workflow_id, "running", "resumed")
 
 
+def step_command(workflow_id):
+    try:
+        res = kernel.step_workflow(workflow_id)
+        if res.get("ok"):
+            print(f"Workflow {workflow_id} stepped: node={res.get('stepped_node')} ({res.get('stepped_label')})")
+            return 0
+        else:
+            print(f"Workflow {workflow_id} cannot step: {res.get('reason')}")
+            return 1
+    except Exception as e:
+        print(f"Step failed: {e}")
+        return 1
+
+
+def rollback_command(workflow_id, target_node_id, reason="manual_rollback"):
+    try:
+        res = kernel.rollback_workflow(workflow_id, target_node_id, reason=reason)
+        print(f"Workflow {workflow_id} rolled back to node {target_node_id}")
+        print(f"Affected nodes: {', '.join(res.get('affected_nodes', []))}")
+        print(f"Invalidated tasks: {', '.join(res.get('invalidated_tasks', [])) or 'none'}")
+        return 0
+    except Exception as e:
+        print(f"Rollback failed: {e}")
+        return 1
+
+
+def force_pass_command(workflow_id, gate_node_id, note="human forced pass", operator="human"):
+    try:
+        res = kernel.force_pass_gate(workflow_id, gate_node_id, note=note, operator=operator)
+        print(f"Gate {gate_node_id} for workflow {workflow_id} marked as passed.")
+        print(f"Updated tasks: {', '.join(res.get('updated_tasks', [])) or 'none'}")
+        return 0
+    except Exception as e:
+        print(f"Force pass failed: {e}")
+        return 1
+
+
+def checkpoint_command(action, workflow_id, tag=None, checkpoint_id=None):
+    try:
+        if action == "save":
+            res = kernel.create_checkpoint(workflow_id, tag=tag)
+            print(f"Checkpoint saved: {res.get('checkpoint_id')} (tasks: {res.get('task_count')})")
+            return 0
+        elif action == "list":
+            cps = kernel.list_checkpoints(workflow_id)
+            if not cps:
+                print(f"No checkpoints found for workflow {workflow_id}")
+                return 0
+            print(f"{'CHECKPOINT ID':<42} {'TAG':<20} {'TASKS':<6} {'STATUS':<10} {'CREATED AT'}")
+            print("-" * 95)
+            for cp in cps:
+                ts = datetime.fromtimestamp(cp.get("created_at", 0)).strftime("%Y-%m-%d %H:%M:%S")
+                print(f"{cp.get('checkpoint_id'):<42} {cp.get('tag', ''):<20} {cp.get('task_count', 0):<6} {cp.get('workflow_status', ''):<10} {ts}")
+            return 0
+        elif action == "restore":
+            if not checkpoint_id:
+                print("Error: checkpoint_id is required for restore")
+                return 1
+            res = kernel.restore_checkpoint(workflow_id, checkpoint_id)
+            print(f"Workflow {workflow_id} restored to checkpoint {checkpoint_id} ({res.get('restored_tasks')} tasks)")
+            return 0
+        else:
+            print(f"Unknown checkpoint action: {action}")
+            return 1
+    except Exception as e:
+        print(f"Checkpoint operation failed: {e}")
+        return 1
+
+
 def e2e(project_path=None):
     workflow_id = start_workflow(
         "验证当前项目的 Herdr Factory 六阶段可以全自动推进。"
@@ -595,45 +666,45 @@ def templates_command():
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="herdr-factory")
+    parser = argparse.ArgumentParser(description="Herdr Software Factory")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("doctor")
-    sub.add_parser("templates", help="List available workflow templates")
-
-    project_cmd = sub.add_parser("project")
-    project_cmd.add_argument("--project")
-    project_cmd.add_argument("--workspace", help="Adopt an existing Herdr workspace as a factory space")
-    project_cmd.add_argument("--template", default="software-development-v1", help="Workflow template name")
-
+    sub.add_parser("templates")
     sub.add_parser("projects")
-    unreg_cmd = sub.add_parser("unregister", help="Unregister a project from Herdr Factory")
-    unreg_cmd.add_argument("--project", default=None, help="Project root or ID (defaults to current directory)")
-    unreg_cmd.add_argument("--close-workspace", action="store_true", help="Also close the Herdr workspace")
-    unreg_cmd.add_argument("--force", action="store_true", help="Force unregister even if active workflows exist")
+
+    proj_cmd = sub.add_parser("project")
+    proj_cmd.add_argument("project")
+    proj_cmd.add_argument("--workspace", help="已有空间 Workspace ID（将空间采纳为工厂项目）")
+    proj_cmd.add_argument("--template", default=None, help="覆盖工作流模板（默认保留已有或使用默认模板）")
+
+    unreg_cmd = sub.add_parser("unregister")
+    unreg_cmd.add_argument("project", help="项目根目录或 project_id")
+    unreg_cmd.add_argument("--close-workspace", action="store_true", help="同时关闭绑定的空间")
+    unreg_cmd.add_argument("--force", action="store_true", help="有活跃工作流时强制注销")
 
     slots_cmd = sub.add_parser("slots")
-    slots_cmd.add_argument("--project")
+    slots_cmd.add_argument("--project", default=None)
 
     bind_cmd = sub.add_parser("slot-bind")
     bind_cmd.add_argument("pane_id")
     bind_cmd.add_argument("agent")
-    bind_cmd.add_argument("--project")
+    bind_cmd.add_argument("--project", default=None)
 
     unbind_cmd = sub.add_parser("slot-unbind")
     unbind_cmd.add_argument("pane_id")
 
     agents_cmd = sub.add_parser("agents")
-    agents_cmd.add_argument("--project")
+    agents_cmd.add_argument("--project", default=None)
 
     run_cmd = sub.add_parser("run")
     run_cmd.add_argument("requirement", nargs="+")
-    run_cmd.add_argument("--title", default="", help="工作流任务名称/标题")
     run_cmd.add_argument("--workflow-id")
-    run_cmd.add_argument("--project")
-    run_cmd.add_argument("--agent", default="auto")
-    run_cmd.add_argument("--template", default="software-development-v1", help="Workflow template to use")
-    run_cmd.add_argument("--force", action="store_true", help="项目已有活跃 Workflow 时仍强制创建（排队）")
+    run_cmd.add_argument("--project", default=None)
+    run_cmd.add_argument("--title", default=None, help="需求简要标题（可选；留空时自动根据需求生成）")
+    run_cmd.add_argument("--agent", default="auto", choices=["auto", "opencode", "codex", "claude", "qodercli", "agy", "pi"])
+    run_cmd.add_argument("--template", default="software-development-v1")
+    run_cmd.add_argument("--force", action="store_true")
 
     status_cmd = sub.add_parser("status")
     status_cmd.add_argument("workflow_id")
@@ -643,6 +714,31 @@ def main():
 
     resume_cmd = sub.add_parser("resume", help="恢复工作流自动调度推进")
     resume_cmd.add_argument("workflow_id")
+
+    step_cmd = sub.add_parser("step", help="单步推进就绪节点 (工作流需处于 paused 状态)")
+    step_cmd.add_argument("workflow_id")
+
+    rb_cmd = sub.add_parser("rollback", help="回溯工作流至指定历史节点并级联作废下游任务")
+    rb_cmd.add_argument("workflow_id")
+    rb_cmd.add_argument("target_node_id")
+    rb_cmd.add_argument("--reason", default="manual_rollback", help="回溯原因")
+
+    fp_cmd = sub.add_parser("force-pass", help="人工强制放行门禁节点")
+    fp_cmd.add_argument("workflow_id")
+    fp_cmd.add_argument("gate_node_id")
+    fp_cmd.add_argument("--note", default="human forced pass", help="审计说明")
+    fp_cmd.add_argument("--operator", default="human", help="操作人标识")
+
+    cp_cmd = sub.add_parser("checkpoint", help="工作流运行态快照管理")
+    cp_sub = cp_cmd.add_subparsers(dest="cp_action", required=True)
+    cp_save = cp_sub.add_parser("save", help="创建运行态快照")
+    cp_save.add_argument("workflow_id")
+    cp_save.add_argument("--tag", default=None, help="快照标签")
+    cp_list = cp_sub.add_parser("list", help="列出工作流历史快照")
+    cp_list.add_argument("workflow_id")
+    cp_res = cp_sub.add_parser("restore", help="恢复工作流快照")
+    cp_res.add_argument("workflow_id")
+    cp_res.add_argument("checkpoint_id")
 
     e2e_cmd = sub.add_parser("e2e")
     e2e_cmd.add_argument("--project")
@@ -697,6 +793,18 @@ def main():
 
     if args.command == "resume":
         sys.exit(resume_workflow(args.workflow_id))
+
+    if args.command == "step":
+        sys.exit(step_command(args.workflow_id))
+
+    if args.command == "rollback":
+        sys.exit(rollback_command(args.workflow_id, args.target_node_id, reason=args.reason))
+
+    if args.command == "force-pass":
+        sys.exit(force_pass_command(args.workflow_id, args.gate_node_id, note=args.note, operator=args.operator))
+
+    if args.command == "checkpoint":
+        sys.exit(checkpoint_command(args.cp_action, args.workflow_id, tag=getattr(args, "tag", None), checkpoint_id=getattr(args, "checkpoint_id", None)))
 
     if args.command == "e2e":
         sys.exit(e2e(args.project))

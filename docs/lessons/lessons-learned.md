@@ -934,5 +934,53 @@ python3 services/herdr-notifier.py --test
 curl -s http://127.0.0.1:8765/ | head -n 10
 ```
 
+---
+
+## 22. 复杂多 Agent 调度内核的外部受控原则：控制元语与状态快照必须原子解耦，严禁闭门单向推进
+
+### 问题背景
+
+在早期调度器（`herdr-controller.py`）设计中，调度引擎采用“状态扫描即推进（Sweep-and-Advance）”的单向死循环机制。当总指挥或工位 Agent 发生方向偏差、依赖错误或需要人工干预调试时，缺乏结构化的底层指令支撑：
+1. 外部无法原子化挂起或恢复特定节点；
+2. 缺乏“单步执行（step）”机制，无法在断点处观察中间产物；
+3. 一旦后续节点执行出错，缺乏拓扑回溯（rollback）与级联状态重置机制，导致历史脏任务与残留锁污染后续调度；
+4. 门禁被外部误判卡死时，缺少可审计的强行放行（force_pass）通路；
+5. 缺乏轻量、确定性的持久化检查点（checkpoint snapshot），无法安全试错或时间旅行恢复。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 调度器缺乏全局受控元语 | “自主单向推进”容易在遇到死循环或逻辑分支偏离时滚雪球式蔓延破坏现场 | 内核必须暴露 pause, resume, step, rollback, force_pass 一级控制元语 |
+| 回溯清理不彻底导致幽灵任务 | 仅作废单一任务而忽略下游依赖拓扑，会导致下游任务处于挂起或孤儿状态 | 利用 Kahn 拓扑算法计算目标节点及其全部下游传递闭包，原子级联作废任务并重置节点调度锁 |
+| 门禁人工特批绕过无审计 | 粗暴手动修改 JSON 状态破坏数据一致性且无法追溯谁在何时特批了什么 | 统一通过 `force_pass_gate` 注入 `[FORCE PASS by <operator>] <note>`，留存完整审计日志 |
+| 状态快照未隔离存储 | 运行时内存瞬态容易在进程重启后丢失，无法支撑事后排障与状态回退 | 采用原子临时文件写入 `checkpoints/<workflow_id>/<cp_id>.json`，保存完整工作流定义与任务状态 |
+
+### 操作规范（已固化到 `herdr/kernel.py` 与 `console/herdr_factory_console.py`）
+
+1. **确定性控制元语层**：
+   - 将受控逻辑独立封装在 `herdr/kernel.py` 中，支持 CLI（`herdr-factory step/rollback/force-pass/checkpoint`）与 REST API（`POST /api/kernel/*`）对等调用。
+   - `step_workflow`：仅当工作流显式处于 `paused` 时才执行就绪节点挑选与单步推进，步进后严格维持暂停状态。
+   - `rollback_workflow`：基于 `collect_downstream_nodes` 严格计算级联闭包，确保历史节点重放无死锁。
+2. **零第三方依赖与原子持久化**：
+   - 坚持纯 Python 标准库（`json`、`pathlib`、`time`、`uuid`），快照采用 `tmp + replace` 原子落盘，防止进程崩溃导致快照文件损坏。
+3. **控制台可视化介入底座**：
+   - 在控制台更多操作菜单与任务列表精准嵌入交互入口，对于回溯等破坏性操作一律配设二次确认与警示色提示。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 运行内核控制元语全套测试
+/opt/homebrew/bin/pytest tests/test_kernel_control_primitives.py tests/test_console_kernel_api.py
+
+# 2. 全量回归测试验证老逻辑零破坏
+/opt/homebrew/bin/pytest
+
+# 3. CLI 快速验证
+bin/herdr-factory checkpoint --help
+bin/herdr-factory step --help
+bin/herdr-factory rollback --help
+```
+
 
 

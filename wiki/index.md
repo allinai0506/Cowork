@@ -37,6 +37,7 @@
 | **新增支持的 AI Agent CLI** | [[common-change-paths]] | `herdr/agent_binary.py`, `herdr/preflight.py`, `herdr/deep_preflight.py` |
 | **排查后台服务不推进、状态不同步** | [[architecture]] | `services/herdr-controller.py` |
 | **编写或修改自动化测试** | [[dag-workflow-engine]] | `tests/test_workflow_engine.py` |
+| **工作流外部受控元语与快照回溯** | [[dag-workflow-engine]], [[task-lifecycle]] | `herdr/kernel.py`, `console/herdr_factory_console.py` |
 | **更新或扩展 Wiki 本身** | [[WIKI]] / [[log]] | `wiki/WIKI.md` |
 
 ---
