@@ -891,4 +891,48 @@ python3 services/herdr-notifier.py --test
 - 测试文件：[`tests/test_herdr_notifier.py`](file:///Users/user/herdr/tests/test_herdr_notifier.py)、[`tests/test_console_deep_link.py`](file:///Users/user/herdr/tests/test_console_deep_link.py)
 - 知识库演进记录：[`wiki/architecture.md`](file:///Users/user/herdr/wiki/architecture.md)、[`wiki/log.md`](file:///Users/user/herdr/wiki/log.md)
 
+---
+
+## 21. 控制台内嵌 HTML/前端交互重构的无侵入原则与字面量契约保护
+
+### 问题背景
+
+在对单文件 Python HTTP Server（`console/herdr_factory_console.py`）进行 UI/UX 深度改造、可访问性（a11y）增强和交互现代化的过程中，为指标卡标签与选择器添加了辅助属性（例如 `<span id="labelProjects">项目空间</span>`、`<label for="wfSelect">工作流</label>`）。
+导致既有的术语翻译契约测试 `tests/test_console_templates.py::TestTermTranslation` 失败。该测试直接断言无属性字面量 `self.assertIn("<span>项目空间</span>", self.html)` 与 `self.assertIn("<label>工作流</label>", self.html)`。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 直接给内嵌无属性 HTML 标签添加 id/for 属性 | 破坏了既有白盒测试对特定 HTML 片段的字面量断言 | 涉及测试断言的目标标签，必须保留原有字符结构；通过层次选择器（如 `.metrics .metric span`）获取 DOM |
+| 交互阻塞（原生 window.confirm/prompt） | 破坏单页沉浸体验且在无头/受限环境可能被静默拦截 | 统一封装自定义非阻塞原生模态框（如 `showConfirmModal` / `showPromptModal`） |
+| 外部未安装 npm/bundler 导致前端开发易引入重度依赖 | 违反 RULES.md 零依赖与离线开箱即用底线 | 坚持纯 CSS/SVG/Vanilla JS，图标全部内联轻量 SVG 矢量替代 Emoji |
+
+### 操作规范（已固化到 `console/herdr_factory_console.py`）
+
+1. **DOM 选择器与模板解耦**：
+   - 动态更新文案时，优先采用 `.querySelectorAll('.metrics .metric span')` 索引获取，不强行注入 `id` 属性改动原始模板结构。
+   - 保留 `<span>项目空间</span>`、`<span>活跃工作流</span>`、`<label>工作流</label>` 等契约片段原样输出。
+2. **非阻塞交互替代原生弹窗**：
+   - 彻底禁用 `window.confirm` 和 `window.prompt`；
+   - 统一使用 `showConfirmModal({title, message, confirmText, danger, onConfirm})` 与 `showPromptModal({title, label, defaultValue, onConfirm})`。
+3. **可访问性与键盘导航标准**：
+   - 所有 Modal 容器显式标注 `role="dialog" aria-modal="true" aria-labelledby="..."`；
+   - 全局注册 `Escape` 键盘事件，统一收起活跃模态框与展开的浮层下拉菜单。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 运行全部控制台相关单元与契约测试
+/opt/homebrew/bin/pytest tests/test_console*.py
+
+# 2. 全量回归测试保证零副作用
+/opt/homebrew/bin/pytest
+
+# 3. 部署并验证运行时状态
+./scripts/install-herdr-console.sh
+curl -s http://127.0.0.1:8765/ | head -n 10
+```
+
+
 

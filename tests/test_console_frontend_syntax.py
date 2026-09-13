@@ -75,11 +75,22 @@ class TestConsoleFrontendSyntaxAndContracts(unittest.TestCase):
         self.assertIn("autoFillWorkflowTitle()", self.html)
 
         # Verify ordering of label texts in modal definition
-        p_proj = self.html.find("<label>项目</label>")
-        p_title = self.html.find("<label>本次任务名称</label>")
-        p_tpl = self.html.find("<label>工作流模板</label>")
-        p_agent = self.html.find("<label>执行者策略</label>")
-        p_req = self.html.find("<label>自然语言需求</label>")
+        match_proj = re.search(r"<label[^>]*>项目</label>", self.html)
+        match_title = re.search(r"<label[^>]*>本次任务名称</label>", self.html)
+        match_tpl = re.search(r"<label[^>]*>工作流模板</label>", self.html)
+        match_agent = re.search(r"<label[^>]*>执行者策略</label>", self.html)
+        match_req = re.search(r"<label[^>]*>自然语言需求</label>", self.html)
+        self.assertIsNotNone(match_proj, "missing <label>项目</label>")
+        self.assertIsNotNone(match_title, "missing <label>本次任务名称</label>")
+        self.assertIsNotNone(match_tpl, "missing <label>工作流模板</label>")
+        self.assertIsNotNone(match_agent, "missing <label>执行者策略</label>")
+        self.assertIsNotNone(match_req, "missing <label>自然语言需求</label>")
+
+        p_proj = match_proj.start()
+        p_title = match_title.start()
+        p_tpl = match_tpl.start()
+        p_agent = match_agent.start()
+        p_req = match_req.start()
 
         self.assertTrue(
             -1 < p_proj < p_title < p_tpl < p_agent < p_req,
@@ -92,6 +103,41 @@ class TestConsoleFrontendSyntaxAndContracts(unittest.TestCase):
         self.assertIn("## 需求", self.html)
         self.assertIn("onblur=\"autoFillWorkflowTitle()\"", self.html)
 
+    def test_modal_and_toast_accessibility_attributes(self):
+        """Ensure modal dialog and toast have proper WCAG ARIA attributes."""
+        self.assertIn('role="dialog"', self.html)
+        self.assertIn('aria-modal="true"', self.html)
+        self.assertIn('aria-labelledby="modalTitle"', self.html)
+        self.assertIn('role="alert"', self.html)
+
+    def test_keyboard_escape_closes_modal(self):
+        """Verify Escape key listener is registered to close modal and dropdowns."""
+        self.assertIn("Escape", self.html)
+        self.assertIn("closeModal()", self.html)
+
+    def test_native_blocking_dialogs_eliminated(self):
+        """Ensure blocking native confirm() and prompt() calls are replaced by styled modals."""
+        # Find script block
+        script_match = re.search(r"<script>(.*?)</script>", self.html, re.DOTALL)
+        self.assertIsNotNone(script_match)
+        js = script_match.group(1)
+        # Should not have naked confirm( or prompt( calls in JS
+        self.assertNotIn("confirm(", js)
+        self.assertNotIn("prompt(", js)
+        self.assertIn("showConfirmModal", js)
+        self.assertIn("showPromptModal", js)
+
+    def test_primary_button_styling_and_no_duplicate_plus(self):
+        """Ensure primary button uses white text on royal blue and avoids double plus icons."""
+        # Check no duplicate plus in buttons
+        self.assertNotIn("＋ 新需求", self.html)
+        self.assertNotIn("＋ 新建模板", self.html)
+        self.assertIn("<span>新需求</span>", self.html)
+        # Ensure primary button has white text and not muddy black text
+        self.assertNotIn(".btn.primary{background:var(--accent);color:#06111f;", self.html)
+        self.assertIn(".btn.primary{background:#2563eb;color:#ffffff;", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()
+

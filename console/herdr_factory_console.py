@@ -460,10 +460,26 @@ def tail_log(kind='controller',n=180):
     return '\n'.join(p.read_text(errors='ignore').splitlines()[-max(10,min(n,1000)):])
 
 HTML_TEMPLATE=r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PRODUCT_NAME__</title><style>
-:root{--bg:#0b0f14;--panel:#121821;--card:#17202b;--line:#293342;--text:#edf2f7;--muted:#8fa0b5;--accent:#67a4ff;--good:#42c58a;--warn:#f3b950;--bad:#f36b6b}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif}button,input,select,textarea{font:inherit}button{cursor:pointer}.shell{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:100vh}.sidebar{border-right:1px solid var(--line);background:#0f141b;padding:16px;position:sticky;top:0;height:100vh;overflow:auto}.brand{font-size:20px;font-weight:750}.sub{color:var(--muted);font-size:12px;margin:4px 0 16px}.project{width:100%;text-align:left;background:transparent;border:1px solid var(--line);color:var(--text);border-radius:12px;padding:16px;margin-bottom:8px}.project.active{border-color:var(--accent);background:#14243a}.project small{display:block;color:var(--muted);margin-top:4px}.main{padding:24px;min-width:0}.top{display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px}.title{font-size:22px;font-weight:760}.muted{color:var(--muted)}.actions{display:flex;gap:8px;flex-wrap:wrap}.btn{border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:10px;padding:8px 16px}.btn.primary{background:var(--accent);color:#06111f;border-color:var(--accent);font-weight:700}.actions .btn.primary{margin-left:auto}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:16px}.metric,.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px}.metric{padding:16px}.metric b{font-size:22px;display:block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}.metric span{font-size:12px;color:var(--muted)}.stages{display:grid;grid-template-columns:repeat(6,minmax(130px,1fr));gap:8px;overflow:auto;margin-bottom:16px}.stage{min-width:130px;padding:16px;background:var(--panel);border:1px solid var(--line);border-radius:14px}.stage strong{display:block;margin-bottom:8px}.badge{font-size:12px;border-radius:999px;padding:4px 8px;display:inline-block;border:1px solid var(--line)}.badge.cleaned{color:var(--good)}.badge.working,.badge.finalizing{color:var(--warn)}.badge.failed,.badge.blocked{color:var(--bad)}.badge.waiting{color:var(--muted)}.badge.superseded{color:var(--muted)}.badge.in_progress{color:var(--warn)}.grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(280px,.8fr);gap:16px}.panel{overflow:hidden}.panel h3{font-size:14px;margin:0;padding:16px;border-bottom:1px solid var(--line)}.task{padding:16px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center}.task.task-highlight{background:rgba(103,164,255,.14);border-left:3px solid var(--accent)}.task-name{font-weight:650}.task-id{color:#6f8197;font-size:11px;margin-top:4px}.task-meta{color:var(--muted);font-size:12px;margin-top:4px}.task-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.mini{padding:4px 8px;border-radius:8px;border:1px solid var(--line);background:#101720;color:var(--text);font-size:12px}.agent-row,.slot-row,.alert-row{padding:8px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px;align-items:center}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:8px;background:var(--muted)}.dot.ready{background:var(--good)}.dot.working{background:var(--warn)}.dot.disabled,.dot.failed{background:var(--bad)}.section-gap{margin-top:16px}.empty{padding:16px;color:var(--muted);font-size:13px}pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5}.modal{position:fixed;inset:0;background:rgba(0,0,0,.58);display:none;align-items:center;justify-content:center;padding:16px;z-index:50}.modal.open{display:flex}.modal-card{width:min(920px,100%);max-height:86vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:16px}.modal-head{display:flex;justify-content:space-between;padding:16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}.modal-body{padding:16px}.close{background:transparent;color:var(--text);border:0;font-size:22px}.form{display:grid;gap:8px}.form label{font-size:12px;color:var(--muted)}.form input,.form select,.form textarea{width:100%;background:#0d131a;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:8px}.form textarea{min-height:120px}.toast{position:fixed;right:24px;bottom:24px;background:#111923;border:1px solid var(--line);padding:8px 16px;border-radius:12px;display:none;max-width:420px;z-index:60}.toast.show{display:block}.danger-text{color:var(--bad)}.good-text{color:var(--good)}.warn-text{color:var(--warn)}.wf-subject{font-size:16px;font-weight:700;line-height:1.35}.wf-sub{font-size:12px;margin-top:4px}.wf-switcher{display:flex;align-items:center;gap:8px;margin:0 0 16px}.wf-switcher label{font-size:12px;color:var(--muted)}.wf-switcher select{background:#0d131a;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:8px;max-width:520px}@media(max-width:1000px){.shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}.projects{display:flex;gap:8px;overflow:auto}.project{min-width:180px}.grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}}
-</style></head><body><div class="shell"><aside class="sidebar"><div class="brand">__PRODUCT_NAME__</div><div class="sub">__PRODUCT_TAGLINE__ · 控制台</div><button class="btn primary" style="width:100%;margin-bottom:12px;display:flex;align-items:center;justify-content:center;gap:6px" onclick="showNewProjectModal()"><span>＋</span> 新建工厂空间</button><div id="projects" class="projects"></div><button class="btn" style="width:100%;margin-top:8px" onclick="refreshAll()">刷新</button></aside><main class="main"><div class="top"><div><div class="title" id="projectTitle">选择项目</div><div id="workflowTitle"><div class="wf-subject" id="workflowSubject">—</div><div class="muted wf-sub" id="workflowSub"></div></div></div><div class="actions"><button class="btn factory-action" onclick="showLogs()">查看日志</button><button class="btn factory-action" onclick="advanceStage()">进入下一阶段</button><button class="btn factory-action" onclick="createCandidate()">创建候选分支</button><button class="btn factory-action" onclick="showAgentOverride()">指定执行者</button><button class="btn factory-action" onclick="runPreflight()">执行者自检</button><button class="btn factory-action" onclick="showTemplateLibrary()">模板库</button><button class="btn factory-action danger-text" onclick="showUnregisterProjectModal()">注销项目</button><button class="btn primary factory-action" onclick="showNewWorkflow()">＋ 新需求</button></div></div><div class="metrics"><div class="metric"><b id="mProjects">0</b><span>项目空间</span></div><div class="metric"><b id="mWorkflows">0</b><span>活跃工作流</span></div><div class="metric"><b id="mAgents">0</b><span>活跃执行者</span></div><div class="metric"><b id="mAlerts">0</b><span>需要关注</span></div></div><div id="stages" class="stages"></div><div id="workflowSwitcher" class="wf-switcher" style="display:none"></div><div class="grid"><section class="panel"><h3>执行者与任务实时看板</h3><div id="tasks"></div></section><section><div class="panel"><h3>执行者阵容</h3><div id="agents"></div></div><div class="panel section-gap"><h3>常驻智能体工位</h3><div id="slots"></div></div><div class="panel section-gap"><h3>告警中心</h3><div id="alerts"></div></div></section></div></main></div><div id="modal" class="modal"><div class="modal-card"><div class="modal-head"><strong id="modalTitle">详情</strong><button class="close" onclick="closeModal()">×</button></div><div id="modalBody" class="modal-body"></div></div></div><div id="toast" class="toast"></div><script>
+:root{--bg:#0b0f14;--panel:#121821;--panel-elevated:#172230;--card:#17202b;--card-hover:#1c2838;--line:#293342;--line-focus:#455973;--text:#edf2f7;--muted:#8fa0b5;--subtle:#9cb2cd;--accent:#67a4ff;--accent-glow:rgba(103,164,255,0.2);--good:#42c58a;--warn:#f3b950;--bad:#f36b6b}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;line-height:1.5}button,input,select,textarea{font:inherit}button{cursor:pointer}*:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.shell{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:100vh}.sidebar{border-right:1px solid var(--line);background:#0f141b;padding:16px;position:sticky;top:0;height:100vh;overflow:auto}.brand{font-size:20px;font-weight:750;letter-spacing:-0.3px}.sub{color:var(--muted);font-size:12px;margin:4px 0 16px}.project{width:100%;text-align:left;background:transparent;border:1px solid var(--line);color:var(--text);border-radius:12px;padding:14px;margin-bottom:8px;transition:all .15s ease}.project:hover{border-color:var(--line-focus);background:rgba(255,255,255,0.02)}.project.active{border-color:var(--accent);background:#14243a;box-shadow:0 0 12px var(--accent-glow)}.project small{display:block;color:var(--subtle);margin-top:4px;font-size:11.5px}.main{padding:24px;min-width:0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:18px}.title{font-size:22px;font-weight:760}.muted{color:var(--muted)}.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.btn{border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:10px;padding:8px 14px;display:inline-flex;align-items:center;gap:6px;font-weight:550;transition:all .15s ease;user-select:none}.btn:hover{background:var(--card-hover);border-color:var(--line-focus)}.btn:active{transform:translateY(1px)}.btn.primary{background:#2563eb;color:#ffffff;border:1px solid #3b82f6;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.25)}.btn.primary:hover{background:#1d4ed8;border-color:#60a5fa;color:#ffffff}.btn.primary:active{background:#1e40af;transform:translateY(1px)}.btn.danger-btn{background:var(--bad);color:#fff;border-color:var(--bad);font-weight:700}.btn.danger-btn:hover{background:#ff7d7d}.btn.is-loading{opacity:.75;pointer-events:none;cursor:wait}.btn.icon-only{padding:8px 10px;font-weight:700}.actions .btn.primary{margin-left:auto}.btn-group{display:inline-flex;vertical-align:middle;border-radius:10px}.btn-group .btn{border-radius:0;margin-left:-1px}.btn-group .btn:first-child{border-top-left-radius:10px;border-bottom-left-radius:10px;margin-left:0}.btn-group .btn:last-child{border-top-right-radius:10px;border-bottom-right-radius:10px}.btn-group .btn:focus-visible{z-index:1}.dropdown{position:relative;display:inline-block}.dropdown-menu{display:none;position:absolute;right:0;top:calc(100% + 6px);background:var(--panel-elevated);border:1px solid var(--line);border-radius:12px;min-width:180px;z-index:80;box-shadow:0 12px 28px rgba(0,0,0,.6);padding:6px}.dropdown.open .dropdown-menu{display:block;animation:popIn .12s ease-out}.dropdown-item{padding:8px 12px;font-size:13px;color:var(--text);border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:8px;background:transparent;border:0;width:100%;text-align:left;font:inherit;transition:background .12s}.dropdown-item:hover{background:#202e40}.dropdown-item.danger-text{color:var(--bad)}.dropdown-item.danger-text:hover{background:rgba(243,107,107,.15)}.dropdown-divider{height:1px;background:var(--line);margin:6px 0}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:18px}.metric,.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px}.metric{padding:16px}.metric b{font-size:24px;display:block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}.metric span{font-size:12px;color:var(--muted)}.stages{display:flex;gap:10px;overflow-x:auto;margin-bottom:18px;padding:2px 2px 6px;scroll-behavior:smooth}.stage{flex:1;min-width:136px;padding:14px 16px;background:var(--panel);border:1px solid var(--line);border-radius:14px;position:relative;transition:all .2s ease}.stage:hover{border-color:var(--line-focus)}.stage.stage-active{border-color:var(--accent);box-shadow:0 0 14px var(--accent-glow)}.stage:not(:last-child)::after{content:'›';position:absolute;right:-7px;top:50%;transform:translateY(-50%);color:var(--muted);font-size:18px;font-weight:700;z-index:2;pointer-events:none}.stage-head{font-size:11px;color:var(--accent);font-weight:700;margin-bottom:4px;letter-spacing:0.5px}.stage strong{display:block;margin-bottom:8px;font-size:14px}.badge{font-size:12px;border-radius:999px;padding:4px 8px;display:inline-block;border:1px solid var(--line)}.badge.cleaned{color:var(--good);border-color:rgba(66,197,138,.3)}.badge.working,.badge.finalizing{color:var(--warn);border-color:rgba(243,185,80,.3)}.badge.failed,.badge.blocked{color:var(--bad);border-color:rgba(243,107,107,.3)}.badge.waiting{color:var(--muted)}.badge.superseded{color:var(--muted)}.badge.in_progress{color:var(--warn);border-color:rgba(243,185,80,.3)}.grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(280px,.8fr);gap:16px}.panel{overflow:hidden}.panel h3{font-size:14px;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);background:rgba(255,255,255,0.015)}.task{padding:16px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;transition:background .15s}.task:hover{background:rgba(255,255,255,0.01)}.task.task-highlight{background:rgba(103,164,255,.14);border-left:3px solid var(--accent)}.task-name{font-weight:650;font-size:14px}.task-id{color:var(--subtle);font-size:11.5px;margin-top:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.task-meta{color:var(--subtle);font-size:12px;margin-top:4px}.task-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.mini{padding:5px 10px;border-radius:8px;border:1px solid var(--line);background:#101720;color:var(--text);font-size:12px;transition:all .15s}.mini:hover{background:#1a2636;border-color:var(--line-focus)}.agent-row,.slot-row,.alert-row{padding:10px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px;align-items:center}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:8px;background:var(--muted)}.dot.ready{background:var(--good);box-shadow:0 0 6px rgba(66,197,138,.4)}.dot.working{background:var(--warn);box-shadow:0 0 6px rgba(243,185,80,.4)}.dot.disabled,.dot.failed{background:var(--bad);box-shadow:0 0 6px rgba(243,107,107,.4)}.section-gap{margin-top:16px}.empty{padding:20px 16px;color:var(--muted);font-size:13px;text-align:center}pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.55}.modal{position:fixed;inset:0;background:rgba(0,0,0,.68);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:none;align-items:center;justify-content:center;padding:16px;z-index:50}.modal.open{display:flex;animation:fadeIn .15s ease-out}.modal-card{width:min(920px,100%);max-height:86vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:0 24px 60px rgba(0,0,0,.7)}.modal-head{display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel);z-index:2}.modal-body{padding:20px}.close{background:transparent;color:var(--muted);border:0;width:32px;height:32px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:all .15s}.close:hover{background:rgba(255,255,255,.08);color:var(--text)}.form{display:grid;gap:10px}.form label{font-size:12px;color:var(--muted);font-weight:600}.form input,.form select,.form textarea{width:100%;background:#0d131a;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px;transition:border-color .15s}.form input:focus,.form select:focus,.form textarea:focus{border-color:var(--accent)}.form textarea{min-height:120px;line-height:1.5}.toast{position:fixed;right:24px;bottom:24px;background:#111923;border:1px solid var(--line);padding:10px 18px;border-radius:12px;display:none;max-width:420px;z-index:90;box-shadow:0 10px 30px rgba(0,0,0,.5);font-size:13px;line-height:1.4}.toast.show{display:flex;align-items:center;gap:8px;animation:slideUp .18s ease-out}.danger-text{color:var(--bad)}.good-text{color:var(--good)}.warn-text{color:var(--warn)}.wf-subject{font-size:16px;font-weight:700;line-height:1.35}.wf-sub{font-size:12px;margin-top:4px;color:var(--subtle)}.wf-switcher{display:flex;align-items:center;gap:8px;margin:0 0 16px}.wf-switcher label{font-size:12px;color:var(--muted)}.wf-switcher select{background:#0d131a;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:8px;max-width:520px}.fleet-table{border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-top:8px}.fleet-header,.fleet-row{display:grid;grid-template-columns:120px 80px minmax(120px,1.2fr) 70px 80px minmax(120px,1.5fr);gap:8px;align-items:center;padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--line);font-size:12px}.fleet-header{font-size:11px;font-weight:700;color:var(--muted);background:#0d131a;text-transform:uppercase;letter-spacing:0.5px}.fleet-row:last-child{border-bottom:0}.fleet-row:hover{background:var(--card)}@keyframes fadeIn{from{opacity:0}to{opacity:1}}@keyframes slideUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@keyframes popIn{from{opacity:0;transform:scale(0.96)}to{opacity:1;transform:scale(1)}}@media(max-width:1000px){.shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}.projects{display:flex;gap:8px;overflow:auto}.project{min-width:180px}.grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}}
+</style></head><body><div class="shell"><aside class="sidebar"><div class="brand">__PRODUCT_NAME__</div><div class="sub">__PRODUCT_TAGLINE__ · 控制台</div><button class="btn primary" style="width:100%;margin-bottom:12px;display:flex;align-items:center;justify-content:center;gap:6px" onclick="showNewProjectModal()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新建工厂空间</span></button><div id="projects" class="projects"></div><button class="btn" style="width:100%;margin-top:8px" onclick="refreshAll()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.3"/></svg><span>刷新</span></button></aside><main class="main"><div class="top"><div><div class="title" id="projectTitle">选择项目</div><div id="workflowTitle"><div class="wf-subject" id="workflowSubject">—</div><div class="muted wf-sub" id="workflowSub"></div></div></div><div class="actions"><div class="btn-group factory-action"><button class="btn" onclick="advanceStage()" title="推进当前阶段">进入下一阶段</button><button class="btn" onclick="createCandidate()" title="汇总至候选分支">创建候选分支</button></div><button class="btn factory-action" onclick="runPreflight()">执行者自检</button><button class="btn factory-action" onclick="showTemplateLibrary()">模板库</button><div class="dropdown factory-action" id="moreDropdown"><button class="btn icon-only" onclick="toggleMoreMenu(event)" aria-label="更多操作" title="更多操作">···</button><div class="dropdown-menu"><button class="dropdown-item" onclick="closeMoreMenu();showLogs()">查看日志</button><button class="dropdown-item" onclick="closeMoreMenu();showAgentOverride()">指定执行者</button><div class="dropdown-divider"></div><button class="dropdown-item danger-text" onclick="closeMoreMenu();showUnregisterProjectModal()">注销项目</button></div></div><button class="btn primary factory-action" onclick="showNewWorkflow()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新需求</span></button></div></div><div class="metrics"><div class="metric"><b id="mProjects">0</b><span>项目空间</span></div><div class="metric"><b id="mWorkflows">0</b><span>活跃工作流</span></div><div class="metric"><b id="mAgents">0</b><span>活跃执行者</span></div><div class="metric"><b id="mAlerts">0</b><span>需要关注</span></div></div><div id="stages" class="stages"></div><div id="workflowSwitcher" class="wf-switcher" style="display:none"></div><div class="grid"><section class="panel"><h3>执行者与任务实时看板</h3><div id="tasks"></div></section><section><div class="panel"><h3>执行者阵容</h3><div id="agents"></div></div><div class="panel section-gap"><h3>常驻智能体工位</h3><div id="slots"></div></div><div class="panel section-gap"><h3>告警中心</h3><div id="alerts"></div></div></section></div></main></div><div id="modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-card"><div class="modal-head"><strong id="modalTitle">详情</strong><button class="close" aria-label="关闭弹窗" onclick="closeModal()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button></div><div id="modalBody" class="modal-body"></div></div></div><div id="toast" class="toast" role="alert" aria-live="polite"></div><script>
 let state={overview:null,project:null,workflow:null,ops:null,projectId:null,workflowId:null,spaceId:null,space:null,opsMode:false};
 const VIEW_KEY='herdrConsoleView';
+function closeMoreMenu(){const dd=document.getElementById('moreDropdown');if(dd)dd.classList.remove('open')}
+function toggleMoreMenu(e){e.stopPropagation();const dd=document.getElementById('moreDropdown');if(dd)dd.classList.toggle('open')}
+document.addEventListener('click',e=>{const dd=document.getElementById('moreDropdown');if(dd&&!dd.contains(e.target))dd.classList.remove('open')});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();closeMoreMenu()}});
+function showConfirmModal({title,message,confirmText='确认',danger=false,onConfirm}){
+  openModal(title,`<div style="line-height:1.6"><div style="font-size:14px;margin-bottom:18px;color:var(--text)">${esc(message)}</div><div style="display:flex;justify-content:flex-end;gap:10px"><button class="btn" onclick="closeModal()">取消</button><button id="modalConfirmBtn" class="btn ${danger?'danger-btn':'primary'}">${esc(confirmText)}</button></div></div>`);
+  const btn=document.getElementById('modalConfirmBtn');
+  if(btn)btn.onclick=async()=>{closeModal();if(onConfirm)await onConfirm()}
+}
+function showPromptModal({title,label,defaultValue='',confirmText='确定',onConfirm}){
+  openModal(title,`<div class="form"><label for="promptInput">${esc(label)}</label><input id="promptInput" value="${esc(defaultValue)}" autofocus><div style="display:flex;justify-content:flex-end;gap:10px;margin-top:10px"><button class="btn" onclick="closeModal()">取消</button><button id="modalPromptBtn" class="btn primary">${esc(confirmText)}</button></div></div>`);
+  const input=document.getElementById('promptInput');
+  if(input){input.focus();input.select();input.addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('modalPromptBtn')?.click()})};
+  const btn=document.getElementById('modalPromptBtn');
+  if(btn)btn.onclick=async()=>{const val=input?input.value.trim():'';closeModal();if(onConfirm)await onConfirm(val)}
+}
 function saveViewState(){try{localStorage.setItem(VIEW_KEY,JSON.stringify({opsMode:state.opsMode,spaceId:state.spaceId,workflowId:state.workflowId}))}catch(e){}}
 function loadViewState(){try{return JSON.parse(localStorage.getItem(VIEW_KEY)||'null')}catch(e){return null}}
 async function waitForWorkflowJob(jobId){
@@ -489,7 +505,7 @@ async function submitNewWorkflowAsync(){
   const a=document.getElementById('newAgent')?.value;
   const t=document.getElementById('newTemplate')?.value||'software-development-v1';
   if(!q)return toast('请输入需求',true);
-  if(button){button.disabled=true;button.textContent='启动中…'}
+  if(button){button.disabled=true;button.classList.add('is-loading');button.textContent='启动中…'}
   try{
     toast('正在创建工作流…');
     const job=await api('/api/run',{method:'POST',body:JSON.stringify({project_root:state.project.project.project_root,title:title,requirement:q,agent:a,template:t})});
@@ -499,13 +515,13 @@ async function submitNewWorkflowAsync(){
     closeModal();await refreshAll();
     toast('工作流已启动：'+(m?m[1]:(result.output||'已提交')));
   }catch(e){
-    if(button){button.disabled=false;button.textContent='重试启动工作流'}
+    if(button){button.disabled=false;button.classList.remove('is-loading');button.textContent='重试启动工作流'}
     const body=document.getElementById('modalBody');
     if(body){let error=body.querySelector('.run-error');if(!error){error=document.createElement('div');error.className='run-error danger-text';body.prepend(error)}error.textContent='启动失败：'+e.message}
     toast('工作流启动失败：'+e.message,true);
   }
 }
-document.addEventListener('click',e=>{if(e.target.matches('button')&&e.target.textContent.includes('启动工作流')){e.preventDefault();e.stopImmediatePropagation();submitNewWorkflowAsync()}},true);
+const submitNewWorkflow=submitNewWorkflowAsync;
 function syncOpsUi(){
   const actions=document.querySelector('.actions');
   if(!actions)return;
@@ -514,6 +530,7 @@ function syncOpsUi(){
   b.textContent=state.opsMode?'← 返回工厂':'进入运维驾驶舱';
   b.className=state.opsMode?'btn primary':'btn';
   b.onclick=state.opsMode?exitOpsCenter:showOpsCenter;
+  closeMoreMenu();
   document.querySelectorAll('.factory-action').forEach(button=>{button.hidden=state.opsMode})
 }
 
@@ -625,7 +642,7 @@ async function showTemplateLibrary(){
           <button class="mini" onclick="showTemplateEditor('${esc(t.id)}')">${t.is_builtin?'查看 YAML':'编辑'}</button>
         </div>
       </div>`).join(''):'<div class="empty">暂无模板</div>';
-    openModal('工作流模板库',`<div class="muted" style="margin-bottom:8px">模板定义工作流的节点与 DAG 依赖。自定义模板保存到 ~/.herdr-controller/templates/，对新启动的工作流即时生效，不影响已运行的工作流。</div>${cards}<div style="margin-top:8px"><button class="btn primary" onclick="showTemplateEditor()">＋ 新建模板</button></div>`)
+    openModal('工作流模板库',`<div class="muted" style="margin-bottom:8px">模板定义工作流的节点与 DAG 依赖。自定义模板保存到 ~/.herdr-controller/templates/，对新启动的工作流即时生效，不影响已运行的工作流。</div>${cards}<div style="margin-top:8px"><button class="btn primary" onclick="showTemplateEditor()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg><span>新建模板</span></button></div>`)
   }catch(e){toast(e.message,true)}
 }
 async function showTemplateDAG(id){
@@ -721,8 +738,16 @@ async function loadOpsCenter(){
     const ops=await api('/api/ops-center?include_tasks=1');
     if(!state.opsMode)return;
     state.ops=ops;
-    renderOpsCenter()
-  }catch(e){if(state.opsMode)toast(e.message,true)}
+    renderOpsCenter();
+  }catch(e){
+    if(state.opsMode){
+      toast(e.message,true);
+      const tasksEl=document.getElementById('tasks');
+      if(tasksEl){
+        tasksEl.innerHTML=`<div class="panel" style="padding:32px 20px;text-align:center;margin:16px"><div style="font-size:16px;font-weight:700;color:var(--bad);margin-bottom:8px">运维驾驶舱数据加载失败</div><div class="task-meta" style="margin-bottom:16px">${esc(e.message)}</div><button class="btn primary" onclick="loadOpsCenter()">点击重试</button></div>`;
+      }
+    }
+  }
 }
 function renderOpsCenter(){
   const d=state.ops||{},b=d.boss||{},cards=d.workflow_cards||[],fleet=d.agent_fleet||[],anoms=d.anomalies||[];
@@ -730,8 +755,10 @@ function renderOpsCenter(){
   document.getElementById('mWorkflows').textContent=b.working_agents||0;
   document.getElementById('mAgents').textContent=b.attention_required||0;
   document.getElementById('mAlerts').textContent=anoms.length;
+  const mSpans=document.querySelectorAll('.metrics .metric span');
+  if(mSpans[0])mSpans[0].textContent='运行工作流';if(mSpans[1])mSpans[1].textContent='活跃执行者';if(mSpans[2])mSpans[2].textContent='需要关注';if(mSpans[3])mSpans[3].textContent='异常告警';
   document.getElementById('projects').innerHTML='<button class="project active" onclick="showOpsCenter()"><strong>运维驾驶舱</strong><small>老板视角 · 执行者舰队 · 异常中心</small></button>';
-  document.getElementById('tasks').innerHTML=`<div class="ops-section"><h3>工作流 / 阶段节点</h3>${cards.length?cards.map(c=>`<div class="ops-card"><div class="ops-card-head"><strong>${esc(c.workflow_label||c.workflow_id)}</strong><span>${formatElapsed(c.runtime_seconds)}</span></div><div class="task-meta">${esc(c.workflow_id)} · ${c.tasks.active} 运行 · ${c.tasks.completed} 完成 · ${c.tasks.blocked} 阻塞 · ${c.tasks.failed} 失败</div><div class="ops-nodes">${c.nodes.map(n=>`<span class="badge ${esc(n.status)}">${esc(n.node_label)} · ${esc(humanStatus(n.status))}</span>`).join('')}</div></div>`).join(''):'<div class="empty">暂无运行中的工作流</div>'}</div><div class="ops-section"><h3>执行者舰队</h3>${fleet.map(a=>`<div class="fleet-row"><strong>${esc(a.agent)}</strong><span class="${opsHealthClass(a.health)}">${esc(healthLabel(a.health))}</span><span>${esc(a.current_task||'—')}</span><span>负载 ${a.load}</span><span>${formatElapsed(a.runtime_seconds)}</span><span>${esc(a.last_result)}</span></div>`).join('')}</div>`;
+  document.getElementById('tasks').innerHTML=`<div class="ops-section"><h3>工作流 / 阶段节点</h3>${cards.length?cards.map(c=>`<div class="ops-card"><div class="ops-card-head"><strong>${esc(c.workflow_label||c.workflow_id)}</strong><span>${formatElapsed(c.runtime_seconds)}</span></div><div class="task-meta">${esc(c.workflow_id)} · ${c.tasks.active} 运行 · ${c.tasks.completed} 完成 · ${c.tasks.blocked} 阻塞 · ${c.tasks.failed} 失败</div><div class="ops-nodes">${c.nodes.map(n=>`<span class="badge ${esc(n.status)}">${esc(n.node_label)} · ${esc(humanStatus(n.status))}</span>`).join('')}</div></div>`).join(''):'<div class="empty">暂无运行中的工作流</div>'}</div><div class="ops-section"><h3>执行者舰队</h3><div class="fleet-table"><div class="fleet-header"><span>执行者</span><span>健康状态</span><span>当前任务</span><span>负载</span><span>运行耗时</span><span>最后结果</span></div>${fleet.length?fleet.map(a=>`<div class="fleet-row"><strong>${esc(a.agent)}</strong><span class="${opsHealthClass(a.health)}">${esc(healthLabel(a.health))}</span><span class="task-id" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.current_task||'—')}</span><span>负载 ${a.load}</span><span>${formatElapsed(a.runtime_seconds)}</span><span class="task-meta" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.last_result||'—')}</span></div>`).join(''):'<div class="empty" style="grid-column:span 6">暂无执行者数据</div>'}</div></div>`;
   document.querySelectorAll('.ops-card').forEach((el,i)=>{el.style.cursor='pointer';el.onclick=()=>openWorkflowFromOps(cards[i].workflow_id)});
   document.getElementById('agents').innerHTML='<div class="empty">运行时状态、任务注册表状态和最后事件已合并到执行者舰队。</div>';
   document.getElementById('slots').innerHTML='<div class="empty">点击现有工作流页面可进入工位 / 任务 详情。</div>';
@@ -785,6 +812,8 @@ function renderOverview(){
   document.getElementById('mWorkflows').textContent=o.active_workflows;
   document.getElementById('mAgents').textContent=o.active_agents;
   document.getElementById('mAlerts').textContent=alerts.length;
+  const mSpans=document.querySelectorAll('.metrics .metric span');
+  if(mSpans[0])mSpans[0].textContent='项目空间';if(mSpans[1])mSpans[1].textContent='活跃工作流';if(mSpans[2])mSpans[2].textContent='活跃执行者';if(mSpans[3])mSpans[3].textContent='需要关注';
 
   document.getElementById('projects').innerHTML=ss.length?ss.map(s=>`
     <button class="project ${s.workspace_id===state.spaceId?'active':''}" onclick="selectSpace('${esc(s.workspace_id)}')">
@@ -836,7 +865,7 @@ async function selectSpace(workspaceId,rer=true){
       document.getElementById('tasks').innerHTML=`
         <div style="padding:20px;background:var(--card);border:1px solid var(--line);border-radius:14px;margin:16px">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-            <span style="font-size:18px">🛠️</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent)"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg>
             <strong style="font-size:16px">按模板装配为工厂空间</strong>
           </div>
           <div class="muted" style="font-size:13px;line-height:1.6;margin-bottom:16px">
@@ -844,9 +873,9 @@ async function selectSpace(workspaceId,rer=true){
             点击下方按钮，工厂将就地为您装配 <b>1总指挥</b> 与各阶段标准工位（阶段标签页与锚点工位），将其注册为该项目的当前工厂车间。
           </div>
           <div class="form" style="max-width:540px">
-            <label>项目代码根目录</label>
+            <label for="adoptPath">项目代码根目录</label>
             <input id="adoptPath" value="${esc(s.project_root||'')}" placeholder="/path/to/project">
-            <label>装配流水线模板</label>
+            <label for="adoptTemplate">装配流水线模板</label>
             <select id="adoptTemplate"></select>
             <button class="btn primary" style="margin-top:8px" onclick="submitAdoptSpace('${esc(s.workspace_id)}')">一键按模板装配为工厂空间</button>
           </div>
@@ -896,16 +925,22 @@ function renderWorkflowSwitcher(){
   box.dataset.sig=sig;
   if(ws.length<2){box.style.display='none';box.innerHTML='';return}
   box.style.display='flex';
-  box.innerHTML='<label>工作流</label><select onchange="state.workflowId=this.value;loadWorkflow(this.value)">'+ws.map(x=>`<option value="${esc(x.workflow_id)}"${x.workflow_id===state.workflowId?' selected':''}>${esc(workflowDisplayName(x))}</option>`).join('')+'</select>'
+  box.innerHTML='<label>工作流</label><select id="wfSelect" onchange="state.workflowId=this.value;loadWorkflow(this.value)">'+ws.map(x=>`<option value="${esc(x.workflow_id)}"${x.workflow_id===state.workflowId?' selected':''}>${esc(workflowDisplayName(x))}</option>`).join('')+'</select>'
 }
 async function loadWorkflow(id){state.workflowId=id;state.workflow=await api('/api/workflow?id='+encodeURIComponent(id));const w=state.workflow.workflow;saveViewState();renderWorkflowHead(w);renderStages();renderTasks()}
-function clearWorkflow(){state.workflow=null;state.workflowId=null;saveViewState();document.getElementById('workflowSubject').textContent='暂无工作流';document.getElementById('workflowSub').textContent='';document.getElementById('stages').innerHTML='';document.getElementById('tasks').innerHTML='<div class="empty">暂无任务</div>'}function renderStages(){
-  document.getElementById('stages').innerHTML=state.workflow.stages.map((s,i)=>`
-    <div class="stage">
-      <strong>${i+1}. ${esc(s.label)}</strong>
+function clearWorkflow(){state.workflow=null;state.workflowId=null;saveViewState();document.getElementById('workflowSubject').textContent='暂无工作流';document.getElementById('workflowSub').textContent='';document.getElementById('stages').innerHTML='';document.getElementById('tasks').innerHTML='<div class="empty">暂无任务</div>'}
+function renderStages(){
+  const ss=(state.workflow&&state.workflow.stages)||[];
+  document.getElementById('stages').innerHTML=ss.map((s,i)=>{
+    const act=['working','finalizing','failed','blocked'].includes(s.status);
+    return `
+    <div class="stage ${act?'stage-active':''}">
+      <div class="stage-head">阶段 ${i+1}</div>
+      <strong>${esc(s.label)}</strong>
       ${badge(s.status)}
       <div class="task-meta">${s.count} 个任务</div>
-    </div>`).join('')
+    </div>`;
+  }).join('')
 }
 function renderTasks(){
   const e=document.getElementById('tasks'),ts=state.workflow.tasks;
@@ -941,7 +976,7 @@ function autoFillWorkflowTitle(){
   }
 }
 function showNewProjectModal(){
-  openModal('新建工厂空间',`<div class="form"><label>本地 Git 仓库路径</label><input id="newProjPath" placeholder="例如：/Users/user/my-app" oninput="autoFillProjectName()"><label>项目名称（可选）</label><input id="newProjName" placeholder="默认与文件夹同名"><label>选用流水线模板</label><select id="newProjTemplate"></select><button class="btn primary" style="margin-top:8px" onclick="submitNewProject()">创建并装配工厂空间</button></div>`);
+  openModal('新建工厂空间',`<div class="form"><label for="newProjPath">本地 Git 仓库路径</label><input id="newProjPath" placeholder="例如：/Users/user/my-app" oninput="autoFillProjectName()"><label for="newProjName">项目名称（可选）</label><input id="newProjName" placeholder="默认与文件夹同名"><label for="newProjTemplate">选用流水线模板</label><select id="newProjTemplate"></select><button class="btn primary" style="margin-top:8px" onclick="submitNewProject()">创建并装配工厂空间</button></div>`);
   populateTemplateSelect('newProjTemplate');
 }
 function autoFillProjectName(){
@@ -991,7 +1026,7 @@ async function submitAdoptSpace(wid){
 function showUnregisterProjectModal(){
   if(!state.project||!state.projectId)return toast('请先选择当前工厂项目',true);
   const p=state.project.project;
-  openModal('注销工厂项目',`<div style="line-height:1.6"><div style="font-size:15px;font-weight:650;margin-bottom:8px">确定要注销项目【${esc(p.project_name||p.project_id)}】吗？</div><div class="muted" style="font-size:13px;margin-bottom:14px">项目目录：<code>${esc(p.project_root)}</code><br>当前空间：<b>${esc(p.workspace_id||'')}</b></div><div style="background:#131a23;border:1px solid var(--line);border-radius:10px;padding:12px;font-size:12px;margin-bottom:14px"><div style="font-weight:600;margin-bottom:4px">注销影响说明：</div><div>1. <b>本地代码仓库绝对不碰</b>，保留所有代码与 Git 提交。</div><div>2. 工厂调度器将停止对该项目的自动任务派发与状态巡检。</div><div>3. 终端空间将从【当前工厂 🟢】退回为【独立终端 🟡】。</div></div><label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:16px"><input type="checkbox" id="unregCloseSpace"> 同时关闭终端工作区（仅关闭窗口标签页，不删除代码）</label><div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" onclick="closeModal()">取消</button><button class="btn" style="background:var(--bad);color:#fff;border-color:var(--bad);font-weight:700" onclick="submitUnregisterProject()">确认注销</button></div></div>`);
+  openModal('注销工厂项目',`<div style="line-height:1.6"><div style="font-size:15px;font-weight:650;margin-bottom:8px">确定要注销项目【${esc(p.project_name||p.project_id)}】吗？</div><div class="muted" style="font-size:13px;margin-bottom:14px">项目目录：<code>${esc(p.project_root)}</code><br>当前空间：<b>${esc(p.workspace_id||'')}</b></div><div style="background:#131a23;border:1px solid var(--line);border-radius:10px;padding:12px;font-size:12px;margin-bottom:14px"><div style="font-weight:600;margin-bottom:4px">注销影响说明：</div><div>1. <b>本地代码仓库绝对不碰</b>，保留所有代码与 Git 提交。</div><div>2. 工厂调度器将停止对该项目的自动任务派发与状态巡检。</div><div>3. 终端空间将从【当前工厂 <span class="dot ready" style="vertical-align:middle"></span>】退回为【独立终端 <span class="dot working" style="vertical-align:middle"></span>】。</div></div><label for="unregCloseSpace" style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:16px"><input type="checkbox" id="unregCloseSpace"> 同时关闭终端工作区（仅关闭窗口标签页，不删除代码）</label><div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" onclick="closeModal()">取消</button><button class="btn danger-btn" onclick="submitUnregisterProject()">确认注销</button></div></div>`);
 }
 async function submitUnregisterProject(){
   if(!state.project||!state.projectId)return;
@@ -1012,22 +1047,10 @@ async function submitUnregisterProject(){
 }
 function showNewWorkflow(){
   if(!state.project||!state.space||state.space.relation!=='current_factory')return toast('请先选择当前工厂空间',true);
-  openModal('新建需求',`<div class="form"><label>项目</label><input value="${esc(state.project.project.project_name)}" disabled><label>本次任务名称</label><input id="newTitle" placeholder="例如：适配深色模式切换 / 修复结算页面浮点精度 Bug"><label>工作流模板</label><select id="newTemplate"><option value="software-development-v1">software-development-v1（默认软件开发）</option></select><label>执行者策略</label><select id="newAgent"><option value="auto">auto（Router 自动）</option>${['opencode','codex','claude','qodercli','agy','pi'].map(a=>`<option>${a}</option>`).join('')}</select><label>自然语言需求</label><textarea id="newRequirement" onblur="autoFillWorkflowTitle()"></textarea><button class="btn primary" onclick="submitNewWorkflow()">启动工作流</button><div id="runWaitStatus" class="muted" style="min-height:16px;font-size:12px"></div></div>`);
+  openModal('新建需求',`<div class="form"><label for="newProjName">项目</label><input id="newProjName" value="${esc(state.project.project.project_name)}" disabled><label for="newTitle">本次任务名称</label><input id="newTitle" placeholder="例如：适配深色模式切换 / 修复结算页面浮点精度 Bug"><label for="newTemplate">工作流模板</label><select id="newTemplate"><option value="software-development-v1">software-development-v1（默认软件开发）</option></select><label for="newAgent">执行者策略</label><select id="newAgent"><option value="auto">auto（Router 自动）</option>${['opencode','codex','claude','qodercli','agy','pi'].map(a=>`<option>${a}</option>`).join('')}</select><label for="newRequirement">自然语言需求</label><textarea id="newRequirement" onblur="autoFillWorkflowTitle()"></textarea><button class="btn primary" onclick="submitNewWorkflowAsync()">启动工作流</button><div id="runWaitStatus" class="muted" style="min-height:16px;font-size:12px"></div></div>`);
   populateTemplateSelect()
 }
-async function submitNewWorkflow(){
-  const title=(document.getElementById('newTitle')?.value||'').trim(),q=document.getElementById('newRequirement').value.trim(),a=document.getElementById('newAgent').value,t=document.getElementById('newTemplate').value;
-  if(!q)return toast('请输入需求',true);
-  try{
-    toast('正在启动工作流…');
-    await api('/api/run',{method:'POST',body:JSON.stringify({project_root:state.project.project.project_root,title:title,requirement:q,agent:a,template:t})});
-    closeModal();
-    await refreshAll();
-    toast('工作流已启动')
-  }catch(e){
-    toast(e.message,true)
-  }
-}async function runPreflight(){
+async function runPreflight(){
   if(!state.projectId)return toast('当前空间不参与工厂调度',true);
   try{
     toast('正在执行深度自检…');
@@ -1078,7 +1101,54 @@ async function submitNewWorkflow(){
     toast(e.message,true);
   }
 }
-function showAgentOverride(){if(!state.workflowId)return toast('当前没有工作流',true);const cur=state.workflow.agent_override||'auto';openModal('指定后续任务执行者',`<div class="form"><select id="overrideAgent">${['auto','opencode','codex','claude','qodercli','agy','pi'].map(a=>`<option ${a===cur?'selected':''}>${a}</option>`).join('')}</select><button class="btn primary" onclick="saveAgentOverride()">保存</button><div class="muted">只影响后续新建任务。</div></div>`)}async function saveAgentOverride(){try{await api('/api/workflow/agent',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,agent:document.getElementById('overrideAgent').value})});closeModal();await loadWorkflow(state.workflowId);toast('执行者策略已更新')}catch(e){toast(e.message,true)}}async function showTask(id){try{const d=await api('/api/task?id='+encodeURIComponent(id));openModal(id,`<pre>${esc(JSON.stringify(d,null,2))}</pre>`)}catch(e){toast(e.message,true)}}async function showPane(id){if(!id)return toast('没有工位',true);try{const d=await api('/api/pane/read?id='+encodeURIComponent(id));openModal('工位 '+id,`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}async function askCoordinator(id){try{toast('正在通知总指挥…');await api('/api/task/coordinator',{method:'POST',body:JSON.stringify({task_id:id})});toast('总指挥已处理/接收')}catch(e){toast(e.message,true)}}async function createCandidate(){if(!confirm('创建/更新工作流候选分支？不会直接合入 main。'))return;try{toast('正在构建候选分支…');const d=await api('/api/workflow/candidate',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId})});await loadWorkflow(state.workflowId);toast('候选分支：'+d.candidate_branch)}catch(e){toast(e.message,true)}}async function advanceStage(){if(!confirm('让总指挥检查门禁并尝试进入下一阶段？'))return;try{toast('正在请求阶段推进…');await api('/api/workflow/advance',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId})});toast('阶段推进请求已完成')}catch(e){toast(e.message,true)}}async function showLogs(){try{const d=await api('/api/logs?kind=controller');openModal('控制器日志',`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}async function bindSlotPrompt(p){const a=prompt('绑定执行者','auto');if(!a)return;try{await api('/api/slot/bind',{method:'POST',body:JSON.stringify({pane_id:p,agent:a})});await loadProject(state.projectId,false);toast('工位已绑定 '+a)}catch(e){toast(e.message,true)}}setInterval(()=>{if(!document.hidden)refreshAll()},600000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshAll()});(function(){const v=loadViewState();if(!v)return;state.opsMode=!!v.opsMode;state.spaceId=v.spaceId||null;state.workflowId=v.workflowId||null})();async function initFromUrlOrState(){const p=new URLSearchParams(window.location.search);let qWf=p.get('workflow_id');const qTask=p.get('task_id'),qPane=p.get('pane_id'),qOps=p.get('ops');if(!qWf&&qTask){try{const td=await api('/api/task?id='+encodeURIComponent(qTask));if(td&&td.task&&td.task.workflow_id)qWf=td.task.workflow_id}catch(e){}}if(!qWf&&!qTask&&!qPane&&!qOps){state.opsMode?showOpsCenter():refreshAll();return}if(qOps==='1'||qOps==='true')state.opsMode=true;if(qWf){state.opsMode=false;state.workflowId=qWf;try{const d=await api('/api/workflow?id='+encodeURIComponent(qWf));if(d&&d.project){if(d.project.project_id)state.projectId=d.project.project_id;if(d.project.workspace_id)state.spaceId=d.project.workspace_id}}catch(e){}}if(state.opsMode){await showOpsCenter()}else{await refreshAll();if(qWf&&state.workflowId!==qWf){try{await loadWorkflow(qWf)}catch(e){}}if(qTask){const el=document.querySelector(`[data-task-id="${CSS.escape?CSS.escape(qTask):qTask}"]`);if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.add('task-highlight')}await showTask(qTask)}else if(qPane){await showPane(qPane)}}}initFromUrlOrState();
+function showAgentOverride(){if(!state.workflowId)return toast('当前没有工作流',true);const cur=state.workflow.agent_override||'auto';openModal('指定后续任务执行者',`<div class="form"><label for="overrideAgent">执行者策略</label><select id="overrideAgent">${['auto','opencode','codex','claude','qodercli','agy','pi'].map(a=>`<option ${a===cur?'selected':''}>${a}</option>`).join('')}</select><button class="btn primary" onclick="saveAgentOverride()">保存</button><div class="muted">只影响后续新建任务。</div></div>`)}async function saveAgentOverride(){try{await api('/api/workflow/agent',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,agent:document.getElementById('overrideAgent').value})});closeModal();await loadWorkflow(state.workflowId);toast('执行者策略已更新')}catch(e){toast(e.message,true)}}async function showTask(id){try{const d=await api('/api/task?id='+encodeURIComponent(id));openModal(id,`<pre>${esc(JSON.stringify(d,null,2))}</pre>`)}catch(e){toast(e.message,true)}}async function showPane(id){if(!id)return toast('没有工位',true);try{const d=await api('/api/pane/read?id='+encodeURIComponent(id));openModal('工位 '+id,`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}async function askCoordinator(id){try{toast('正在通知总指挥…');await api('/api/task/coordinator',{method:'POST',body:JSON.stringify({task_id:id})});toast('总指挥已处理/接收')}catch(e){toast(e.message,true)}}
+async function createCandidate(){
+  showConfirmModal({
+    title:'创建工作流候选分支',
+    message:'确定要创建/更新工作流候选分支吗？此操作将汇总实现阶段已通过验收的交付代码，但绝不会直接合入 main。',
+    confirmText:'开始构建',
+    onConfirm:async()=>{
+      try{
+        toast('正在构建候选分支…');
+        const d=await api('/api/workflow/candidate',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId})});
+        await loadWorkflow(state.workflowId);
+        toast('候选分支：'+d.candidate_branch);
+      }catch(e){toast(e.message,true)}
+    }
+  });
+}
+async function advanceStage(){
+  showConfirmModal({
+    title:'进入下一阶段',
+    message:'让总指挥检查当前阶段门禁并尝试推进至下一阶段？',
+    confirmText:'确认推进',
+    onConfirm:async()=>{
+      try{
+        toast('正在请求阶段推进…');
+        await api('/api/workflow/advance',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId})});
+        toast('阶段推进请求已完成');
+      }catch(e){toast(e.message,true)}
+    }
+  });
+}
+async function showLogs(){try{const d=await api('/api/logs?kind=controller');openModal('控制器日志',`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}
+async function bindSlotPrompt(p){
+  showPromptModal({
+    title:'绑定智能体工位',
+    label:'执行者名称（如 auto、claude、codex、opencode 等）',
+    defaultValue:'auto',
+    confirmText:'确认绑定',
+    onConfirm:async(a)=>{
+      if(!a)return;
+      try{
+        await api('/api/slot/bind',{method:'POST',body:JSON.stringify({pane_id:p,agent:a})});
+        await loadProject(state.projectId,false);
+        toast('工位已绑定 '+a);
+      }catch(e){toast(e.message,true)}
+    }
+  });
+}
+setInterval(()=>{if(!document.hidden)refreshAll()},600000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshAll()});(function(){const v=loadViewState();if(!v)return;state.opsMode=!!v.opsMode;state.spaceId=v.spaceId||null;state.workflowId=v.workflowId||null})();async function initFromUrlOrState(){const p=new URLSearchParams(window.location.search);let qWf=p.get('workflow_id');const qTask=p.get('task_id'),qPane=p.get('pane_id'),qOps=p.get('ops');if(!qWf&&qTask){try{const td=await api('/api/task?id='+encodeURIComponent(qTask));if(td&&td.task&&td.task.workflow_id)qWf=td.task.workflow_id}catch(e){}}if(!qWf&&!qTask&&!qPane&&!qOps){state.opsMode?showOpsCenter():refreshAll();return}if(qOps==='1'||qOps==='true')state.opsMode=true;if(qWf){state.opsMode=false;state.workflowId=qWf;try{const d=await api('/api/workflow?id='+encodeURIComponent(qWf));if(d&&d.project){if(d.project.project_id)state.projectId=d.project.project_id;if(d.project.workspace_id)state.spaceId=d.project.workspace_id}}catch(e){}}if(state.opsMode){await showOpsCenter()}else{await refreshAll();if(qWf&&state.workflowId!==qWf){try{await loadWorkflow(qWf)}catch(e){}}if(qTask){const el=document.querySelector(`[data-task-id="${CSS.escape?CSS.escape(qTask):qTask}"]`);if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.add('task-highlight')}await showTask(qTask)}else if(qPane){await showPane(qPane)}}}initFromUrlOrState();
 </script></body></html>'''
 HTML=HTML_TEMPLATE.replace('__PRODUCT_NAME__',PRODUCT_NAME).replace('__PRODUCT_TAGLINE__',PRODUCT_TAGLINE)
 
