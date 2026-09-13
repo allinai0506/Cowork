@@ -449,3 +449,55 @@ pytest tests/test_console_run_job.py tests/test_console_templates.py \
 ```
 
 决策全记录：`docs/walkthroughs/20260913-console-grid-alignment.md`。
+
+## 11. Qoder 身份漂移第三幕：修复在 repo，病灶在外部工具层（herdr 集成装错产品目录）
+
+### 问题背景
+
+用户报告"agent 中的 qoder 不对，正确的是 qodercn，已经改过两次还没好"。
+前两次修复（§6 commit 7d6dc5a、§8 commit 00d52ba）都在 repo 内收敛
+qodercli→qodercn 的二进制映射（preflight/console 探测层），但 Qoder 系 agent
+的会话上报从未成功过——`herdr agent list` 里 qodercli 条目始终没有
+`agent_session`（claude/codex/opencode 都有）。全局排查发现病灶在 repo 之外：
+homebrew `herdr` 工具（terminal workspace manager）的
+`herdr integration install qodercli` 把 SessionStart 钩子硬编码装进**国际版
+Qoder 产品目录** `~/.qoder`（其二进制 strings 仅含 `.qoder`，无 `.qoder-cn`），
+而实际运行的是 Qoder CN CLI（`~/.local/bin/qoderclicn`，配置目录
+`~/.qoder-cn`），读不到该钩子 → 上报链路自安装起就是断的。
+本机并存两个不同产品：国际版 Qoder（`~/.qoder`，CLI 名 `qoder`）与 Qoder CN
+（`~/.qoder-cn`，官方命令 `qodercn`，实际二进制 `qoderclicn-1.1.51`）；
+`~/.local/bin/qodercli` 是人造 symlink 指回 CN entry。
+
+### 经验教训
+
+| 教训 | 说明 |
+|------|------|
+| 修复必须覆盖"真正执行的那一层" | repo 的 `herdr/agent_binary.py` 只管探测；拉起进程的是外部 herdr 工具内置 kind 表，会话上报靠 CLI 产品目录里的钩子。只改 repo 永远碰不到病灶 |
+| 工具层别名把两个不同产品并成一个 | herdr 检测 manifest `aliases=["qoderclicn","qoder","qodercn"]` 把国际版 qoder 混为同一 agent；安装器硬编码 `~/.qoder`。产品级区分必须在工具层显式纠正（本地 manifest 覆盖） |
+| CLI 钩子有"目录信任"门禁 | QoderCN CLI 对钩子报 `Security: Blocked execution of hook (user) in untrusted folder`：cwd 不在 `permissions.trustDirectories`（默认 `["/Users/user"]`）内则 SessionStart 钩子一律不执行。在 /tmp 里验证必然假阴性；工厂克隆目录天然受信任 |
+
+### 操作规范
+
+1. 排查 agent 身份类问题按五层取证：repo 映射（`herdr/agent_binary.py`）→
+   运行时状态（`~/.herdr-controller/*.json`）→ 拉起层（herdr 工具 kind/检测
+   manifest）→ CLI 产品配置（`~/.qoder` vs `~/.qoder-cn`）→ 实际进程
+   （`ps aux` + `ps eww` 看配置目录 env）。
+2. QoderCN 的 herdr 集成以 `~/.qoder-cn` 为准；任何人再跑
+   `herdr integration install qodercli` 会装回 `~/.qoder`，必须重做迁移
+   （步骤见 walkthrough）。
+3. 验证钩子必须在受信任目录内起真实 agent（`--cwd ~/herdr` 或
+   `~/.herdr-controller/clones/*`），以
+   `herdr agent list` 中 `agent_session.source=="herdr:qodercli"` 为准。
+4. 检测别名收敛用本地覆盖 `~/.config/herdr/agent-detection/qodercli.toml`
+   （local 永远 shadow remote；remote manifest 更新后需人工同步别名修正）。
+
+### 验证命令 / 证据
+
+```bash
+herdr server agent-manifests   # qodercli: source_kind="local override", local_override_shadowing_remote=true
+herdr agent explain wA:p2A     # manifest: /Users/user/.config/herdr/agent-detection/qodercli.toml
+herdr agent list               # 修复后 qodercli 首次出现 agent_session（source=herdr:qodercli）
+grep "herdr-agent-state" ~/.qoder-cn/logs/runs/<run>/qodercli.log  # hook.started 记录
+```
+
+决策全记录：`docs/walkthroughs/20260913-qodercn-agent-identity-fix.md`。
