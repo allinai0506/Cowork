@@ -450,7 +450,6 @@ def list_checkpoints(workflow_id: str) -> List[Dict[str, Any]]:
 
     # 1. Fetch from SQLite V2 store
     try:
-        state_db.init_db()
         db_cps = state_db.list_checkpoints(workflow_id)
         for c in db_cps:
             by_id[c["checkpoint_id"]] = c
@@ -487,7 +486,6 @@ def get_checkpoint(workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
     """Retrieve full snapshot payload for a checkpoint from SQLite or JSON."""
     # Try SQLite first
     try:
-        state_db.init_db()
         return state_db.get_checkpoint(workflow_id, checkpoint_id)
     except Exception:
         pass
@@ -529,7 +527,6 @@ def restore_checkpoint(workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
 
     # 3. Restore in SQLite state_db
     try:
-        state_db.init_db()
         state_db.restore_checkpoint(workflow_id, checkpoint_id)
     except Exception:
         pass
@@ -564,79 +561,92 @@ def fork_workflow_from_checkpoint(
     new_title: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Time-travel branching: Fork a new workflow instance from a historical checkpoint across JSON & SQLite."""
-    # 1. Locate checkpoint snapshot
-    snapshot = None
+    # 1. Primary path: Fork directly via SQLite state_db
     try:
-        state_db.init_db()
-        # Find workflow_id for this checkpoint from DB
-        conn = state_db.get_db_connection()
-        try:
-            cur = conn.execute("SELECT workflow_id FROM checkpoints WHERE checkpoint_id = ?", (checkpoint_id,))
-            row = cur.fetchone()
-            if row:
-                snapshot = state_db.get_checkpoint(row["workflow_id"], checkpoint_id)
-        finally:
-            conn.close()
+        res = state_db.fork_workflow_from_checkpoint(
+            checkpoint_id=checkpoint_id,
+            new_workflow_id=new_workflow_id,
+            new_title=new_title,
+        )
+        # Sync the forked workflow & tasks to workflows.json and tasks.json
+        forked_wf = state_db.get_workflow(new_workflow_id)
+        if forked_wf:
+            wf_data = load_workflows_data()
+            wf_data.setdefault("workflows", {})[new_workflow_id] = forked_wf
+            save_workflows_data(wf_data)
+
+        forked_tasks = state_db.get_tasks(new_workflow_id)
+        if forked_tasks:
+            tasks_data = load_tasks_data()
+            tasks_data.setdefault("tasks", []).extend(forked_tasks)
+            save_tasks_data(tasks_data)
+
+        return res
+    except FileNotFoundError:
+        pass
     except Exception:
         pass
 
-    if not snapshot:
-        # Search JSON directory
-        matches = list(get_checkpoints_dir().glob(f"*/{checkpoint_id}.json"))
-        if not matches:
-            raise FileNotFoundError(f"Source checkpoint '{checkpoint_id}' not found")
-        with open(matches[0], "r", encoding="utf-8") as f:
-            snapshot = json.load(f)
+    # 2. Fallback path: locate legacy JSON checkpoint file
+    matches = list(get_checkpoints_dir().glob(f"*/{checkpoint_id}.json"))
+    if not matches:
+        raise FileNotFoundError(f"Source checkpoint '{checkpoint_id}' not found")
+    with open(matches[0], "r", encoding="utf-8") as f:
+        snapshot = json.load(f)
 
     source_wf = snapshot.get("workflow", {})
     source_tasks = snapshot.get("tasks", [])
-    now = time.time()
 
-    forked_wf = dict(source_wf)
-    forked_wf["workflow_id"] = new_workflow_id
-    forked_wf["title"] = new_title or f"{source_wf.get('title', 'Workflow')} (Forked from {checkpoint_id[:12]})"
-    forked_wf["created_at"] = now
-    forked_wf["updated_at"] = now
-    forked_wf["forked_from"] = {
-        "source_workflow_id": snapshot.get("workflow_id"),
-        "source_checkpoint_id": checkpoint_id,
-        "forked_at": now,
-    }
-
-    # Clone tasks
-    forked_tasks = []
-    for t in source_tasks:
-        t_clone = dict(t)
-        orig_tid = t.get("task_id", "")
-        t_clone["task_id"] = f"{orig_tid}-fork-{uuid.uuid4().hex[:6]}"
-        t_clone["workflow_id"] = new_workflow_id
-        t_clone["created_at"] = now
-        forked_tasks.append(t_clone)
-
-    # 2. Persist to workflows.json & tasks.json
-    wf_data = load_workflows_data()
-    wf_data.setdefault("workflows", {})[new_workflow_id] = forked_wf
-    save_workflows_data(wf_data)
-
-    tasks_data = load_tasks_data()
-    tasks_data.setdefault("tasks", []).extend(forked_tasks)
-    save_tasks_data(tasks_data)
-
-    # 3. Persist to SQLite state_db
+    # Seed snapshot into state_db and delegate fork
     try:
-        state_db.init_db()
-        state_db.save_workflow(forked_wf)
-        for t in forked_tasks:
+        if source_wf:
+            state_db.save_workflow(source_wf)
+        for t in source_tasks:
             state_db.save_task(t)
+        state_db.create_checkpoint(
+            workflow_id=snapshot.get("workflow_id", ""),
+            checkpoint_id=checkpoint_id,
+            tag=snapshot.get("tag"),
+            parent_checkpoint_id=snapshot.get("parent_checkpoint_id"),
+        )
+        return fork_workflow_from_checkpoint(checkpoint_id, new_workflow_id, new_title)
     except Exception:
-        pass
+        # Ultimate standalone JSON fallback
+        now = time.time()
+        forked_wf = dict(source_wf)
+        forked_wf["workflow_id"] = new_workflow_id
+        forked_wf["title"] = new_title or f"{source_wf.get('title', 'Workflow')} (Forked from {checkpoint_id[:12]})"
+        forked_wf["created_at"] = now
+        forked_wf["updated_at"] = now
+        forked_wf["forked_from"] = {
+            "source_workflow_id": snapshot.get("workflow_id"),
+            "source_checkpoint_id": checkpoint_id,
+            "forked_at": now,
+        }
+        forked_tasks = []
+        for t in source_tasks:
+            t_clone = dict(t)
+            orig_tid = t.get("task_id", "")
+            t_clone["task_id"] = f"{orig_tid}-fork-{uuid.uuid4().hex[:6]}"
+            t_clone["workflow_id"] = new_workflow_id
+            t_clone["created_at"] = now
+            forked_tasks.append(t_clone)
 
-    return {
-        "ok": True,
-        "new_workflow_id": new_workflow_id,
-        "new_title": forked_wf["title"],
-        "source_checkpoint_id": checkpoint_id,
-        "source_workflow_id": snapshot.get("workflow_id"),
-        "cloned_tasks": len(forked_tasks),
-    }
+        wf_data = load_workflows_data()
+        wf_data.setdefault("workflows", {})[new_workflow_id] = forked_wf
+        save_workflows_data(wf_data)
+
+        tasks_data = load_tasks_data()
+        tasks_data.setdefault("tasks", []).extend(forked_tasks)
+        save_tasks_data(tasks_data)
+
+        return {
+            "ok": True,
+            "new_workflow_id": new_workflow_id,
+            "new_title": forked_wf["title"],
+            "source_checkpoint_id": checkpoint_id,
+            "source_workflow_id": snapshot.get("workflow_id"),
+            "cloned_tasks": len(forked_tasks),
+        }
+
 

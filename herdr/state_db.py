@@ -39,6 +39,84 @@ def get_default_db_path() -> Path:
 
 
 
+_INITIALIZED_DBS: set = set()
+
+
+def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
+    """Execute table and index creation DDL once per database path."""
+    if path_key in _INITIALIZED_DBS:
+        return
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS workflows (
+            workflow_id TEXT PRIMARY KEY,
+            title TEXT,
+            status TEXT,
+            template_name TEXT,
+            current_stage TEXT,
+            config_json TEXT,
+            metadata_json TEXT,
+            created_at REAL,
+            updated_at REAL
+        );
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            task_id TEXT PRIMARY KEY,
+            workflow_id TEXT,
+            node TEXT,
+            stage TEXT,
+            agent TEXT,
+            status TEXT,
+            stage_verdict TEXT,
+            stage_verdict_note TEXT,
+            pane_id TEXT,
+            goal TEXT,
+            blocker TEXT,
+            payload_json TEXT,
+            created_at REAL,
+            updated_at REAL,
+            FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE
+        );
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS checkpoints (
+            checkpoint_id TEXT PRIMARY KEY,
+            workflow_id TEXT,
+            tag TEXT,
+            parent_checkpoint_id TEXT,
+            created_at REAL,
+            workflow_status TEXT,
+            task_count INTEGER,
+            snapshot_json TEXT,
+            metadata_json TEXT,
+            FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE
+        );
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workflow_id TEXT,
+            task_id TEXT,
+            event_type TEXT,
+            payload_json TEXT,
+            timestamp REAL
+        );
+    """)
+
+    # Indexes for fast lookup and DAG queries
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_wf ON tasks(workflow_id);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_wf_created ON checkpoints(workflow_id, created_at DESC);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_checkpoint_id);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_wf ON events(workflow_id, timestamp);")
+
+    _INITIALIZED_DBS.add(path_key)
+
+
 def get_db_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """Create a thread-safe connection to the SQLite state database with WAL mode."""
     path = db_path or get_default_db_path()
@@ -57,85 +135,20 @@ def get_db_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
-    
+
+    _ensure_schema(conn, str(path.resolve()))
     return conn
 
 
 def init_db(db_path: Optional[Path] = None) -> Path:
     """Initialize database tables and indexes if they do not exist."""
     path = db_path or get_default_db_path()
+    # Force initialization even if cached
+    _INITIALIZED_DBS.discard(str(path.resolve()))
     conn = get_db_connection(path)
-    try:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS workflows (
-                workflow_id TEXT PRIMARY KEY,
-                title TEXT,
-                status TEXT,
-                template_name TEXT,
-                current_stage TEXT,
-                config_json TEXT,
-                metadata_json TEXT,
-                created_at REAL,
-                updated_at REAL
-            );
-        """)
+    conn.close()
+    return path
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS tasks (
-                task_id TEXT PRIMARY KEY,
-                workflow_id TEXT,
-                node TEXT,
-                stage TEXT,
-                agent TEXT,
-                status TEXT,
-                stage_verdict TEXT,
-                stage_verdict_note TEXT,
-                pane_id TEXT,
-                goal TEXT,
-                blocker TEXT,
-                payload_json TEXT,
-                created_at REAL,
-                updated_at REAL,
-                FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE
-            );
-        """)
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS checkpoints (
-                checkpoint_id TEXT PRIMARY KEY,
-                workflow_id TEXT,
-                tag TEXT,
-                parent_checkpoint_id TEXT,
-                created_at REAL,
-                workflow_status TEXT,
-                task_count INTEGER,
-                snapshot_json TEXT,
-                metadata_json TEXT,
-                FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id) ON DELETE CASCADE
-            );
-        """)
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                workflow_id TEXT,
-                task_id TEXT,
-                event_type TEXT,
-                payload_json TEXT,
-                timestamp REAL
-            );
-        """)
-
-        # Indexes for fast lookup and DAG queries
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_wf ON tasks(workflow_id);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_wf_created ON checkpoints(workflow_id, created_at DESC);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_checkpoint_id);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_wf ON events(workflow_id, timestamp);")
-
-        return path
-    finally:
-        conn.close()
 
 
 def save_workflow(
