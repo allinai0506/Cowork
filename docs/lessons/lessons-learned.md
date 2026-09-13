@@ -699,3 +699,46 @@ herdr-factory project --help     # 包含 --workspace 与 --template
 herdr-factory unregister --help  # 包含 --project, --close-workspace, --force
 ```
 
+---
+
+## 17. 全生命周期状态机完备性与防抖解耦陷阱（严禁凭瞬间 idle 抢报完成、解耦 Sentinel 强杀）
+
+### 问题背景
+
+在 `wf-herdr-0913-01` 推进至 `plan` 阶段时，连续暴露出三个危及业务稳定性的底层隐患：
+1. **Agent 推理间歇瞬间 idle 导致误报完成**：qodercli / codex 在执行长耗时推理或子进程命令时，底层 Socket 偶发 1~2 秒短暂 `idle`，Controller 毫无防备地直接把任务置为 `agent_done` 并通知总指挥验收，导致总指挥被打扰并产生误报打回；
+2. **Sentinel 强杀 Controller 截断空中长交互**：Sentinel 每次在屏幕检测到完成标记更新 tasks.json 后，粗暴调用 `launchctl kickstart -k ...herdr-controller` 强杀 Controller，若此时 Controller 正在进行 `herdr agent prompt` 长等待，会被硬生生掐断造成死锁；
+3. **状态机 TRANSITIONS 僵硬限制**：任务极速完成或返工完成后，若从 `dispatched` 或 `rework` 直接 set `agent_done`，因不在合法集合中抛出 `Invalid transition` 导致流程直接卡死；且系统缺乏任务和工作流的显式 `paused` 暂停机制。
+
+### 经验教训
+
+| 教训 | 说明 |
+|---|---|
+| 严禁单凭终端 socket 瞬间 idle 判定任务完成 | 大模型生成、网络等待、子进程编译均可能出现毫秒级/秒级无输出窗口；完成判定必须有终端显式完成标记或防抖二次确认 |
+| 跨进程状态传递严禁依赖强杀被通知方 | 守护进程间通信应基于数据落盘 + 主动巡检轮询（pull model），绝不能通过杀进程（restart）来“强行唤醒”，否则必然斩断空中长耗时交互 |
+| 状态机转移表必须覆盖全部敏捷与重做通路 | 实际业务中返工（rework）和极速完成（dispatched->agent_done）是常态，状态机必须对返工完成、遇阻解决有合法的收敛闭环 |
+| 生产级工作流引擎必须具备暂停/恢复安全开关 | 当遇到外部环境维护或人工复核时，必须提供原子 pause / resume，绝不能靠置空配置或杀进程来临时刹车 |
+
+### 操作规范
+
+1. **完成判定双重门禁**：在 `services/herdr-controller.py:handle_event` 中，当收到 `idle` 事件时，优先核查终端屏幕是否存在 `HERDR_TASK_DONE:{task_id}` 标记；若无标记，执行 2 秒防抖探测，确认 Agent 是否恢复 `working`，彻底过滤推理间歇抖动；
+2. **解除 Sentinel 强杀**：`services/herdr-sentinel.py` 扫描到完成标记后仅安全原子更新 tasks.json；由 Controller 的 `registry_watcher` 在周期扫描中主动捞取未入队的 `agent_done` 任务并推入协调器队列；
+3. **加固状态机 TRANSITIONS**：在 `bin/herdr-task` 中允许 `dispatched -> agent_done`、`rework -> agent_done`、`blocked -> agent_done`，以及 `paused -> working / rework / superseded`；
+4. **工作流与任务级暂停支持**：提供 `herdr-task pause / resume <task_id>` 与 `herdr-factory pause / resume <workflow_id>`，在 `check_workflow_stage_advance` 中拦截暂停中的工作流。
+
+### 验证命令 / 证据
+
+```bash
+# 全生命周期矩阵测试（覆盖极速完成、返工循环、暂停恢复、并行门禁、Watcher主动捞取、防抖过滤）
+pytest tests/test_workflow_lifecycle_matrix.py -v
+
+# 全仓自动化回归（234 个用例全部通过）
+pytest tests/
+
+# CLI 暂停与恢复命令验证
+bin/herdr-task pause <task_id>
+bin/herdr-task resume <task_id>
+bin/herdr-factory pause <workflow_id>
+bin/herdr-factory resume <workflow_id>
+```
+
