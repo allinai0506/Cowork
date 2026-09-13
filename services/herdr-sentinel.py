@@ -168,7 +168,7 @@ def main():
             done_marker = f"HERDR_TASK_DONE:{task_id}"
             orchestration_marker = f"HERDR_ORCH_TASK:{task_id}"
 
-            if done_marker in screen:
+            if status in {"dispatched", "working"} and done_marker in screen:
                 changes[task_id] = (
                     "agent_done",
                     "completion_sentinel",

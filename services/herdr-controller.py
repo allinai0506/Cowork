@@ -1015,8 +1015,9 @@ Agent 本轮执行已经结束。
 
 1. 使用 Herdr 读取 {task['pane_id']} 的最终输出。
 
-2. 必须执行：
+2. 必须执行基线验证与量化指标核验：
    ~/herdr/bin/herdr-task verify-baseline {task_id}
+   ~/herdr/bin/herdr-task verify-metrics {task_id} --if-present
 
 3. `verify-baseline` 是判断当前 Task 文件变化的唯一事实来源：
 
@@ -1026,44 +1027,28 @@ Agent 本轮执行已经结束。
    - `TASK_CHANGED`
      后面列出的文件，才是当前 Task 真正产生的变化。
 
-4. 禁止使用普通 `git status` 判断“Agent 是否修改了文件”，
-   因为 CoW Clone 会继承 Task 创建前已经存在的工作区修改。
+4. 验收决策指引（严禁混淆）：
 
-5. 如果验收标准要求“不得修改任何文件”，必须得到：
-   `BASELINE_MATCH`
+   A. 验收通过（所有标准满足、测试绿灯）：
+      ~/herdr/bin/herdr-task set {task_id} completed --verdict pass
 
-6. 如果任务允许修改代码，只检查 `TASK_CHANGED` 中列出的变化
-   是否符合当前 Task 的目标和范围。
+   B. 发现代码缺陷需回炉（特别是 test / review 阶段查出问题）：
+      **严禁对评审/测试任务执行 set rework！**
+      必须以 blocked 结论闭环，Controller 会自动触发跨阶段回流并作废受影响链条：
+      ~/herdr/bin/herdr-task set {task_id} completed --verdict blocked --note "<blocker 清单与修复指引>"
 
-7. 根据任务目标和验收标准逐项验证。
+   C. 仅当当前任务自身未完成（如实现中途卡死、需在同一工位继续补全）：
+      ~/herdr/bin/herdr-task set {task_id} rework
+      然后使用 herdr agent prompt 继续下发指令。
 
-8. Agent done 不等于 Task completed。
-
-如果验收通过：
-
-~/herdr/bin/herdr-task set {task_id} completed --verdict pass
-
-如果质量门结论为不通过(评审不通过、验收标准未达成等),
-禁止伪造成 pass,必须如实落盘 blocker 清单:
-
-~/herdr/bin/herdr-task set {task_id} completed --verdict blocked --note "<blocker 清单与修复指引>"
-
-如果需要返工：
-
-~/herdr/bin/herdr-task set {task_id} rework
-
-然后立即重新派发明确的返工任务。
-
-如果任务无法恢复：
-
-~/herdr/bin/herdr-task set {task_id} failed
+   D. 如果任务发生不可恢复的崩溃：
+      ~/herdr/bin/herdr-task set {task_id} failed
 
 阶段推进前必须执行：
 
 ~/herdr/bin/herdr-task list --workflow-id {workflow_id}
 
 只能检查当前 workflow_id 下的任务。
-
 禁止使用其他 Workflow 或历史 Task 判断当前阶段门禁。
 
 只有当前 Workflow 当前阶段所有必要 Task 都 completed，
