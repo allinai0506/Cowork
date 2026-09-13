@@ -202,7 +202,7 @@ class TestTemplateLibraryUI(unittest.TestCase):
 
 
 class TestTermTranslation(unittest.TestCase):
-    """用户确认的术语映射：Tab=工作流节点、Pane=智能体工位、Agent=执行者、Task=任务。"""
+    """用户确认的术语映射：Tab=工作流节点、Pane=智能体工位、Agent=执行者、Task=任务、Workspace=项目空间、Workflow=工作流。"""
 
     @classmethod
     def setUpClass(cls):
@@ -218,12 +218,16 @@ class TestTermTranslation(unittest.TestCase):
             ">指定执行者<",
             "个工作流节点 · ",
             "个智能体工位",
-            "Workflow / 工作流节点<",
+            "工作流 / 阶段节点<",
+            "<span>项目空间</span>",
+            "<span>活跃工作流</span>",
+            ">启动工作流<",
+            "<label>工作流</label>",
         ):
             self.assertIn(snippet, self.html, f"missing translation: {snippet}")
 
     def test_english_terms_are_gone_from_visible_copy(self):
-        for term in ("Agent ", "Task ", "Pane ", "Tab "):
+        for term in ("Agent ", "Task ", "Pane ", "Tab ", "Herdr 空间", "活跃 Workflow"):
             self.assertNotIn(term, self.html, f"untranslated term remains: {term!r}")
 
 
