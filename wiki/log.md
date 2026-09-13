@@ -298,6 +298,14 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 严禁在主干工作区直接开发，严禁随意复用他人或遗留的功能分支。
 - **验收清单同步 (`CLAUDE.md`)**：在严格验收清单顶部新增「远端同步与 CoW 沙盒合规」前置门禁。
 
+## [2026-09-13] docs | Upgraded Project Standard Workflow to /unified-dev-flow (S0–S8)
+- **废除旧四阶段作业法，全面拥抱 `/unified-dev-flow` 统一研发流程**：
+  - 在 [`RULES.md`](file:///Users/user/herdr/RULES.md) §1 正式确立策略驱动的 S0–S8 全生命周期研发规范；
+  - 明确九大核心不变量（断点优先、读懂再写、意图定基线、复杂度定规划、风险度定质检、单一控制权、改动即失效、无铁证不宣称完成、交付不越权）；
+  - 强化 S0 启动前置门禁：远端代码拉取同步与 CoW (Copy-on-Write) 沙盒隔离建支（一等公民准则）；
+  - 规范 S6 审查修复闭环（S6 ➔ S4 ➔ S5 ➔ S6，3 轮熔断机制）与 S8 知识沉淀机制。
+- **同步验收门禁 (`CLAUDE.md`)**：在严格验收清单顶部加入 `统一研发流程合规 (Unified Dev Flow)` 门禁。
+
 
 
 
