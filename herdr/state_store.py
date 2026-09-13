@@ -217,7 +217,7 @@ class SQLiteStateStore(StateStore):
     def __init__(
         self,
         db_path: Optional[Path] = None,
-        auto_migrate_json: bool = True,
+        auto_migrate_json: bool = False,
     ) -> None:
         self.db_path = Path(db_path) if db_path else state_db.get_default_db_path()
         state_db.init_db(self.db_path)

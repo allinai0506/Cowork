@@ -933,7 +933,7 @@ def check_workflow_stage_advance(workflow_id):
 def active_registered_workflows():
     workflows = set()
     try:
-        store = get_state_store()
+        store = _get_store()
         for wf in store.list_workflows():
             wid = wf.get("workflow_id")
             if wid and wf.get("status") != "completed":
