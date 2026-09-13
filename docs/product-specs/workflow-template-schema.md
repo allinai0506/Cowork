@@ -32,6 +32,14 @@
 | `required_outputs` | `List[string]`| 否 | `[]` | 该节点验收时必须存在的产出文件路径清单。 |
 | `rules` | `List[string]`| 否 | `[]` | 该节点执行过程必须强制遵循的业务/工程规则。 |
 
+### rules 字段中的技能引用
+
+当 `rules` 中包含对特定技能的引用时（如 `必须使用 six-step-finish 技能`），
+该技能必须在仓库内 `.agents/skills/<skill-name>/` 目录下存在（vendored），
+或提供绝对路径作为兜底。规则文本中引用的 base_branch 由 Agent 从
+stage advance 事件头部的 `base_branch` 字段获取，controller 对 rules
+做逐字 join，不做占位符渲染。
+
 ---
 
 ## 3. AgentPolicy (节点级 Agent 策略) Schema

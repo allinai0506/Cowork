@@ -1667,6 +1667,18 @@ def dispatch_task(task_id, prompt):
 
     print(f"Task dispatched: {task_id} -> {pane_id}")
 
+
+INTERNAL_UNTRACKED_EXACT = {".agent-task-context", ".herdr-loop"}
+INTERNAL_UNTRACKED_PREFIXES = (".herdr-loop/",)
+
+
+def _is_internal_untracked(path):
+    if path in INTERNAL_UNTRACKED_EXACT:
+        return True
+
+    return path.startswith(INTERNAL_UNTRACKED_PREFIXES)
+
+
 def fingerprint_file(repo, relpath):
     path = Path(repo) / relpath
 
@@ -1744,7 +1756,7 @@ def current_workspace_fingerprint(repo):
     untracked_paths = [
         item
         for item in untracked_result.stdout.split("\0")
-        if item and item != ".agent-task-context"
+        if item and not _is_internal_untracked(item)
     ]
 
     return {
@@ -1943,9 +1955,11 @@ def commit_task(task_id, message=None):
         if item
     }
 
-    # 只允许提交 Task 新产生的 untracked
+    # 只允许提交 Task 新产生的 untracked（内部控制文件不属于业务交付）
     task_untracked = sorted(
-        current_untracked - baseline_untracked
+        item
+        for item in current_untracked - baseline_untracked
+        if not _is_internal_untracked(item)
     )
 
     # tracked 文件在 Task 创建前要求 clean，
@@ -2829,6 +2843,8 @@ def close_workflow(
             "include_coordinator": include_coordinator,
         }
 
+    base_branch = (entry or {}).get("base_branch") or "main"
+
     blocked_verdicts = [
         t["task_id"] for t in tasks
         if t.get("status") != "superseded"
@@ -2945,8 +2961,14 @@ def close_workflow(
         print(
             "  [COORDINATOR KEPT] "
             f"pane={coordinator_pane or 'unknown'} — "
-            "完成知识沉淀并合并 PR 后,运行 "
-            f"herdr-task close-workflow {workflow_id} --include-coordinator"
+            "完成知识沉淀并合并 PR 后，请按以下步骤收尾：\n"
+            "    1. 运行 six-step-finish 技能执行破坏性收尾步骤（步骤 3 最终确认 + 步骤 4-6）：\n"
+            f"       bash .agents/skills/six-step-finish/scripts/finish-task.sh "
+            f"<任务分支> --base {base_branch} --forge none\n"
+            "       （<任务分支> 替换为已合入的任务分支名；存在多个已合入分支时分别对每个分支执行）\n"
+            "       （绝对兜底：~/.agents/skills/six-step-finish/scripts/finish-task.sh）\n"
+            "    2. 确认收尾完成后，运行：\n"
+            f"       herdr-task close-workflow {workflow_id} --include-coordinator"
         )
 
     if dry_run:
