@@ -408,3 +408,44 @@ herdr-task close-workflow wf-nexusarchive-54433229-20260912-232500
 wA 现场 24 pane/7 tab → 1 pane(总指挥)/1 tab;controller 自动收尾使
 9/9 历史 workflow 到达 `completed`。决策全记录:
 `docs/walkthroughs/20260913-workflow-finalize.md`。
+
+---
+
+## 10. 内嵌单行前端资源的三类暗雷：字号/圆角与间距同值、测试字符串锁、属性级正才可盲改
+
+### 问题背景
+
+Console 前端全部内嵌在 `console/herdr_factory_console.py` 的两个单行字符串里
+（L447 CSS、L448 HTML/JS）。2026-09-13 按 snapping-ui-to-grid 技能做全量间距
+白名单治理（36 处裸值）时暴露：盲替换 `14px→16px` 会误伤 `font-size:14px`；
+`padding`/`gap`/`margin` 各自上下文不同值不同，同值替换会跨语义；同时
+`tests/test_console_run_job.py` 等用 `assertIn` 把 JS 关键子串
+（如 `state.opsMode?'← 返回工厂':'进入运维驾驶舱'`）钉死在源码上。
+
+### 经验教训
+
+| 教训 | 说明 |
+|------|------|
+| 单行 CSS 里同数值不同语义 | `14px` 同时是 padding 与 font-size；替换必须以"属性名+选择器"为锚，不能以数值为锚 |
+| 测试断言是隐性 API | 源码字符串被 pytest `assertIn` 锁定的部分等价于对外契约，改前先 grep tests/ |
+| 纪律门禁要可执行 | "间距只用 4/8/16/24/32"这类规范必须配直方图脚本/grep，否则必然回潮 |
+
+### 操作规范
+
+1. 改内嵌前端资源前先跑 `grep -n 'assertIn' tests/test_console_*.py` 列出字符串锁；
+2. 数值替换一律用属性级锚定（含前后选择器片段），改完跑属性级直方图复核：
+   `python3 -c` 提取 `(padding|margin|gap)(-[a-z]+)?:` 捕获组统计 px 值；
+3. UI 规范类约定同步落到可执行 grep（技能自带命令或等价脚本），收尾必跑。
+
+### 验证命令 / 证据
+
+```bash
+grep -n 'assertIn' tests/test_console_*.py
+sed -n '447p' console/herdr_factory_console.py | \
+  grep -E '(padding|margin|gap)[^:;}]*:[^;}]*[^0-9.](5|6|7|9|11|13|14)px'  # 期望零命中
+pytest tests/test_console_run_job.py tests/test_console_templates.py \
+  tests/test_console_view_state.py tests/test_console_agent_roster.py \
+  tests/test_console_stage_summary.py   # 48 passed
+```
+
+决策全记录：`docs/walkthroughs/20260913-console-grid-alignment.md`。
