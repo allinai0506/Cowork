@@ -36,7 +36,8 @@ def get_default_db_path() -> Path:
     if os.environ.get("WORKFLOWS_FILE"):
         return Path(os.environ["WORKFLOWS_FILE"]).parent / "state.db"
     if os.environ.get("TASKS_FILE"):
-        return Path(os.environ["TASKS_FILE"]).parent / "state.db"
+        p = Path(os.environ["TASKS_FILE"])
+        return p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
     return CONTROLLER_DIR / "state.db"
 
 
@@ -320,9 +321,9 @@ def save_task(
         should_close = True
 
     tid = task_dict.get("task_id")
-    wid = task_dict.get("workflow_id")
-    if not tid or not wid:
-        raise ValueError("task_id and workflow_id are required")
+    if not tid:
+        raise ValueError("task_id is required")
+    wid = task_dict.get("workflow_id") or "default"
 
     # Auto-ensure parent workflow exists to prevent foreign key violation
     cur_wf = conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (wid,))
@@ -339,11 +340,11 @@ def save_task(
     pane_id = task_dict.get("pane_id", "")
     goal = task_dict.get("goal", "")
     blocker = task_dict.get("blocker", "")
-    created_at = float(task_dict.get("started_at") or task_dict.get("created_at") or now)
+    created_at = float(task_dict.get("created_at") or task_dict.get("started_at") or now)
 
     payload = {k: v for k, v in task_dict.items() if k not in {
         "task_id", "workflow_id", "node", "stage", "agent", "status",
-        "stage_verdict", "stage_verdict_note", "pane_id", "goal", "blocker", "created_at", "started_at"
+        "stage_verdict", "stage_verdict_note", "pane_id", "goal", "blocker", "created_at"
     }}
     payload_json = json.dumps(payload, ensure_ascii=False)
 

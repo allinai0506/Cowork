@@ -320,10 +320,15 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 废除业务内部直接 `open("tasks.json")` / `open("workflows.json")` / `open("steering.json")`；
   - 所有控制原语（pause/resume/force_pass/rollback/step/checkpoint/fork）和干预原语（queue_steer/dispatch/halt）统一通过 `StateStore` 操作；
   - `load_*_data` 与 `save_*_data` 转化为基于 `StateStore` 的向后兼容读写适配器，且写操作联动同步兼容 JSON。
+- **调度器守护进程与 CLI 全量收敛 (`services/herdr-controller.py`, `bin/herdr-task`)**：
+  - `services/herdr-controller.py` 与 `bin/herdr-task` 彻底移除对 `tasks.json` / `workflows.json` 的主读写，全面接入 `_get_store()` 经由 `StateStore` 操作底层 SQLite；
+  - 彻底杜绝双向/反向同步风险：`kernel.py` 与各调用点废除 `_sync_*_from_disk_if_needed`，替换为严格单向冷导入 `_import_missing_*_from_disk`（仅在 SQLite 缺失该实体时进行冷增量导入），任何存量记录 100% 以 SQLite 为准，禁止磁盘旧文件覆盖权威数据库；
+  - `auto_migrate_json` 默认设为 `False`，避免非显式触发时全局脏数据污染隔离环境；伴生数据库推导按任务文件隔离（`p.with_suffix(".db")`），保障高并发与单元测试独立性。
 - **质量防护与工程治理**：
-  - 沉淀通用工程教训 §30（状态源统一与防裂脑）；
-  - 新增 `tests/test_state_store.py`（8 项单元与集成测试全部通过，含跨模块单事实源防漂移断言）；
-  - 全仓 339 项自动化回归测试 100% 通过。
+  - 沉淀并扩充通用工程教训 §30（状态源统一与防裂脑）；
+  - 新增并在 `tests/test_state_store.py` 中扩充测试至 10 项（新增故意篡改磁盘 JSON 无法覆盖 SQLite 权威状态测试、`herdr-task set` CLI 命令行直写 SQLite 实时验证测试）；
+  - 全仓自动化回归测试扩充至 344 项（100% 通过）。
+
 
 
 

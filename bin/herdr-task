@@ -1049,9 +1049,10 @@ def _get_store():
         return get_state_store(Path(os.environ["HERDR_STATE_DB"]))
     t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
     if t_file:
-        p = Path(t_file).parent / "state.db"
-        if p.parent.exists():
-            return get_state_store(db_path=p)
+        p = Path(t_file)
+        db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
     return get_state_store()
 
 

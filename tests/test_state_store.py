@@ -301,3 +301,192 @@ def test_cross_module_single_source_of_truth_anti_skew(store_env):
     tasks_exported = store.export_tasks_json()
     assert tasks_exported["tasks"][0]["status"] == "interrupted"
 
+
+def test_anti_split_brain_json_cannot_override_sqlite(store_env):
+    """Verify that JSON file tampering NEVER overrides authoritative SQLite state."""
+    import importlib.util
+    from herdr import kernel
+
+    store = get_state_store()
+
+    wid = "wf-anti-sb-01"
+    tid = "task-anti-sb-01"
+
+    # 1. Authoritative SQLite state: task completed, workflow completed
+    store.save_workflow({
+        "workflow_id": wid,
+        "title": "Anti Split Brain Workflow",
+        "status": "completed",
+        "config": {"nodes": [{"id": "dev"}]},
+    })
+    store.save_task({
+        "task_id": tid,
+        "workflow_id": wid,
+        "node": "dev",
+        "stage": "dev",
+        "status": "completed",
+        "stage_verdict": "pass",
+    })
+
+    # 2. Deliberately tamper with tasks.json and workflows.json on disk with stale/conflicting data
+    tampered_tasks = {
+        "tasks": [
+            {
+                "task_id": tid,
+                "workflow_id": wid,
+                "node": "dev",
+                "stage": "dev",
+                "status": "working",  # Conflicting stale status!
+                "stage_verdict": None,
+            }
+        ]
+    }
+    tampered_wfs = {
+        "workflows": {
+            wid: {
+                "workflow_id": wid,
+                "title": "Tampered Title",
+                "status": "running",  # Conflicting stale status!
+            }
+        }
+    }
+    store_env["tasks_file"].write_text(json.dumps(tampered_tasks), encoding="utf-8")
+    store_env["wf_file"].write_text(json.dumps(tampered_wfs), encoding="utf-8")
+
+    # 3. Access state via kernel: must strictly return SQLite authoritative state
+    k_tasks = kernel.load_tasks_data()
+    assert len(k_tasks["tasks"]) == 1
+    assert k_tasks["tasks"][0]["status"] == "completed"
+
+    k_wfs = kernel.load_workflows_data()
+    assert k_wfs["workflows"][wid]["status"] == "completed"
+
+    # 4. Access state via services/herdr-controller.py
+    ctrl_spec = importlib.util.spec_from_file_location("controller_mod", "services/herdr-controller.py")
+    ctrl = importlib.util.module_from_spec(ctrl_spec)
+    ctrl_spec.loader.exec_module(ctrl)
+
+    ctrl_tasks = ctrl.load_tasks()
+    assert len(ctrl_tasks) == 1
+    assert ctrl_tasks[0]["status"] == "completed"
+    ctrl_t = ctrl.get_task(tid)
+    assert ctrl_t is not None
+    assert ctrl_t["status"] == "completed"
+
+    # 5. Access state via bin/herdr-task
+    import importlib.machinery
+    loader = importlib.machinery.SourceFileLoader("herdr_task_mod", str(Path("bin/herdr-task").resolve()))
+    task_spec = importlib.util.spec_from_loader("herdr_task_mod", loader)
+    task_bin = importlib.util.module_from_spec(task_spec)
+    loader.exec_module(task_bin)
+
+    bin_tasks = task_bin.load_tasks()
+    assert bin_tasks.get("tasks", [])[0]["status"] == "completed"
+
+    # 6. Verify SQLite itself remained 100% untainted
+    fresh_task = store.get_task(tid)
+    assert fresh_task["status"] == "completed"
+    assert fresh_task["stage_verdict"] == "pass"
+
+    fresh_wf = store.get_workflow(wid)
+    assert fresh_wf["status"] == "completed"
+
+    # 7. Verify one-way cold boot import for completely new/unseeded items
+    new_tid = "task-cold-boot-99"
+    tampered_tasks["tasks"].append({
+        "task_id": new_tid,
+        "workflow_id": wid,
+        "node": "test",
+        "stage": "test",
+        "status": "pending",
+    })
+    store_env["tasks_file"].write_text(json.dumps(tampered_tasks), encoding="utf-8")
+
+    # Before load, it is not in SQLite
+    assert store.get_task(new_tid) is None
+
+    # After load, the missing task is imported into SQLite
+    kernel.load_tasks_data()
+    imported = store.get_task(new_tid)
+    assert imported is not None
+    assert imported["status"] == "pending"
+
+    # Now tamper with this new task in JSON to try overriding it
+    tampered_tasks["tasks"][1]["status"] = "failed"
+    store_env["tasks_file"].write_text(json.dumps(tampered_tasks), encoding="utf-8")
+
+    kernel.load_tasks_data()
+    # Must remain "pending" in SQLite, proving subsequent disk sync does NOT overwrite
+    assert store.get_task(new_tid)["status"] == "pending"
+
+
+def test_herdr_task_cli_writes_directly_to_sqlite(store_env):
+    """Verify that herdr-task CLI writes directly to SQLite as authoritative storage."""
+    import subprocess
+
+    store = get_state_store()
+
+    wid = "wf-cli-01"
+    tid = "task-cli-01"
+
+    store.save_workflow({
+        "workflow_id": wid,
+        "title": "CLI Direct Write Workflow",
+        "status": "running",
+        "config": {"nodes": [{"id": "dev"}]},
+    })
+    store.save_task({
+        "task_id": tid,
+        "workflow_id": wid,
+        "node": "dev",
+        "stage": "dev",
+        "status": "dispatched",
+    })
+
+    env = os.environ.copy()
+    env["HERDR_STATE_DB"] = str(store_env["db_file"])
+    env["TASKS_FILE"] = str(store_env["tasks_file"])
+    env["WORKFLOWS_FILE"] = str(store_env["wf_file"])
+
+    # 1. Transition task: dispatched -> working
+    proc = subprocess.run(
+        ["python3", "bin/herdr-task", "set", tid, "working"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, f"STDOUT: {proc.stdout}, STDERR: {proc.stderr}"
+    assert f"{tid}: dispatched -> working" in proc.stdout
+
+    # Assert SQLite database directly reflects 'working'
+    t_after = store.get_task(tid)
+    assert t_after is not None
+    assert t_after["status"] == "working"
+    assert t_after["started_at"] is not None
+    assert len(t_after.get("status_history", [])) >= 1
+    assert t_after["status_history"][-1]["to"] == "working"
+
+    # 2. Transition task: working -> agent_done -> completed with verdict
+    proc_done = subprocess.run(
+        ["python3", "bin/herdr-task", "set", tid, "agent_done"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc_done.returncode == 0, f"STDOUT: {proc_done.stdout}, STDERR: {proc_done.stderr}"
+
+    proc2 = subprocess.run(
+        ["python3", "bin/herdr-task", "set", tid, "completed", "--verdict", "pass"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc2.returncode == 0, f"STDOUT: {proc2.stdout}, STDERR: {proc2.stderr}"
+
+    # Assert SQLite database directly reflects 'completed' and 'stage_verdict'
+    t_completed = store.get_task(tid)
+    assert t_completed is not None
+    assert t_completed["status"] == "completed"
+    assert t_completed["stage_verdict"] == "pass"
+
+

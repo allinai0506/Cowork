@@ -49,7 +49,7 @@ def _atomic_write_json(file_path: Path, data: Any) -> None:
     os.replace(tmp_path, file_path)
 
 
-def _sync_workflows_from_disk_if_needed(store: StateStore) -> None:
+def _import_missing_workflows_from_disk(store: StateStore) -> None:
     wf_file = get_workflows_file()
     if wf_file.exists():
         try:
@@ -58,14 +58,14 @@ def _sync_workflows_from_disk_if_needed(store: StateStore) -> None:
             if isinstance(disk_data, dict):
                 for wid, wf in disk_data.get("workflows", {}).items():
                     wf.setdefault("workflow_id", wid)
-                    existing = store.get_workflow(wid)
-                    if not existing or existing.get("status") != wf.get("status") or existing.get("paused_nodes") != wf.get("paused_nodes"):
+                    if not store.get_workflow(wid):
+                        # ONLY import missing workflows; SQLite is authoritative and never overwritten
                         store.save_workflow(wf)
         except Exception:
             pass
 
 
-def _sync_tasks_from_disk_if_needed(store: StateStore) -> None:
+def _import_missing_tasks_from_disk(store: StateStore) -> None:
     tasks_file = get_tasks_file()
     if tasks_file.exists():
         try:
@@ -74,10 +74,9 @@ def _sync_tasks_from_disk_if_needed(store: StateStore) -> None:
             if isinstance(disk_data, dict):
                 for t in disk_data.get("tasks", []):
                     tid = t.get("task_id")
-                    if tid and t.get("workflow_id"):
-                        existing = store.get_task(tid)
-                        if not existing or existing.get("status") != t.get("status") or existing.get("stage_verdict") != t.get("stage_verdict"):
-                            store.save_task(t)
+                    if tid and not store.get_task(tid):
+                        # ONLY import missing tasks; SQLite is authoritative and never overwritten
+                        store.save_task(t)
         except Exception:
             pass
 
@@ -85,6 +84,7 @@ def _sync_tasks_from_disk_if_needed(store: StateStore) -> None:
 def load_workflows_data() -> Dict[str, Any]:
     """Load workflows via StateStore (single source of truth)."""
     store = get_state_store()
+    _import_missing_workflows_from_disk(store)
     return store.export_workflows_json()
 
 
@@ -102,6 +102,7 @@ def save_workflows_data(data: Dict[str, Any]) -> None:
 def load_tasks_data() -> Dict[str, Any]:
     """Load tasks via StateStore (single source of truth)."""
     store = get_state_store()
+    _import_missing_tasks_from_disk(store)
     return store.export_tasks_json()
 
 
@@ -420,6 +421,8 @@ def create_checkpoint(
 ) -> Dict[str, Any]:
     """Capture a durable point-in-time snapshot of the workflow and its tasks via StateStore."""
     store = get_state_store()
+    _import_missing_workflows_from_disk(store)
+    _import_missing_tasks_from_disk(store)
 
     wf_entry = store.get_workflow(workflow_id)
     if not wf_entry:

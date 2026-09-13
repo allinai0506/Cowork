@@ -1275,28 +1275,30 @@ bin/herdr-task checkpoint-fork --help
 | 模块各自直接读写 JSON 导致双状态源 | 任何直接 `open("tasks.json")` 的绕过行为都会导致状态真假难辨与裂脑 | 严禁任何业务模块自行打开 JSON 文件作为主状态存储；所有状态写入统一收敛至 `StateStore -> SQLite`，SQLite 为唯一运行时事实源 |
 | 存量旧接口与兼容性断裂 | 骤然删除 `load_tasks_data` / `load_workflows_data` 会导致大量测试与外部工具崩溃 | 保留原有函数名作为只读兼容适配器（Adapter），内部代理到 `StateStore.export_*_json()`，且写入时统一写入 StateStore 并联动同步兼容文件 |
 | 状态迁移与导出边界不清 | JSON 的角色定位必须从“主存储”彻底转变为“迁移/导出/兼容”载体 | StateStore 明确抽象出 `import_from_json()` 与 `export_*_json()` 协议；外部冷迁移或快照排障使用导出流，运行时严禁将 JSON 作为主状态载体 |
+| 运行时反向同步引发状态倒退裂脑 | 若从磁盘读取 JSON 并覆盖 SQLite（如 `existing.status != json.status`），会导致旧 JSON 冲垮 SQLite 权威状态 | 严禁反向更新；从磁盘仅限冷导入 SQLite 中**完全不存在**的缺失实体（`if not store.get_task(tid)`），已有记录 100% 以 SQLite 为绝对事实 |
 
-### 操作规范（已固化到 `herdr/state_store.py`、`herdr/state_db.py`、`herdr/kernel.py`、`herdr/steering.py` 与 `tests/test_state_store.py`）
+### 操作规范（已固化到 `herdr/state_store.py`、`herdr/state_db.py`、`herdr/kernel.py`、`herdr/steering.py`、`services/herdr-controller.py`、`bin/herdr-task` 与 `tests/test_state_store.py`）
 
 1. **统一抽象层与工厂**：
    - 确立抽象接口 `StateStore(ABC)` 及标准实现 `SQLiteStateStore(StateStore)`；
    - 提供 `get_state_store()` / `set_state_store()` 单例与依赖注入入口；
-2. **核心业务收敛**：
-   - `kernel.py` 与 `steering.py` 全量控制与介入原语全面通过 `get_state_store()` 进行持久化；
-   - 针对老旧测试或外部工具直接修改磁盘文件的场景，`load_*_data` 具备增量智能感知并安全单向导入 SQLite；
-3. **严格单向派生**：
-   - JSON 仅作为 SQLite 的只读投射（Projection）或冷导出（Export），不再反向驱动核心状态。
+2. **核心业务与调度器全量收敛**：
+   - `kernel.py`、`steering.py`、`services/herdr-controller.py` 与 `bin/herdr-task` 的任务与工作流读写全面通过 `get_state_store()` 进行持久化与直接检索；
+   - `auto_migrate_json` 默认设为 `False`，避免测试环境与静默调用时非预期导入本地残余 JSON 污染状态；
+3. **单向派生与严格防裂脑**：
+   - 严禁双向覆盖；JSON 仅作为 SQLite 的只读投射（Projection）或冷导出（Export），仅在冷启动遇到 SQLite 缺失实体时进行单向增量导入；
+   - 伴生数据库路径基于任务文件推导（`p.with_suffix(".db")`），保证测试隔离性。
 
 ### 验证命令 / 证据
 
 ```bash
-# 1. 运行状态引擎与单事实源防裂脑测试
+# 1. 运行状态引擎与单事实源防裂脑测试（验证 JSON 篡改无法污染 SQLite，CLI 直写实时生效）
 pytest -v tests/test_state_store.py tests/test_state_db_v2.py
 
 # 2. 运行内核控制与纠偏回归
 pytest -v tests/test_kernel_control_primitives.py tests/test_steering_mesh.py
 
-# 3. 全仓回归（339 项测试全部通过）
+# 3. 全仓自动化回归（344 项测试 100% 全部通过）
 pytest -q
 ```
 
