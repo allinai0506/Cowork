@@ -205,4 +205,25 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 任务详情模态框升级为白盒简报卡片，配设路标列表、产物清单、卡点高亮警示与原始调试数据折叠切换。
 - **质量防护与门禁**：沉淀通用教训 §24；新增 `tests/test_projection_engine.py` 与 `tests/test_console_projection_api.py`；全量 302 个测试用例 100% 通过。
 
+## [2026-09-13] feat | Universal Runtime Phase 4: Dynamic Configuration & Sandboxed MCP Capabilities
+实现通用人机协同底座阶段四目标，构建通用元模型解耦与受控 MCP 生态容器：
+- **工作流元模型动态扩展 (`herdr/workflow.py`)**：
+  - `inputs` 字段扩展：支持静态字符串与动态节点产物引用（`nodes.<node_id>`）；
+  - `worker_policy` 结构化声明：显式声明能力集 `capabilities: list[str]` 与权限范围 `permissions: dict[str, str]`；
+  - `gate` 混合门禁契约：支持 `type` (`auto` / `manual` / `hybrid`)、`rules` 规则链与拓扑安全的 `retry_target`；
+  - `validate_workflow_dag` 严格校验：校验 `retry_target` 必须存在于定义节点集合中（杜绝运行时死锁与 KeyError），校验动态输入引用节点的合法性与单向无环性。
+- **受控 MCP 插件与权限安全网格 (`herdr/mcp.py`)**：
+  - MCP 服务器注册表生命周期：支持持久化存储至 `~/.herdr-controller/mcp-registry.json`，提供 `load_mcp_registry`、`register_mcp_server`、`unregister_mcp_server`、`list_mcp_servers` 等受控管理 API；
+  - 内置受控 MCP 工具集：提供 `web_search`、`data_extraction`、`file_system`、`git_tools`、`human_signoff` 五大开箱即用工具配置；
+  - 动态能力匹配与沙盒权限检验：`resolve_node_mcp` 自动完成能力匹配与权限降级过滤，`check_node_permissions` 防范沙盒越权。
+- **跨领域通用商业研报模板 (`workflow_templates/business-research-v1.yaml`)**：
+  - 完整编排 `market_scope` -> `data_extraction` -> `comparative_analysis` -> `executive_briefing` 4 个异构业务节点，全量验证输入透传、MCP 能力注入与混合会签门禁。
+- **控制台前台可视化增强 (`console/herdr_factory_console.py`)**：
+  - `showTemplateDAG` 前台模板 DAG 预览弹窗升级：解析并展示节点的 Gate 门禁类型与 Worker Policy 权限范围标签。
+- **质量防护与门禁**：
+  - 沉淀通用教训 §25（元模型解耦、沙盒权限隔离与跨领域无环拓扑校验）；
+  - 新增 `tests/test_dynamic_workflow_schema.py` 与 `tests/test_mcp_capability_mesh.py`；
+  - 全量 314 个测试用例 100% 通过。
+
+
 

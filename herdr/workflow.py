@@ -111,6 +111,28 @@ def validate_workflow_dag(nodes: List[Dict[str, Any]]) -> None:
                     f"Node '{node_id}' depends on unknown node '{dep}'."
                 )
 
+        # Validate gate retry_target if present
+        gate = node.get("gate") or {}
+        if isinstance(gate, dict):
+            retry_target = gate.get("retry_target")
+            if retry_target and retry_target not in node_map:
+                raise ValueError(
+                    f"Node '{node_id}' gate retry_target references unknown node '{retry_target}'."
+                )
+
+        # Validate inputs node references if present
+        inputs = node.get("inputs") or []
+        if isinstance(inputs, list):
+            for inp in inputs:
+                ref = inp.get("ref") if isinstance(inp, dict) else (inp if isinstance(inp, str) else "")
+                if ref.startswith("nodes."):
+                    parts = ref.split(".")
+                    ref_node = parts[1]
+                    if ref_node not in node_map:
+                        raise ValueError(
+                            f"Node '{node_id}' input references unknown node '{ref_node}'."
+                        )
+
     # Topological cycle detection using Kahn's algorithm
     in_degree = {n["id"]: 0 for n in nodes}
     for node in nodes:
@@ -151,6 +173,12 @@ def normalize_workflow(workflow: Dict[str, Any]) -> Dict[str, Any]:
             label = str(node.get("label") or node_id)
             node_type = str(node.get("node_type") or "agent")
             depends_on = list(node.get("depends_on") or [])
+            worker_policy = dict(node.get("worker_policy") or node.get("agent_policy") or {})
+            if "capabilities" not in worker_policy and "capabilities" in node:
+                worker_policy["capabilities"] = list(node["capabilities"])
+            if "permissions" not in worker_policy and "permissions" in node:
+                worker_policy["permissions"] = list(node["permissions"])
+
             norm_node = {
                 "id": node_id,
                 "label": label,
@@ -160,7 +188,9 @@ def normalize_workflow(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "purpose": node.get("purpose", ""),
                 "default_integration_mode": node.get("default_integration_mode", "none"),
                 "default_task_type": node.get("default_task_type", "docs"),
-                "agent_policy": dict(node.get("agent_policy") or {}),
+                "agent_policy": dict(node.get("agent_policy") or worker_policy),
+                "worker_policy": worker_policy,
+                "inputs": list(node.get("inputs") or []),
                 "required_outputs": list(node.get("required_outputs") or []),
                 "rules": list(node.get("rules") or []),
                 "gate": dict(node.get("gate") or {}),
