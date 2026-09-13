@@ -113,6 +113,20 @@ Evidence:
 - `herdr/workflow.py#normalize_workflow`
 - `docs/product-specs/agent-policy-spec.md`
 
+### 2.2.1 Workflow Instance (工作流运行实例)
+- `FACT` **定义**: 实际启动并执行某次需求变更的运行时记录（存储于 `workflows.json`）。
+- `FACT` **命名与标识契约 (方案 A)**:
+  - `workflow_id`: 格式为 `wf-{project_slug}-{MMDD}-{seq:02d}`（如 `wf-nexusarchive-0913-01`），去除非人类可读的路径哈希，以项目 slug + 4 位月日 + 两位当天自增序号组合，全局唯一且具备清晰时间线感知。
+  - `title`: 用户输入的具体任务名称（如“适配深色模式切换”），为系统一等公民。
+  - `requirement_subject`: 保持下游展示与旧接口兼容的业务主题，优先读取 `title`，回退自需求正文提取。
+- `FACT` **CLI 免手敲推断**: `herdr-task close-workflow` 在项目目录下省略参数时自动推断该项目唯一活跃工作流，或支持短后缀匹配（如 `01`、`0913-01`）。
+
+Evidence:
+- `herdr/projects.py#generate_workflow_id`
+- `herdr/projects.py#register_workflow`
+- `bin/herdr-factory#start_workflow`
+- `bin/herdr-task#resolve_workflow_id_for_close`
+
 ### 2.3 Task (任务工单)
 - `FACT` **定义**: 针对具体某个 Node 派发的一次独立 Agent 执行单元。
 - `FACT` **核心字段**:

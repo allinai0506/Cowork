@@ -42,7 +42,7 @@ def ops_center(workflow_id=None,include_tasks=False):
     if workflow_id:cmd += ['--workflow-id',workflow_id]
     if include_tasks:cmd.append('--include-tasks')
     data=run_json(cmd,20)
-    subjects={wid:(w.get('requirement_subject') or herdr_projects.requirement_subject(w.get('requirement',''))) for wid,w in workflows().items()}
+    subjects={wid:(w.get('title') or w.get('requirement_subject') or herdr_projects.requirement_subject(w.get('requirement',''))) for wid,w in workflows().items()}
     for c in data.get('workflow_cards') or []:
         s=subjects.get(c.get('workflow_id'))
         if s:c['workflow_label']=s
@@ -57,7 +57,11 @@ def project_for_workflow(wid):
 
 def _with_subject(w):
     w=dict(w)
-    if not w.get('requirement_subject'):
+    t = (w.get('title') or '').strip()
+    s = (w.get('requirement_subject') or '').strip()
+    if t:
+        w['requirement_subject']=t
+    elif not s:
         w['requirement_subject']=herdr_projects.requirement_subject(w.get('requirement',''))
     return w
 
@@ -322,8 +326,12 @@ def read_pane(pid):
     if r.returncode!=0:raise RuntimeError(r.stderr.strip() or r.stdout.strip())
     return r.stdout
 
-def run_workflow(root,req,agent='auto',template='software-development-v1'):
-    r=run([str(HERDR_ROOT/'bin'/'herdr-factory'),'run','--project',root,'--agent',agent or 'auto','--template',template or 'software-development-v1',req],600)
+def run_workflow(root,req,agent='auto',template='software-development-v1',title=''):
+    cmd=[str(HERDR_ROOT/'bin'/'herdr-factory'),'run','--project',root,'--agent',agent or 'auto','--template',template or 'software-development-v1']
+    if title:
+        cmd+=['--title',title]
+    cmd.append(req)
+    r=run(cmd,600)
     if r.returncode!=0:raise RuntimeError(r.stderr.strip() or r.stdout.strip())
     return r.stdout.strip()
 
@@ -367,22 +375,22 @@ def save_template(name,content):
     path.write_text(text,encoding='utf-8')
     return {'name':name,'path':str(path),'node_count':len(nodes)}
 
-def _run_workflow_job(job_id,root,req,agent,template):
+def _run_workflow_job(job_id,root,req,agent,template,title=''):
     try:
-        output=run_workflow(root,req,agent,template)
+        output=run_workflow(root,req,agent,template,title) if title else run_workflow(root,req,agent,template)
         with RUN_JOBS_LOCK:
             RUN_JOBS[job_id].update({'status':'succeeded','output':output,'finished_at':time.time()})
     except Exception as e:
         with RUN_JOBS_LOCK:
             RUN_JOBS[job_id].update({'status':'failed','error':str(e),'finished_at':time.time()})
 
-def start_workflow_job(root,req,agent='auto',template='software-development-v1'):
+def start_workflow_job(root,req,agent='auto',template='software-development-v1',title=''):
     if not root or not req:
         raise RuntimeError('项目目录和自然语言需求不能为空')
     job_id=uuid.uuid4().hex[:12]
     with RUN_JOBS_LOCK:
         RUN_JOBS[job_id]={'job_id':job_id,'status':'running','started_at':time.time()}
-    threading.Thread(target=_run_workflow_job,args=(job_id,root,req,agent,template),daemon=True).start()
+    threading.Thread(target=_run_workflow_job,args=(job_id,root,req,agent,template,title),daemon=True).start()
     return RUN_JOBS[job_id].copy()
 
 def workflow_job_status(job_id):
@@ -451,7 +459,7 @@ def tail_log(kind='controller',n=180):
     if not p or not p.exists():return ''
     return '\n'.join(p.read_text(errors='ignore').splitlines()[-max(10,min(n,1000)):])
 
-HTML_TEMPLATE='''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PRODUCT_NAME__</title><style>
+HTML_TEMPLATE=r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>__PRODUCT_NAME__</title><style>
 :root{--bg:#0b0f14;--panel:#121821;--card:#17202b;--line:#293342;--text:#edf2f7;--muted:#8fa0b5;--accent:#67a4ff;--good:#42c58a;--warn:#f3b950;--bad:#f36b6b}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif}button,input,select,textarea{font:inherit}button{cursor:pointer}.shell{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:100vh}.sidebar{border-right:1px solid var(--line);background:#0f141b;padding:16px;position:sticky;top:0;height:100vh;overflow:auto}.brand{font-size:20px;font-weight:750}.sub{color:var(--muted);font-size:12px;margin:4px 0 16px}.project{width:100%;text-align:left;background:transparent;border:1px solid var(--line);color:var(--text);border-radius:12px;padding:16px;margin-bottom:8px}.project.active{border-color:var(--accent);background:#14243a}.project small{display:block;color:var(--muted);margin-top:4px}.main{padding:24px;min-width:0}.top{display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px}.title{font-size:22px;font-weight:760}.muted{color:var(--muted)}.actions{display:flex;gap:8px;flex-wrap:wrap}.btn{border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:10px;padding:8px 16px}.btn.primary{background:var(--accent);color:#06111f;border-color:var(--accent);font-weight:700}.actions .btn.primary{margin-left:auto}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:16px}.metric,.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px}.metric{padding:16px}.metric b{font-size:22px;display:block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}.metric span{font-size:12px;color:var(--muted)}.stages{display:grid;grid-template-columns:repeat(6,minmax(130px,1fr));gap:8px;overflow:auto;margin-bottom:16px}.stage{min-width:130px;padding:16px;background:var(--panel);border:1px solid var(--line);border-radius:14px}.stage strong{display:block;margin-bottom:8px}.badge{font-size:12px;border-radius:999px;padding:4px 8px;display:inline-block;border:1px solid var(--line)}.badge.cleaned{color:var(--good)}.badge.working,.badge.finalizing{color:var(--warn)}.badge.failed,.badge.blocked{color:var(--bad)}.badge.waiting{color:var(--muted)}.badge.superseded{color:var(--muted)}.badge.in_progress{color:var(--warn)}.grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(280px,.8fr);gap:16px}.panel{overflow:hidden}.panel h3{font-size:14px;margin:0;padding:16px;border-bottom:1px solid var(--line)}.task{padding:16px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center}.task-name{font-weight:650}.task-id{color:#6f8197;font-size:11px;margin-top:4px}.task-meta{color:var(--muted);font-size:12px;margin-top:4px}.task-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.mini{padding:4px 8px;border-radius:8px;border:1px solid var(--line);background:#101720;color:var(--text);font-size:12px}.agent-row,.slot-row,.alert-row{padding:8px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px;align-items:center}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:8px;background:var(--muted)}.dot.ready{background:var(--good)}.dot.working{background:var(--warn)}.dot.disabled,.dot.failed{background:var(--bad)}.section-gap{margin-top:16px}.empty{padding:16px;color:var(--muted);font-size:13px}pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5}.modal{position:fixed;inset:0;background:rgba(0,0,0,.58);display:none;align-items:center;justify-content:center;padding:16px;z-index:50}.modal.open{display:flex}.modal-card{width:min(920px,100%);max-height:86vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:16px}.modal-head{display:flex;justify-content:space-between;padding:16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}.modal-body{padding:16px}.close{background:transparent;color:var(--text);border:0;font-size:22px}.form{display:grid;gap:8px}.form label{font-size:12px;color:var(--muted)}.form input,.form select,.form textarea{width:100%;background:#0d131a;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:8px}.form textarea{min-height:120px}.toast{position:fixed;right:24px;bottom:24px;background:#111923;border:1px solid var(--line);padding:8px 16px;border-radius:12px;display:none;max-width:420px;z-index:60}.toast.show{display:block}.danger-text{color:var(--bad)}.good-text{color:var(--good)}.wf-subject{font-size:16px;font-weight:700;line-height:1.35}.wf-sub{font-size:12px;margin-top:4px}.wf-switcher{display:flex;align-items:center;gap:8px;margin:0 0 16px}.wf-switcher label{font-size:12px;color:var(--muted)}.wf-switcher select{background:#0d131a;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:8px;max-width:520px}@media(max-width:1000px){.shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}.projects{display:flex;gap:8px;overflow:auto}.project{min-width:180px}.grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}}
 </style></head><body><div class="shell"><aside class="sidebar"><div class="brand">__PRODUCT_NAME__</div><div class="sub">__PRODUCT_TAGLINE__ · 控制台</div><div id="projects" class="projects"></div><button class="btn" style="width:100%;margin-top:8px" onclick="refreshAll()">刷新</button></aside><main class="main"><div class="top"><div><div class="title" id="projectTitle">选择项目</div><div id="workflowTitle"><div class="wf-subject" id="workflowSubject">—</div><div class="muted wf-sub" id="workflowSub"></div></div></div><div class="actions"><button class="btn factory-action" onclick="showLogs()">查看日志</button><button class="btn factory-action" onclick="advanceStage()">进入下一阶段</button><button class="btn factory-action" onclick="createCandidate()">创建候选分支</button><button class="btn factory-action" onclick="showAgentOverride()">指定执行者</button><button class="btn factory-action" onclick="runPreflight()">执行者自检</button><button class="btn factory-action" onclick="showTemplateLibrary()">模板库</button><button class="btn primary factory-action" onclick="showNewWorkflow()">＋ 新需求</button></div></div><div class="metrics"><div class="metric"><b id="mProjects">0</b><span>项目空间</span></div><div class="metric"><b id="mWorkflows">0</b><span>活跃工作流</span></div><div class="metric"><b id="mAgents">0</b><span>活跃执行者</span></div><div class="metric"><b id="mAlerts">0</b><span>需要关注</span></div></div><div id="stages" class="stages"></div><div id="workflowSwitcher" class="wf-switcher" style="display:none"></div><div class="grid"><section class="panel"><h3>执行者与任务实时看板</h3><div id="tasks"></div></section><section><div class="panel"><h3>执行者阵容</h3><div id="agents"></div></div><div class="panel section-gap"><h3>常驻智能体工位</h3><div id="slots"></div></div><div class="panel section-gap"><h3>告警中心</h3><div id="alerts"></div></div></section></div></main></div><div id="modal" class="modal"><div class="modal-card"><div class="modal-head"><strong id="modalTitle">详情</strong><button class="close" onclick="closeModal()">×</button></div><div id="modalBody" class="modal-body"></div></div></div><div id="toast" class="toast"></div><script>
 let state={overview:null,project:null,workflow:null,ops:null,projectId:null,workflowId:null,spaceId:null,space:null,opsMode:false};
@@ -476,6 +484,7 @@ async function waitForWorkflowJob(jobId){
 }
 async function submitNewWorkflowAsync(){
   const button=[...document.querySelectorAll('#modal button')].find(x=>x.textContent.includes('启动工作流'));
+  const title=(document.getElementById('newTitle')?.value||'').trim();
   const q=document.getElementById('newRequirement')?.value.trim();
   const a=document.getElementById('newAgent')?.value;
   const t=document.getElementById('newTemplate')?.value||'software-development-v1';
@@ -483,9 +492,9 @@ async function submitNewWorkflowAsync(){
   if(button){button.disabled=true;button.textContent='启动中…'}
   try{
     toast('正在创建工作流…');
-    const job=await api('/api/run',{method:'POST',body:JSON.stringify({project_root:state.project.project.project_root,requirement:q,agent:a,template:t})});
+    const job=await api('/api/run',{method:'POST',body:JSON.stringify({project_root:state.project.project.project_root,title:title,requirement:q,agent:a,template:t})});
     const result=await waitForWorkflowJob(job.job_id);
-    const m=/(?:^|\n)WORKFLOW_ID=(\\S+)/.exec(result.output||'');
+    const m=/(?:^|[\r\n])WORKFLOW_ID=([^\s]+)/.exec(result.output||'');
     if(m){state.workflowId=m[1];saveViewState()}
     closeModal();await refreshAll();
     toast('工作流已启动：'+(m?m[1]:(result.output||'已提交')));
@@ -840,25 +849,30 @@ async function selectSpace(workspaceId,rer=true){
 }
 
 async function loadProject(id,rer=true){state.projectId=id;state.project=await api('/api/project?id='+encodeURIComponent(id));if(rer&&state.overview)renderOverview();document.getElementById('projectTitle').textContent=state.project.project.project_name;const w=state.project.workflows;if(!state.workflowId||!w.some(x=>x.workflow_id===state.workflowId))state.workflowId=state.project.latest_workflow_id;renderAgents();renderSlots();renderWorkflowSwitcher();if(state.workflowId)await loadWorkflow(state.workflowId);else clearWorkflow()}
-function workflowSubject(w){return (w&&w.requirement_subject)||''}
+function workflowSubject(w){return (w&&(w.title||w.requirement_subject))||''}
+function workflowDisplayName(w){
+  if(!w)return '';
+  const subj=workflowSubject(w);
+  return subj?`${subj} (${w.workflow_id})`:w.workflow_id;
+}
 function renderWorkflowHead(w){
   const subj=workflowSubject(w);
   document.getElementById('workflowSubject').textContent=subj||w.workflow_id;
   const a=state.workflow.agent_override||'auto';
   const parts=[];
-  if(subj)parts.push('工作流 '+w.workflow_id);
+  parts.push('工作流 '+w.workflow_id);
   parts.push('执行者 '+(a==='auto'?'自动分配':a));
   if(w.candidate_branch)parts.push('候选分支 '+w.candidate_branch);
   document.getElementById('workflowSub').textContent=parts.join(' · ')
 }
 function renderWorkflowSwitcher(){
   const box=document.getElementById('workflowSwitcher'),ws=(state.project&&state.project.workflows)||[];
-  const sig=state.workflowId+'#'+ws.map(x=>x.workflow_id+':'+(workflowSubject(x)||x.workflow_id)).join('|');
+  const sig=state.workflowId+'#'+ws.map(x=>x.workflow_id+':'+workflowDisplayName(x)).join('|');
   if(box.dataset.sig===sig){box.style.display=ws.length<2?'none':'flex';return}
   box.dataset.sig=sig;
   if(ws.length<2){box.style.display='none';box.innerHTML='';return}
   box.style.display='flex';
-  box.innerHTML='<label>工作流</label><select onchange="state.workflowId=this.value;loadWorkflow(this.value)">'+ws.map(x=>`<option value="${esc(x.workflow_id)}"${x.workflow_id===state.workflowId?' selected':''}>${esc(workflowSubject(x)||x.workflow_id)}</option>`).join('')+'</select>'
+  box.innerHTML='<label>工作流</label><select onchange="state.workflowId=this.value;loadWorkflow(this.value)">'+ws.map(x=>`<option value="${esc(x.workflow_id)}"${x.workflow_id===state.workflowId?' selected':''}>${esc(workflowDisplayName(x))}</option>`).join('')+'</select>'
 }
 async function loadWorkflow(id){state.workflowId=id;state.workflow=await api('/api/workflow?id='+encodeURIComponent(id));const w=state.workflow.workflow;saveViewState();renderWorkflowHead(w);renderStages();renderTasks()}
 function clearWorkflow(){state.workflow=null;state.workflowId=null;saveViewState();document.getElementById('workflowSubject').textContent='暂无工作流';document.getElementById('workflowSub').textContent='';document.getElementById('stages').innerHTML='';document.getElementById('tasks').innerHTML='<div class="empty">暂无任务</div>'}function renderStages(){
@@ -888,7 +902,38 @@ function renderTasks(){
     </div>`).join('')
 }
 function renderAgents(){const rs=state.project.agents||[];document.getElementById('agents').innerHTML=rs.length?rs.map(a=>`<div class="agent-row"><span><i class="dot ${esc(a.status)}"></i>${esc(a.agent)}</span><span class="muted">${esc(agentStatusLabel(a.status))} · 负载 ${a.load} · 认证 ${esc(authHintLabel(a.auth_hint))}</span></div>`).join(''):'<div class="empty">暂无执行者信息</div>'}function renderSlots(){const rs=state.project.slots||[];document.getElementById('slots').innerHTML=rs.length?rs.map(s=>`<div class="slot-row"><div><div>${esc(s.pane_id)} · ${esc(s.stage_label)}</div><div class="task-meta">绑定 ${esc(s.bound_agent)} · 运行时 ${esc(s.live_agent||'空闲')} · ${esc(s.claimed_by?'被任务占用':'未占用')}</div></div><button class="mini" onclick="bindSlotPrompt('${esc(s.pane_id)}')">绑定</button></div>`).join(''):'<div class="empty">暂无用户预建智能体工位</div>'}
-function openModal(t,h){document.getElementById('modalTitle').textContent=t;document.getElementById('modalBody').innerHTML=h;document.getElementById('modal').classList.add('open')}function closeModal(){document.getElementById('modal').classList.remove('open')}function showNewWorkflow(){if(!state.project||!state.space||state.space.relation!=='current_factory')return toast('请先选择当前工厂空间',true);openModal('新建需求',`<div class="form"><label>项目</label><input value="${esc(state.project.project.project_name)}" disabled><label>工作流模板</label><select id="newTemplate"><option value="software-development-v1">software-development-v1（默认软件开发）</option></select><label>执行者策略</label><select id="newAgent"><option value="auto">auto（Router 自动）</option>${['opencode','codex','claude','qodercli','agy','pi'].map(a=>`<option>${a}</option>`).join('')}</select><label>自然语言需求</label><textarea id="newRequirement"></textarea><button class="btn primary" onclick="submitNewWorkflow()">启动工作流</button><div id="runWaitStatus" class="muted" style="min-height:16px;font-size:12px"></div></div>`);populateTemplateSelect()}async function submitNewWorkflow(){const q=document.getElementById('newRequirement').value.trim(),a=document.getElementById('newAgent').value,t=document.getElementById('newTemplate').value;if(!q)return toast('请输入需求',true);try{toast('正在启动工作流…');await api('/api/run',{method:'POST',body:JSON.stringify({project_root:state.project.project.project_root,requirement:q,agent:a,template:t})});closeModal();await refreshAll();toast('工作流已启动')}catch(e){toast(e.message,true)}}async function runPreflight(){
+function openModal(t,h){document.getElementById('modalTitle').textContent=t;document.getElementById('modalBody').innerHTML=h;document.getElementById('modal').classList.add('open')}function closeModal(){document.getElementById('modal').classList.remove('open')}
+function autoFillWorkflowTitle(){
+  const ti=document.getElementById('newTitle');
+  if(!ti||ti.value.trim())return;
+  const req=(document.getElementById('newRequirement')?.value||'').trim();
+  if(!req)return;
+  for(const line of req.split(/[\r\n]+/)){
+    const clean=line.replace(/^(#{1,6}\s+|[-*+]+\s+|\d+[.、)]\s*|\[[ xX]\]\s*)+/,'').trim();
+    if(clean&&!clean.startsWith('## 需求')&&clean!=='需求说明'&&clean!=='需求'){
+      ti.value=clean.slice(0,50);
+      break;
+    }
+  }
+}
+function showNewWorkflow(){
+  if(!state.project||!state.space||state.space.relation!=='current_factory')return toast('请先选择当前工厂空间',true);
+  openModal('新建需求',`<div class="form"><label>项目</label><input value="${esc(state.project.project.project_name)}" disabled><label>本次任务名称</label><input id="newTitle" placeholder="例如：适配深色模式切换 / 修复结算页面浮点精度 Bug"><label>工作流模板</label><select id="newTemplate"><option value="software-development-v1">software-development-v1（默认软件开发）</option></select><label>执行者策略</label><select id="newAgent"><option value="auto">auto（Router 自动）</option>${['opencode','codex','claude','qodercli','agy','pi'].map(a=>`<option>${a}</option>`).join('')}</select><label>自然语言需求</label><textarea id="newRequirement" onblur="autoFillWorkflowTitle()"></textarea><button class="btn primary" onclick="submitNewWorkflow()">启动工作流</button><div id="runWaitStatus" class="muted" style="min-height:16px;font-size:12px"></div></div>`);
+  populateTemplateSelect()
+}
+async function submitNewWorkflow(){
+  const title=(document.getElementById('newTitle')?.value||'').trim(),q=document.getElementById('newRequirement').value.trim(),a=document.getElementById('newAgent').value,t=document.getElementById('newTemplate').value;
+  if(!q)return toast('请输入需求',true);
+  try{
+    toast('正在启动工作流…');
+    await api('/api/run',{method:'POST',body:JSON.stringify({project_root:state.project.project.project_root,title:title,requirement:q,agent:a,template:t})});
+    closeModal();
+    await refreshAll();
+    toast('工作流已启动')
+  }catch(e){
+    toast(e.message,true)
+  }
+}async function runPreflight(){
   if(!state.projectId)return toast('当前空间不参与工厂调度',true);
   try{
     toast('正在执行深度自检…');
@@ -987,7 +1032,7 @@ class Handler(BaseHTTPRequestHandler):
         p=urllib.parse.urlparse(self.path).path
         try:
             b=self.body()
-            if p=='/api/run':return self.send_json(202,start_workflow_job(str(Path(b.get('project_root','')).expanduser().resolve()),str(b.get('requirement','')).strip(),str(b.get('agent') or 'auto'),str(b.get('template') or 'software-development-v1')))
+            if p=='/api/run':return self.send_json(202,start_workflow_job(str(Path(b.get('project_root','')).expanduser().resolve()),str(b.get('requirement','')).strip(),str(b.get('agent') or 'auto'),str(b.get('template') or 'software-development-v1'),str(b.get('title') or '').strip()))
             if p=='/api/template':return self.send_json(200,save_template(str(b.get('name') or ''),str(b.get('yaml') or '')))
             if p=='/api/workflow/agent':return self.send_json(200,set_agent_override(str(b['workflow_id']),str(b.get('agent') or 'auto')))
             if p=='/api/workflow/candidate':return self.send_json(200,create_candidate(str(b['workflow_id'])))

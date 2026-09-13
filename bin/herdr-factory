@@ -24,6 +24,7 @@ try:
         project_by_root,
         project_for_workflow,
         register_workflow,
+        generate_workflow_id,
         mark_workflow_startup_ready,
         workflow_config_for,
         active_workflows_for_project,
@@ -41,6 +42,7 @@ except ImportError:
         project_by_root,
         project_for_workflow,
         register_workflow,
+        generate_workflow_id,
         mark_workflow_startup_ready,
         workflow_config_for,
         active_workflows_for_project,
@@ -288,20 +290,18 @@ def start_workflow(
     agent_override="auto",
     template="software-development-v1",
     force=False,
+    title=None,
 ):
     project = resolve_project(project_path, create=True, template_name=template)
 
     if not workflow_id:
         prefix = "e2e" if e2e else "wf"
-        workflow_id = (
-            f"{prefix}-{project['project_id']}-"
-            f"{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        )
+        workflow_id = generate_workflow_id(project, prefix=prefix)
 
     # 检查与注册必须持同一把进程锁，否则两个并发创建都能通过活跃检查。
     with workflow_creation_lock(project["project_id"]):
         _reject_if_active_workflow(project, force=force or e2e)
-        register_workflow(workflow_id, project, requirement=requirement)
+        register_workflow(workflow_id, project, requirement=requirement, title=title or "")
 
     ensure_pool_for_project(project["project_id"])
     healthy_agents, unhealthy_agents = run_workflow_preflight(
@@ -345,6 +345,7 @@ project_name: {project['project_name']}
 project_root: {project['project_root']}
 workspace_id: {project['workspace_id']}
 workflow_id: {workflow_id}
+workflow_title: {title or '（未命名）'}
 workflow_template: {wf_cfg.get('workflow_template', template)}
 workflow_nodes: {nodes_summary}
 workflow_config: {project['workflow_file']}
@@ -558,6 +559,7 @@ def main():
 
     run_cmd = sub.add_parser("run")
     run_cmd.add_argument("requirement", nargs="+")
+    run_cmd.add_argument("--title", default="", help="工作流任务名称/标题")
     run_cmd.add_argument("--workflow-id")
     run_cmd.add_argument("--project")
     run_cmd.add_argument("--agent", default="auto")
@@ -605,6 +607,7 @@ def main():
             agent_override=args.agent,
             template=args.template,
             force=args.force,
+            title=args.title,
         )
         sys.exit(0 if workflow_id else 1)
 

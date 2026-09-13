@@ -131,3 +131,14 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 活体验证：创建闸门 exit 2 拒绝 + 注册表零新增；测试工作流 125332 被新版
   controller 判定完成并干净自动关闭（无幽灵推进）。教训沉淀 §13；决策与
   会话碰撞记录见 `docs/walkthroughs/20260913-controller-ghost-advance-and-create-guard.md`。
+
+## [2026-09-13] feat | Workflow semantic title and daily sequence short ID (Option A)
+解决历史 43 字符无语义机器 ID（`wf-nexusarchive-54433229-20260913-111049`）反人类问题，确立“任务标题为一等公民 + 短 ID”设计：
+- [[domain-model]] §2.2.1 增补工作流实例模型契约：ID 规则为 `wf-{project}-{MMDD}-{seq:02d}`；显式字段 `title`；
+- `herdr/projects.py` 新增 `generate_workflow_id`，`register_workflow` 支持 `title`；
+- `bin/herdr-factory` run 命令新增 `--title` 参数并透传至总指挥智能体提示词；
+- `bin/herdr-task` close-workflow 支持缺省参数自动推断当前项目活跃工作流及短后缀模糊匹配；
+- `console/herdr_factory_console.py` 新建模态框表单重构为「项目 → 本次任务名称 → 模板 → 执行者策略 → 自然语言需求」，支持需求失焦智能自动提取标题，工作流切换器格式升级为「任务名称 (短ID)」。
+- 质量防护与门禁：沉淀教训 §14，新增 `tests/test_console_frontend_syntax.py`（raw string 声明守卫 + `node -c` 无头 JS 编译验证），新增 `tests/test_workflow_naming_and_title.py`，全量 197 个测试 100% 通过。
+
+
