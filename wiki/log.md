@@ -291,6 +291,13 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - **文件健康度与梯度拆分阈值**：废除机械行数硬限，确立 `herdr/` 300~500 行、CLI/Daemon 500~800 行的业务内聚梯度拆分准则。
 - **同步验收门禁 (`CLAUDE.md`)**：在严格验收清单中新增分层纯度与文件健康度核对项。
 
+## [2026-09-13] docs | Elevated Remote Sync & CoW Sandbox Branching to First-Class Rule
+- **规范红线升格 (`RULES.md`)**：
+  - 确立「远端拉取同步与 CoW 沙盒建支」为项目一等公民（First-Class Citizen）；
+  - 强制要求任何任务在 Plan/开发前必须先执行 `git fetch origin` 同步本地主仓库，并利用 CoW (Copy-on-Write) 沙盒环境建立全新分支隔离执行；
+  - 严禁在主干工作区直接开发，严禁随意复用他人或遗留的功能分支。
+- **验收清单同步 (`CLAUDE.md`)**：在严格验收清单顶部新增「远端同步与 CoW 沙盒合规」前置门禁。
+
 ## [2026-09-13] docs | Upgraded Project Standard Workflow to /unified-dev-flow (S0–S8)
 - **废除旧四阶段作业法，全面拥抱 `/unified-dev-flow` 统一研发流程**：
   - 在 [`RULES.md`](file:///Users/user/herdr/RULES.md) §1 正式确立策略驱动的 S0–S8 全生命周期研发规范；
