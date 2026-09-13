@@ -1,4 +1,5 @@
 #!/opt/homebrew/bin/python3
+import datetime
 import fcntl
 import hashlib
 import json
@@ -264,11 +265,45 @@ def requirement_subject(requirement=""):
     return line
 
 
-def register_workflow(workflow_id, project, requirement=""):
+def generate_workflow_id(project, prefix="wf", now=None):
+    """Generate human-readable workflow ID using Option A: wf-{project}-{MMDD}-{seq:02d}."""
+    if now is None:
+        now = datetime.datetime.now()
+    name = project.get("project_name") or Path(project.get("project_root", "")).name or "project"
+    slug = re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-") or "project"
+    date_str = now.strftime("%m%d")
+    expected_prefix = f"{prefix}-{slug}-{date_str}-"
+
+    # Scan existing workflows in registry to find next sequence number
+    existing_seqs = []
+    workflows = load_workflows().get("workflows", {})
+    for wid in workflows:
+        if wid.startswith(expected_prefix):
+            remainder = wid[len(expected_prefix):]
+            if remainder.isdigit():
+                existing_seqs.append(int(remainder))
+            elif "-" in remainder:
+                first_part = remainder.split("-")[0]
+                if first_part.isdigit():
+                    existing_seqs.append(int(first_part))
+
+    next_seq = max(existing_seqs, default=0) + 1
+    candidate_id = f"{expected_prefix}{next_seq:02d}"
+    while candidate_id in workflows:
+        next_seq += 1
+        candidate_id = f"{expected_prefix}{next_seq:02d}"
+
+    return candidate_id
+
+
+def register_workflow(workflow_id, project, requirement="", title=""):
+    title = (title or "").strip()
+    subject = title or requirement_subject(requirement) or "未命名工作流"
     data = load_workflows()
     data.setdefault("workflows", {})[workflow_id] = {
         "workflow_id": workflow_id,
-        "requirement_subject": requirement_subject(requirement),
+        "title": title,
+        "requirement_subject": subject,
         "project_id": project["project_id"],
         "project_name": project["project_name"],
         "project_root": project["project_root"],

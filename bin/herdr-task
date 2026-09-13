@@ -16,14 +16,28 @@ if str(HERDR_ROOT) not in sys.path:
 try:
     from herdr.pane_pool import acquire_pane_for_task
     from herdr.agent_router import choose_agent, release_agent_reservation
-    from herdr.projects import project_for_workflow, workflow_config_for, ensure_node_runtime
+    from herdr.projects import (
+        project_for_workflow,
+        workflow_config_for,
+        ensure_node_runtime,
+        load_workflows,
+        detect_git_root,
+        project_by_root,
+    )
     from herdr.workflow import find_node, normalize_workflow
     from herdr.topology import ensure_stage_topology
     from herdr.agent_binary import resolve_binary
 except ImportError:
     from herdr_pane_pool import acquire_pane_for_task
     from herdr_agent_router import choose_agent, release_agent_reservation
-    from herdr_projects import project_for_workflow, workflow_config_for, ensure_node_runtime
+    from herdr_projects import (
+        project_for_workflow,
+        workflow_config_for,
+        ensure_node_runtime,
+        load_workflows,
+        detect_git_root,
+        project_by_root,
+    )
     from herdr_workflow import find_node, normalize_workflow
     from herdr_topology import ensure_stage_topology
     from herdr_agent_binary import resolve_binary
@@ -2582,6 +2596,55 @@ def _foreign_panes_in_tab(live_panes, tab_id, owned_pane_ids):
     )
 
 
+def resolve_workflow_id_for_close(input_id=None):
+    entries = load_workflows().get("workflows", {})
+    if input_id:
+        if input_id in entries:
+            return input_id
+        tasks = load_tasks().get("tasks", [])
+        if any(t.get("workflow_id") == input_id for t in tasks):
+            return input_id
+
+        # Suffix / substring match among active (non-terminal) workflows
+        non_terminal = {wid: e for wid, e in entries.items() if e.get("status") not in {"completed"}}
+        matches = [wid for wid in non_terminal if wid.endswith(input_id) or f"-{input_id}" in wid or input_id in wid]
+        if len(matches) == 1:
+            print(f"[AUTO RESOLVE] 匹配到活跃工作流: {matches[0]}")
+            return matches[0]
+        elif len(matches) > 1:
+            print(f"[AMBIGUOUS WORKFLOW ID] 输入 '{input_id}' 匹配到多个活跃工作流: {', '.join(matches)}")
+            sys.exit(1)
+
+        all_matches = [wid for wid in entries if wid.endswith(input_id) or f"-{input_id}" in wid or input_id in wid]
+        if len(all_matches) == 1:
+            print(f"[AUTO RESOLVE] 匹配到工作流: {all_matches[0]}")
+            return all_matches[0]
+        elif len(all_matches) > 1:
+            print(f"[AMBIGUOUS WORKFLOW ID] 输入 '{input_id}' 匹配到多个工作流: {', '.join(all_matches)}")
+            sys.exit(1)
+
+        return input_id
+
+    # If input_id is not provided, detect from current git workspace
+    try:
+        root = detect_git_root()
+        proj = project_by_root(root)
+        if proj:
+            pid = proj.get("project_id")
+            active = [wid for wid, e in entries.items() if e.get("project_id") == pid and e.get("status") not in {"completed"}]
+            if len(active) == 1:
+                print(f"[AUTO DETECT] 检测到当前项目 {proj.get('project_name')} 唯一活跃工作流: {active[0]}")
+                return active[0]
+            elif len(active) > 1:
+                print(f"当前项目存在多个活跃工作流，请显式指定 workflow_id:\n  " + "\n  ".join(active))
+                sys.exit(1)
+    except Exception:
+        pass
+
+    print("请指定 workflow_id，例如: herdr-task close-workflow <workflow_id>")
+    sys.exit(1)
+
+
 def close_workflow(
     workflow_id,
     include_coordinator=False,
@@ -3146,7 +3209,7 @@ def main():
     )
 
     close_wf = sub.add_parser("close-workflow")
-    close_wf.add_argument("workflow_id")
+    close_wf.add_argument("workflow_id", nargs="?", default=None, help="工作流 ID（在项目目录下可省略，或输入短后缀）")
     close_wf.add_argument(
         "--include-coordinator",
         dest="include_coordinator",
@@ -3275,8 +3338,9 @@ def main():
         )
 
     elif args.command == "close-workflow":
+        target_wid = resolve_workflow_id_for_close(args.workflow_id)
         close_workflow(
-            args.workflow_id,
+            target_wid,
             include_coordinator=args.include_coordinator,
             purge_clones=args.purge_clones,
             dry_run=args.dry_run,

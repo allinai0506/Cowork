@@ -582,7 +582,45 @@ status 检查只用于防"重复关闭"。
 herdr-factory run --project /Users/user/nexusarchive "guard test"; echo $?  # 期望 exit 2 + 拒绝消息
 # 幽灵消除：零任务工作流被干净自动关闭而非循环推进
 grep -c "STAGE ADVANCE.*125332" ~/.herdr-controller/logs/controller.out.log  # 期望 0
-pytest tests/test_workflow_registry_guards.py  # 6 passed
+决策与会话碰撞全记录：`docs/walkthroughs/20260913-controller-ghost-advance-and-create-guard.md`。
+
+## 14. 内嵌前端代码转义暗雷与无头语法盲区：Python 字符串转义击穿 JS 导致全屏白屏
+
+### 问题背景
+
+2026-09-13 交付工作流短 ID 与任务名称（`feat/workflow-title-and-short-id`）时，为 Console 前端
+弹窗添加任务名称输入框及失焦自动提炼标题逻辑。因 `console/herdr_factory_console.py` 的
+`HTML_TEMPLATE` 使用了标准 Python 多行字符串（`'''...'''` 而非 `r'''...'''`），新增的 JS 正则
+与换行分割逻辑中的 `\n` 被 Python 评估为物理换行字节（`0x0A`）。前端加载时 JS 引擎抛出
+`Uncaught SyntaxError: Invalid regular expression: missing /`，导致整个页面 JS 执行链在初始化阶段
+彻底熔断，`refreshAll()` 未能执行，用户界面呈现为"没有任何数据"的全白屏。
+当时后端的 193 项 pytest 全部绿灯，暴露出测试套件对前端内嵌脚本的语法守卫盲区。
+
+### 经验教训
+
+| 教训 | 说明 |
+|---|---|
+| 内嵌多行模板必须声明为 Raw String | 任何在 Python 中编写的内嵌 HTML/JS，首行必须为 `r'''` 或 `r"""`，严禁让 Python 解析器对 JS 正则与转义符进行二次解释 |
+| 后端测试通过 ≠ 前端没有语法崩溃 | 后端单测仅覆盖了 Python HTTP Handler 和 API 数据结构，无法替代前端内嵌 `<script>` 的解析执行验证 |
+| 跨语言内嵌代码必须有语法静态门禁 | 单文件 Python-JS 架构必须在 CI/pytest 阶段抽取 inline script 并运行 `node -c`，将语法错误扼杀在提交前 |
+
+### 操作规范（已固化到 `tests/test_console_frontend_syntax.py`）
+
+1. **模板前缀强制约束**：`console/herdr_factory_console.py` 中的 `HTML_TEMPLATE` 必须使用 `r'''` 或 `r"""` 声明，禁止回退；
+2. **自动化语法门禁**：新增 `tests/test_console_frontend_syntax.py`：
+   - 静态检查 `HTML_TEMPLATE` 源码是否包含 `r'''` / `r"""`；
+   - 提取 `<script>` 完整代码块调用 `node -c` 运行静态语法编译检查；
+   - 断言弹窗表单核心 DOM 结构与函数钩子（`newTitle`, `autoFillWorkflowTitle()` 等）；
+3. **前端修改交付规范**：修改内嵌前端后，必须先执行 `pytest tests/test_console_frontend_syntax.py`，再同步至 `~/.herdr-console`。
+
+### 验证命令 / 证据
+
+```bash
+# 门禁测试：验证模板 Raw String 声明及 JS 语法干净度
+pytest tests/test_console_frontend_syntax.py  # 期望 4 passed
+# 生产脚本无报错验证
+node -c /tmp/check_syntax.js                  # 期望 exit 0
 ```
 
-决策与会话碰撞全记录：`docs/walkthroughs/20260913-controller-ghost-advance-and-create-guard.md`。
+---
+
