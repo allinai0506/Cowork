@@ -690,10 +690,10 @@ async function saveTemplate(){
     toast('模板已保存：'+d.name+'（'+d.node_count+' 节点）')
   }catch(e){toast(e.message,true)}
 }
-async function populateTemplateSelect(){
+async function populateTemplateSelect(selId='newTemplate'){
   try{
     const ts=await fetchTemplates();
-    const sel=document.getElementById('newTemplate');
+    const sel=document.getElementById(selId);
     if(!sel||!ts.length)return;
     sel.innerHTML=ts.map(t=>`<option value="${esc(t.id)}"${t.id==='software-development-v1'?' selected':''}>${esc(t.id)} · ${esc(t.label||'')}（${t.node_count} 节点）</option>`).join('')
   }catch(e){}
@@ -851,7 +851,7 @@ async function selectSpace(workspaceId,rer=true){
             <button class="btn primary" style="margin-top:8px" onclick="submitAdoptSpace('${esc(s.workspace_id)}')">一键按模板装配为工厂空间</button>
           </div>
         </div>`;
-      populateAdoptTemplateSelect();
+      populateTemplateSelect('adoptTemplate');
       document.getElementById('agents').innerHTML='<div class="empty">装配接入工厂后，即可配置并查看执行者阵容。</div>';
       document.getElementById('slots').innerHTML='<div class="empty">装配接入工厂后，即可调度常驻智能体工位。</div>';
     }else{
@@ -942,7 +942,7 @@ function autoFillWorkflowTitle(){
 }
 function showNewProjectModal(){
   openModal('新建工厂空间',`<div class="form"><label>本地 Git 仓库路径</label><input id="newProjPath" placeholder="例如：/Users/user/my-app" oninput="autoFillProjectName()"><label>项目名称（可选）</label><input id="newProjName" placeholder="默认与文件夹同名"><label>选用流水线模板</label><select id="newProjTemplate"></select><button class="btn primary" style="margin-top:8px" onclick="submitNewProject()">创建并装配工厂空间</button></div>`);
-  populateProjectTemplateSelect();
+  populateTemplateSelect('newProjTemplate');
 }
 function autoFillProjectName(){
   const p=(document.getElementById('newProjPath')?.value||'').trim().replace(/[/\\]+$/,'');
@@ -952,14 +952,6 @@ function autoFillProjectName(){
     const segs=p.split(/[/\\]/);
     nameInput.value=segs[segs.length-1]||'';
   }
-}
-async function populateProjectTemplateSelect(){
-  try{
-    const ts=await fetchTemplates();
-    const sel=document.getElementById('newProjTemplate');
-    if(!sel||!ts.length)return;
-    sel.innerHTML=ts.map(t=>`<option value="${esc(t.id)}"${t.id==='software-development-v1'?' selected':''}>${esc(t.id)} · ${esc(t.label||'')}（${t.node_count} 节点）</option>`).join('')
-  }catch(e){}
 }
 async function submitNewProject(){
   const path=(document.getElementById('newProjPath')?.value||'').trim();
@@ -979,14 +971,6 @@ async function submitNewProject(){
   }catch(e){
     toast('创建失败：'+e.message,true);
   }
-}
-async function populateAdoptTemplateSelect(){
-  try{
-    const ts=await fetchTemplates();
-    const sel=document.getElementById('adoptTemplate');
-    if(!sel||!ts.length)return;
-    sel.innerHTML=ts.map(t=>`<option value="${esc(t.id)}"${t.id==='software-development-v1'?' selected':''}>${esc(t.id)} · ${esc(t.label||'')}（${t.node_count} 节点）</option>`).join('')
-  }catch(e){}
 }
 async function submitAdoptSpace(wid){
   const path=(document.getElementById('adoptPath')?.value||'').trim();

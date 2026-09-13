@@ -529,13 +529,35 @@ def provision_project(root, template_name="software-development-v1", project_nam
         n["anchor_pane_id"] = anchor_pane_id
         runtime_nodes.append(n)
 
+    return _register_project_workflow(
+        project_id=project_id,
+        project_name=project_name,
+        root=root,
+        workspace_id=workspace_id,
+        template_name=template.get("name", template_name),
+        coordinator_tab_id=coordinator_tab_id,
+        coordinator_pane_id=coordinator_pane_id,
+        runtime_nodes=runtime_nodes,
+    )
+
+
+def _register_project_workflow(
+    project_id,
+    project_name,
+    root,
+    workspace_id,
+    template_name,
+    coordinator_tab_id,
+    coordinator_pane_id,
+    runtime_nodes,
+):
     workflow = {
         "project_id": project_id,
         "project_name": project_name,
         "project_root": root,
         "base_branch": detect_base_branch(root),
         "workspace_id": workspace_id,
-        "workflow_template": template.get("name", template_name),
+        "workflow_template": template_name,
         "coordinator": {
             "tab_id": coordinator_tab_id,
             "label": "1总指挥",
@@ -557,7 +579,7 @@ def provision_project(root, template_name="software-development-v1", project_nam
         "project_id": project_id,
         "project_name": project_name,
         "project_root": root,
-        "base_branch": detect_base_branch(root),
+        "base_branch": workflow["base_branch"],
         "workspace_id": workspace_id,
         "coordinator_pane_id": coordinator_pane_id,
         "workflow_file": str(workflow_file),
@@ -570,10 +592,7 @@ def provision_project(root, template_name="software-development-v1", project_nam
 
 
 def create_project(root, project_name=None, template_name="software-development-v1"):
-    root = canonical_root(root)
-    git_root = detect_git_root(root)
-    root = canonical_root(git_root)
-
+    root = detect_git_root(root)
     record = project_by_root(root)
     if record and _workspace_alive(record.get("workspace_id", "")):
         return dict(record, already_registered=True)
@@ -602,9 +621,7 @@ def adopt_workspace_as_project(
     if not root:
         raise ValueError(f"无法推断空间 {workspace_id} 的工作目录，请指定项目根路径")
 
-    root = canonical_root(root)
-    git_root = detect_git_root(root)
-    root = canonical_root(git_root)
+    root = detect_git_root(root)
     project_id = project_id_for(root)
     if not project_name:
         project_name = Path(root).name
@@ -672,55 +689,20 @@ def adopt_workspace_as_project(
         n["anchor_pane_id"] = anchor_pane_id
         runtime_nodes.append(n)
 
-    workflow = {
-        "project_id": project_id,
-        "project_name": project_name,
-        "project_root": root,
-        "base_branch": detect_base_branch(root),
-        "workspace_id": workspace_id,
-        "workflow_template": template.get("name", template_name),
-        "coordinator": {
-            "tab_id": coord_tab["tab_id"],
-            "label": "1总指挥",
-            "pane_id": coordinator_pane_id,
-        },
-        "nodes": runtime_nodes,
-    }
-    workflow = normalize_workflow(workflow)
-
-    project_dir = ROOT / "projects" / project_id
-    project_dir.mkdir(parents=True, exist_ok=True)
-    workflow_file = project_dir / "workflow.json"
-    workflow_file.write_text(
-        json.dumps(workflow, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    return _register_project_workflow(
+        project_id=project_id,
+        project_name=project_name,
+        root=root,
+        workspace_id=workspace_id,
+        template_name=template.get("name", template_name),
+        coordinator_tab_id=coord_tab["tab_id"],
+        coordinator_pane_id=coordinator_pane_id,
+        runtime_nodes=runtime_nodes,
     )
-
-    record = {
-        "project_id": project_id,
-        "project_name": project_name,
-        "project_root": root,
-        "base_branch": detect_base_branch(root),
-        "workspace_id": workspace_id,
-        "coordinator_pane_id": coordinator_pane_id,
-        "workflow_file": str(workflow_file),
-    }
-
-    data = load_projects()
-    data.setdefault("projects", {})[root] = record
-    save_projects(data)
-    return record
 
 
 def unregister_project(root_or_id, close_workspace=False, force=False):
-    """Unregister a project from Herdr Factory registry.
-
-    1. Identifies the project by root or project_id.
-    2. Safety check: Verifies that no active workflows exist (unless force=True).
-    3. Optionally closes the Herdr workspace if requested.
-    4. Removes the project entry from projects.json.
-    5. Returns the deregistered project record.
-    """
+    """Unregister a project from Herdr Factory registry."""
     data = load_projects()
     projects_dict = data.get("projects", {})
 
@@ -733,23 +715,14 @@ def unregister_project(root_or_id, close_workspace=False, force=False):
         resolved_root = str(root_or_id)
 
     for k, v in projects_dict.items():
-        if (
-            k == root_or_id
-            or k == resolved_root
-            or v.get("project_id") == root_or_id
-            or v.get("project_root") == resolved_root
-            or v.get("project_root") == root_or_id
-        ):
-            target_key = k
-            target_project = v
+        if root_or_id in (k, v.get("project_id"), v.get("project_root")) or resolved_root in (k, v.get("project_root")):
+            target_key, target_project = k, v
             break
 
     if not target_project:
         raise ValueError(f"未找到注册的项目: {root_or_id}")
 
     project_id = target_project.get("project_id")
-
-    # Safety check: active workflows
     if project_id:
         active = active_workflows_for_project(project_id)
         if active and not force:
@@ -758,13 +731,11 @@ def unregister_project(root_or_id, close_workspace=False, force=False):
                 "请先等待工作流完成或使用 force 强制注销。"
             )
 
-    # Close workspace if requested
     if close_workspace:
         wid = target_project.get("workspace_id")
         if wid and _workspace_alive(wid):
             _run(["herdr", "workspace", "close", wid], check=False)
 
-    # Remove from registry
     if target_key in projects_dict:
         del projects_dict[target_key]
         save_projects(data)

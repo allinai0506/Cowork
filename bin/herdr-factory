@@ -138,11 +138,15 @@ def unregister_command(path=None, close_workspace=False, force=False):
             target = detect_git_root(os.getcwd())
         except Exception:
             target = os.getcwd()
-    record = unregister_project(target, close_workspace=close_workspace, force=force)
-    print(f"项目已成功注销: {record.get('project_name', target)} ({record.get('project_root', '')})")
-    if close_workspace and record.get('workspace_id'):
-        print(f"对应 Herdr 空间 {record['workspace_id']} 已关闭。")
-    return 0
+    try:
+        record = unregister_project(target, close_workspace=close_workspace, force=force)
+        print(f"项目已成功注销: {record.get('project_name', target)} ({record.get('project_root', '')})")
+        if close_workspace and record.get('workspace_id'):
+            print(f"对应 Herdr 空间 {record['workspace_id']} 已关闭。")
+        return 0
+    except (ValueError, RuntimeError) as e:
+        print(f"注销失败: {e}", file=sys.stderr)
+        return 1
 
 
 def doctor():
