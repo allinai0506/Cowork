@@ -71,6 +71,14 @@ def _get_task(env, task_id):
     return None
 
 
+def _load_controller():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("controller", "services/herdr-controller.py")
+    ctrl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ctrl)
+    return ctrl
+
+
 class TestWorkflowLifecycleMatrix:
 
     def test_task_rapid_completion(self, temp_herdr_env):
@@ -151,11 +159,7 @@ class TestWorkflowLifecycleMatrix:
 
     def test_multi_task_parallel_advance_gate(self, temp_herdr_env, monkeypatch):
         """Test is_node_complete with multiple parallel tasks in a stage."""
-        # Import controller's is_node_complete directly
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("controller", "services/herdr-controller.py")
-        ctrl = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(ctrl)
+        ctrl = _load_controller()
 
         wf_id = "wf-parallel-01"
         _seed_task(temp_herdr_env, "t-p1", workflow_id=wf_id, node="plan", status="working")
@@ -186,10 +190,7 @@ class TestWorkflowLifecycleMatrix:
 
     def test_workflow_pause_blocks_advance(self, temp_herdr_env, monkeypatch):
         """When workflow status is 'paused', check_workflow_stage_advance must not advance."""
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("controller", "services/herdr-controller.py")
-        ctrl = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(ctrl)
+        ctrl = _load_controller()
 
         wf_id = "wf-pause-test"
         # Seed workflow as paused
@@ -216,10 +217,7 @@ class TestWorkflowLifecycleMatrix:
 
     def test_controller_registry_watcher_catches_external_done(self, temp_herdr_env, monkeypatch):
         """When a task reaches agent_done externally, controller enqueues done event automatically."""
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("controller", "services/herdr-controller.py")
-        ctrl = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(ctrl)
+        ctrl = _load_controller()
 
         wf_id = "wf-watcher-01"
         wf_data = {
@@ -266,10 +264,7 @@ class TestWorkflowLifecycleMatrix:
 
     def test_workflow_resume_allows_advance(self, temp_herdr_env, monkeypatch):
         """When workflow status is resumed to 'running', check_workflow_stage_advance resumes."""
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("controller", "services/herdr-controller.py")
-        ctrl = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(ctrl)
+        ctrl = _load_controller()
 
         wf_id = "wf-resume-test"
         wf_data = {
@@ -307,10 +302,7 @@ class TestWorkflowLifecycleMatrix:
 
     def test_agent_idle_jitter_filtered(self, temp_herdr_env, monkeypatch):
         """When an agent flickers to idle briefly without HERDR_TASK_DONE, jitter filter keeps it in working."""
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("controller", "services/herdr-controller.py")
-        ctrl = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(ctrl)
+        ctrl = _load_controller()
 
         task_id = "t-jitter"
         _seed_task(temp_herdr_env, task_id, status="working")

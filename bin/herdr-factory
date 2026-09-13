@@ -448,7 +448,7 @@ def status(workflow_id):
     return 0
 
 
-def pause_workflow(workflow_id):
+def _update_workflow_status(workflow_id, target_status, action_label):
     wf_file = os.environ.get("WORKFLOWS_FILE") or os.path.expanduser("~/.herdr-controller/workflows.json")
     try:
         with open(wf_file, "r", encoding="utf-8") as f:
@@ -461,55 +461,31 @@ def pause_workflow(workflow_id):
         if workflow_id not in wfs:
             print(f"Workflow {workflow_id} not found")
             return 1
-        wfs[workflow_id]["status"] = "paused"
+        wfs[workflow_id]["status"] = target_status
     elif isinstance(wfs, list):
-        found = False
-        for wf in wfs:
-            if wf.get("workflow_id") == workflow_id:
-                wf["status"] = "paused"
-                found = True
-                break
-        if not found:
+        target = next((w for w in wfs if isinstance(w, dict) and w.get("workflow_id") == workflow_id), None)
+        if not target:
             print(f"Workflow {workflow_id} not found")
             return 1
+        target["status"] = target_status
+    else:
+        print(f"Workflow {workflow_id} not found")
+        return 1
+
     tmp = wf_file + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, wf_file)
-    print(f"Workflow {workflow_id} paused")
+    print(f"Workflow {workflow_id} {action_label}")
     return 0
+
+
+def pause_workflow(workflow_id):
+    return _update_workflow_status(workflow_id, "paused", "paused")
 
 
 def resume_workflow(workflow_id):
-    wf_file = os.environ.get("WORKFLOWS_FILE") or os.path.expanduser("~/.herdr-controller/workflows.json")
-    try:
-        with open(wf_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        print("Failed to load workflows.json")
-        return 1
-    wfs = data.get("workflows", {})
-    if isinstance(wfs, dict):
-        if workflow_id not in wfs:
-            print(f"Workflow {workflow_id} not found")
-            return 1
-        wfs[workflow_id]["status"] = "running"
-    elif isinstance(wfs, list):
-        found = False
-        for wf in wfs:
-            if wf.get("workflow_id") == workflow_id:
-                wf["status"] = "running"
-                found = True
-                break
-        if not found:
-            print(f"Workflow {workflow_id} not found")
-            return 1
-    tmp = wf_file + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, wf_file)
-    print(f"Workflow {workflow_id} resumed")
-    return 0
+    return _update_workflow_status(workflow_id, "running", "resumed")
 
 
 def e2e(project_path=None):
