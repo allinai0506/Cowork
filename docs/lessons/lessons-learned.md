@@ -1026,3 +1026,54 @@ bin/herdr-task halt --help
 bin/herdr-task steer --help
 bin/herdr-task steer-queue --help
 ```
+
+---
+
+## 24. 语义提炼引擎与白盒数据流（Projection Engine）：4D 白盒遥测、终端噪声清洗与产物第一公民投影
+
+### 问题背景
+
+在多智能体自主协同过程中，工位终端不断输出大量低级原始日志（如 ANSI 转义字符序列、VT100 光标控制码、编译器反复刷屏文本）。早期系统直接将原始终端流倾倒给控制台或 CLI，导致严重认知过载与黑盒感：
+1. **终端噪声严重**：颜色码、反光标与进度条残留造成控制台和终端阅读体验极差；
+2. **状态黑盒感强**：人类总指挥难以快速回答关键问题：“当前智能体究竟在尝试达成什么目标？”、“目前处于研发的哪个里程碑？”；
+3. **交付产物被弱化**：Git 代码修改、测试评估报告（EVALUATION.md）散落在文件系统深处，缺乏结构化归集与高亮展示；
+4. **卡点无法及时感知**：编译报错、缺少依赖或环境冲突被淹没在成百上千行终端日志中，未被结构化为醒目的卡点（Blocker）求助。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 原始终端流充满转义控制码 | 直接展示原始终端文本会导致严重的渲染混乱与视觉疲劳 | 引入纯标准库正则流式清洗 `strip_ansi_codes`，彻底滤除 CSI、OSC、光标指令与控制字符 |
+| 缺乏高阶语义意图跟踪 | 单纯看最后一行终端命令（如 `Running test...`）无法代表宏观任务意图 | 制定语义提炼优先级：`[HERDR_INTENT]` 显式探针 > `task.goal` 顶层意图 > 瞬态执行动作 > 节点基础语义 |
+| 交付产物未被结构化归集 | 人类必须进入子仓库手动 `git status` 或寻找评估文件 | 确立产物第一公民（Artifacts as First-Class Citizens）：动态投影 Git 差异摘要、内循环评分报告与设计文档 |
+| 卡点求助被日志淹没 | 智能体受阻时缺乏直观警示 | 模式匹配编译错误、断言失败与依赖缺失，并在白盒卡片顶部以醒目警告条透出 |
+
+### 操作规范（已固化到 `herdr/projection.py`、`bin/herdr-task` 与 `console/herdr_factory_console.py`）
+
+1. **核心提炼引擎 (`herdr/projection.py`)**：
+   - 4D 投影模型：意图 (Intent)、动态路标 (Milestones)、核心产物 (Artifacts)、卡点求助 (Blockers) 与近期动态 (Recent Activity)。
+   - 纯标准库实现（遵循 Ponytail 原则，不引入第三方依赖）。
+2. **CLI 投射子命令**：
+   - `herdr-task project <task_id> [--json]`：展示结构化白盒任务简报。
+   - `herdr-task artifacts <task_id> [--json]`：快速核验任务产生的所有第一公民交付物。
+3. **控制台白盒卡片与 REST API**：
+   - REST 接口：`GET /api/task/projection` 与 `GET /api/workflow/projection`。
+   - 弹窗详情升级：任务详情模态框升级为白盒简报卡片（路标进度条、产物清单、当前意图与原始数据折叠切换）。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 运行投影引擎与控制台接口测试
+pytest tests/test_projection_engine.py tests/test_console_projection_api.py -v
+
+# 2. 验证前端模板语法契约
+pytest tests/test_console_frontend_syntax.py tests/test_console_templates.py -v
+
+# 3. 全仓 302 项自动化测试 100% 通过
+pytest
+
+# 4. CLI 命令交互验证
+./bin/herdr-task project --help
+./bin/herdr-task artifacts --help
+```
+

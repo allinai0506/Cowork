@@ -9,3 +9,4 @@ topology-selfheal-backup-*/
 .pytest_cache/
 backups/
 .omc/
+.codegraph/

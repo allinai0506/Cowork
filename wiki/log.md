@@ -188,3 +188,21 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 活跃工位任务卡片新增「插话」与「制动」快捷行动点，配设弹窗与二次确认保护。
 - **质量防护与门禁**：沉淀通用教训 §23；新增 `tests/test_steering_mesh.py` 与 `tests/test_console_steering_api.py`；全量 293 个测试用例 100% 通过。
 
+## [2026-09-13] feat | Universal Runtime Phase 3: Telemetry Distillation & White-box Projection Engine
+实现通用人机协同底座阶段三目标，构建语义提炼引擎与白盒数据流（Projection Engine）：
+- **核心提炼与清洗引擎 (`herdr/projection.py`)**：
+  - `strip_ansi_codes`：基于纯标准库正则过滤 CSI、OSC、光标指令、换行与控制字符，终结终端 ANSI 乱码；
+  - `extract_task_intent`：4 级意图解析（`[HERDR_INTENT]` 显式标记 > `task.goal` 顶层意图 > 瞬态执行动作 > 节点基础语义）；
+  - `extract_task_milestones`：提取 4 阶段动态路标（锁定验收目标 -> 核心代码实现 -> 内循环自检 -> 交付产物会签）；
+  - `collect_task_artifacts`：将产物提升为第一公民（Git diff 变更、工位自检评分报告 EVALUATION.md、需求/文档设计产物）；
+  - `extract_recent_activity`：提炼最近清晰可读的动作摘要，抹平无谓认知过载；
+  - `project_task` / `project_workflow`：生成任务及工作流维度的白盒 4D 遥测投影。
+- **CLI 命令行扩展 (`bin/herdr-task`)**：
+  - 新增 `project <task_id> [--json]`：打印整洁的白盒简报（状态、意图、卡点、路标、产物与近期活动）；
+  - 新增 `artifacts <task_id> [--json]`：快速核验任务产生的所有交付物。
+- **控制台 Web API 与白盒卡片 (`console/herdr_factory_console.py`)**：
+  - 暴露 `GET /api/task/projection` 与 `GET /api/workflow/projection`；
+  - 任务详情模态框升级为白盒简报卡片，配设路标列表、产物清单、卡点高亮警示与原始调试数据折叠切换。
+- **质量防护与门禁**：沉淀通用教训 §24；新增 `tests/test_projection_engine.py` 与 `tests/test_console_projection_api.py`；全量 302 个测试用例 100% 通过。
+
+
