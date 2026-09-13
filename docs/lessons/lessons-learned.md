@@ -502,7 +502,6 @@ grep "herdr-agent-state" ~/.qoder-cn/logs/runs/<run>/qodercli.log  # hook.starte
 
 决策全记录：`docs/walkthroughs/20260913-qodercn-agent-identity-fix.md`。
 
-
 ## 12. 流程完成 ≠ 交付完成:质量门的"不通过"必须驱动结构回流,而非归档
 
 ### 问题背景
@@ -540,3 +539,50 @@ workflow 里另起炉灶,丢失 PR 关联与阶段历史。审查轮 1(对抗性
 - `/opt/homebrew/bin/pytest tests/`(183 passed,含 fix-loop 33 用例);
 - 设计与审查记录:`docs/walkthroughs/20260913-fix-loop-design.md`(§8 审查修订);
 - 知识同步:`wiki/task-lifecycle.md` §1.1、`wiki/dag-workflow-engine.md` §10。
+
+## 13. 幽灵推进：close-workflow 关不掉 controller 的推进循环（终态必须在循环处执法）
+
+### 问题背景
+
+用户重复提交同一需求产生两个工作流，关闭重复项 wf-…-111426（零任务）后，
+controller 继续对其逐阶段"真空推进"：零任务工作流对 `is_node_complete` 真空
+成立，legacy stages 分支又没有整体完成检查，于是 requirements→plan→
+implementation 无限排队；stage_advance 消费线程在协调者 idle 时把幽灵提示
+`herdr agent prompt` 直注**共享协调者 Pane**，协调者照办派发了 3 个真实任务
+（含一个与活跃工作流 111049 正式实现任务完全重复的 codex 实现任务）。
+根因链：`active_registered_workflows()` 名为 active 实则返回全部注册表条目；
+`check_workflow_stage_advance` 只查 `startup_ready` 不查终态；全系统唯一的
+status 检查只用于防"重复关闭"。
+
+### 经验教训
+
+| 教训 | 说明 |
+|---|---|
+| 终态必须在消费循环处执法 | 注册表写终态 ≠ 引擎停手；凡按 id 扫描/派发的循环都要自查终态，且消费线程 fire 前要**逐迭代**再校验（事件可在队列里存活分钟级，入队时合法 ≠ fire 时合法） |
+| 零任务工作流是推进引擎的退化用例 | `is_node_complete` 对空集真空成立；任何"全部完成则推进"的逻辑都必须先回答"空集算完成吗" |
+| 名实不符的函数是事故温床 | `active_registered_workflows()` 返回的是**全部**条目；名字承诺与实现不符时，要么改实现要么改名，留着眼就是给下一个读者埋雷 |
+| 双保险要落在不同层 | 扫描侧过滤（不产新事件）+ 消费侧再校验（丢已入队事件）缺一不可；只堵源头堵不住已上膛的子弹 |
+
+### 操作规范
+
+1. 终态判据语义（`status=="completed"` 即终态、缺 status 视为活跃）在
+   `herdr/projects.py` 共享谓词（factory 侧消费）与 controller 内联实现
+   （本地 `workflow_closed` + sweep 过滤）各有一份——修改口径必须两处同步，
+   并补 `tests/test_workflow_registry_guards.py` 用例；
+2. 关闭无任务工作流后，若 controller 仍打印其 `STAGE ADVANCE` 行，说明终态
+   闸门失效，按 `docs/walkthroughs/20260913-controller-ghost-advance-and-create-guard.md`
+   §3 配方处置（移除注册表条目 → pending 事件经 no-coordinator-pane 自毁）；
+3. 同项目默认串行：`herdr-factory run` 遇活跃工作流直接拒绝（exit 2），
+   `--force` 是唯一逃生口且不暴露给 Console。
+
+### 验证命令 / 证据
+
+```bash
+# 闸门拒绝（111049 活跃时）
+herdr-factory run --project /Users/user/nexusarchive "guard test"; echo $?  # 期望 exit 2 + 拒绝消息
+# 幽灵消除：零任务工作流被干净自动关闭而非循环推进
+grep -c "STAGE ADVANCE.*125332" ~/.herdr-controller/logs/controller.out.log  # 期望 0
+pytest tests/test_workflow_registry_guards.py  # 6 passed
+```
+
+决策与会话碰撞全记录：`docs/walkthroughs/20260913-controller-ghost-advance-and-create-guard.md`。
