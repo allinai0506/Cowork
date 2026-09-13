@@ -138,11 +138,49 @@ def save_projects(data):
     _save(PROJECTS_FILE, data)
 
 
+def _get_store():
+    try:
+        from .state_store import get_state_store
+    except ImportError:
+        from herdr.state_store import get_state_store
+    if os.environ.get("HERDR_STATE_DB"):
+        return get_state_store(Path(os.environ["HERDR_STATE_DB"]))
+    wf_file = os.environ.get("WORKFLOWS_FILE") or globals().get("WORKFLOWS_FILE")
+    if wf_file:
+        p = Path(wf_file)
+        db_path = p.parent / "state.db" if p.name == "workflows.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    t_file = os.environ.get("TASKS_FILE")
+    if t_file:
+        p = Path(t_file)
+        db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    return get_state_store()
+
+
 def load_workflows():
-    return _load(WORKFLOWS_FILE, {"version": 1, "workflows": {}})
+    try:
+        store = _get_store()
+        try:
+            from .kernel import _import_missing_workflows_from_disk
+            _import_missing_workflows_from_disk(store)
+        except Exception:
+            pass
+        return store.export_workflows_json()
+    except Exception:
+        return _load(WORKFLOWS_FILE, {"version": 1, "workflows": {}})
 
 
 def save_workflows(data):
+    try:
+        store = _get_store()
+        for wid, wf in data.get("workflows", {}).items():
+            wf.setdefault("workflow_id", wid)
+            store.save_workflow(wf)
+    except Exception:
+        pass
     _save(WORKFLOWS_FILE, data)
 
 
@@ -151,20 +189,37 @@ TERMINAL_WORKFLOW_STATUSES = {"completed"}
 
 def active_workflows_for_project(project_id):
     """Registry entries of project_id that have not reached a terminal status."""
-    return [
-        entry
-        for entry in load_workflows().get("workflows", {}).values()
-        if entry.get("project_id") == project_id
-        and entry.get("status") not in TERMINAL_WORKFLOW_STATUSES
-    ]
+    try:
+        store = _get_store()
+        return [
+            entry
+            for entry in store.list_workflows()
+            if entry.get("project_id") == project_id
+            and entry.get("status") not in TERMINAL_WORKFLOW_STATUSES
+        ]
+    except Exception:
+        return [
+            entry
+            for entry in load_workflows().get("workflows", {}).values()
+            if entry.get("project_id") == project_id
+            and entry.get("status") not in TERMINAL_WORKFLOW_STATUSES
+        ]
 
 
 def non_terminal_workflow_ids():
-    return {
-        workflow_id
-        for workflow_id, entry in load_workflows().get("workflows", {}).items()
-        if entry.get("status") not in TERMINAL_WORKFLOW_STATUSES
-    }
+    try:
+        store = _get_store()
+        return {
+            entry["workflow_id"]
+            for entry in store.list_workflows()
+            if entry.get("workflow_id") and entry.get("status") not in TERMINAL_WORKFLOW_STATUSES
+        }
+    except Exception:
+        return {
+            workflow_id
+            for workflow_id, entry in load_workflows().get("workflows", {}).items()
+            if entry.get("status") not in TERMINAL_WORKFLOW_STATUSES
+        }
 
 
 def workflow_closed(workflow_id):
@@ -200,6 +255,13 @@ def project_by_root(root):
 
 
 def project_for_workflow(workflow_id):
+    try:
+        store = _get_store()
+        record = store.get_workflow(workflow_id)
+        if record and not (record.get("status") == "unknown" and not record.get("project_id")):
+            return record
+    except Exception:
+        pass
     record = (
         load_workflows()
         .get("workflows", {})
@@ -276,7 +338,11 @@ def generate_workflow_id(project, prefix="wf", now=None):
 
     # Scan existing workflows in registry to find next sequence number
     existing_seqs = []
-    workflows = load_workflows().get("workflows", {})
+    try:
+        store = _get_store()
+        workflows = {w["workflow_id"]: w for w in store.list_workflows() if w.get("workflow_id")}
+    except Exception:
+        workflows = load_workflows().get("workflows", {})
     for wid in workflows:
         if wid.startswith(expected_prefix):
             remainder = wid[len(expected_prefix):]
@@ -299,8 +365,7 @@ def generate_workflow_id(project, prefix="wf", now=None):
 def register_workflow(workflow_id, project, requirement="", title=""):
     title = (title or "").strip()
     subject = title or requirement_subject(requirement) or "未命名工作流"
-    data = load_workflows()
-    data.setdefault("workflows", {})[workflow_id] = {
+    wf_entry = {
         "workflow_id": workflow_id,
         "title": title,
         "requirement_subject": subject,
@@ -313,21 +378,49 @@ def register_workflow(workflow_id, project, requirement="", title=""):
         "workflow_file": project["workflow_file"],
         "requirement": requirement,
         "startup_ready": False,
+        "status": "running",
     }
-    save_workflows(data)
+    try:
+        store = _get_store()
+        store.save_workflow(wf_entry)
+    except Exception:
+        pass
+    data = load_workflows()
+    data.setdefault("workflows", {})[workflow_id] = wf_entry
+    _save(WORKFLOWS_FILE, data)
 
 
 def mark_workflow_startup_ready(workflow_id, healthy_agents=None, unhealthy_agents=None):
-    data = load_workflows()
-    record = data.setdefault("workflows", {}).get(workflow_id)
+    store = None
+    record = None
+    try:
+        store = _get_store()
+        record = store.get_workflow(workflow_id)
+    except Exception:
+        pass
+
+    if not record:
+        data = load_workflows()
+        record = data.setdefault("workflows", {}).get(workflow_id)
+
     if not record:
         raise RuntimeError(f"Workflow registry missing: {workflow_id}")
+
     record["startup_ready"] = True
     if healthy_agents is not None:
         record["healthy_agents"] = healthy_agents
     if unhealthy_agents is not None:
         record["unhealthy_agents"] = unhealthy_agents
-    save_workflows(data)
+
+    if store:
+        try:
+            store.save_workflow(record)
+        except Exception:
+            pass
+
+    data = load_workflows()
+    data.setdefault("workflows", {})[workflow_id] = record
+    _save(WORKFLOWS_FILE, data)
 
 
 def _workspace_alive(workspace_id):

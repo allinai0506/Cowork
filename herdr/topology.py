@@ -47,6 +47,13 @@ def _run_json(cmd):
 
 
 def _workflow_record(workflow_id):
+    try:
+        from .state_store import get_state_store
+        wf = get_state_store().get_workflow(workflow_id)
+        if wf and not (wf.get("status") == "unknown" and not wf.get("project_id")):
+            return wf
+    except Exception:
+        pass
     data = _load(WORKFLOWS_FILE, {"workflows": {}})
     record = data.get("workflows", {}).get(workflow_id)
     if not record:

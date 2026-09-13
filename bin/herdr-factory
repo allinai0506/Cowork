@@ -88,13 +88,36 @@ def load_json(path, default=None):
         return default
 
 
+def _get_store():
+    from herdr.state_store import get_state_store
+    if os.environ.get("HERDR_STATE_DB"):
+        return get_state_store(Path(os.environ["HERDR_STATE_DB"]))
+    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+    if t_file:
+        p = Path(t_file)
+        db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE")
+    if wf_file:
+        p = Path(wf_file)
+        db_path = p.parent / "state.db" if p.name == "workflows.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    return get_state_store()
+
+
 def tasks_for(workflow_id):
-    data = load_json(TASKS_FILE, {"tasks": []})
-    return [
-        t
-        for t in data.get("tasks", [])
-        if t.get("workflow_id") == workflow_id
-    ]
+    try:
+        store = _get_store()
+        return store.list_tasks(workflow_id=workflow_id)
+    except Exception:
+        data = load_json(TASKS_FILE, {"tasks": []})
+        return [
+            t
+            for t in data.get("tasks", [])
+            if t.get("workflow_id") == workflow_id
+        ]
 
 
 def resolve_project(explicit_path=None, create=True, template_name="software-development-v1"):
@@ -262,15 +285,32 @@ def run_workflow_preflight(project, workflow_id):
             "Deep Preflight 未发现任何 READY Agent，拒绝启动 Workflow"
         )
 
-    data = json.loads(WORKFLOWS_FILE.read_text(encoding="utf-8"))
-    record = data.setdefault("workflows", {}).get(workflow_id)
+    store = None
+    record = None
+    try:
+        store = _get_store()
+        record = store.get_workflow(workflow_id)
+    except Exception:
+        pass
+
     if record is None:
-        raise RuntimeError(f"Workflow registry missing: {workflow_id}")
+        data = load_json(WORKFLOWS_FILE, {"workflows": {}})
+        record = data.setdefault("workflows", {}).get(workflow_id)
+        if record is None:
+            raise RuntimeError(f"Workflow registry missing: {workflow_id}")
 
     record["healthy_agents"] = healthy
     record["unhealthy_agents"] = unhealthy
     record["preflight_checked_at"] = datetime.now().isoformat(timespec="seconds")
 
+    if store:
+        try:
+            store.save_workflow(record)
+        except Exception:
+            pass
+
+    data = load_json(WORKFLOWS_FILE, {"workflows": {}})
+    data.setdefault("workflows", {})[workflow_id] = record
     tmp = WORKFLOWS_FILE.with_suffix(".json.tmp")
     tmp.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -451,42 +491,62 @@ def status(workflow_id):
 
 
 def _update_workflow_status(workflow_id, target_status, action_label):
+    store = None
+    wf = None
+    try:
+        store = _get_store()
+        wf = store.get_workflow(workflow_id)
+        if wf:
+            wf["status"] = target_status
+            store.save_workflow(wf)
+    except Exception:
+        pass
+
     wf_file = os.environ.get("WORKFLOWS_FILE") or os.path.expanduser("~/.herdr-controller/workflows.json")
     try:
         with open(wf_file, "r", encoding="utf-8") as f:
             data = json.load(f)
+        wfs = data.get("workflows", {})
+        if isinstance(wfs, dict) and workflow_id in wfs:
+            wfs[workflow_id]["status"] = target_status
+        elif isinstance(wfs, list):
+            for w in wfs:
+                if isinstance(w, dict) and w.get("workflow_id") == workflow_id:
+                    w["status"] = target_status
+        tmp = wf_file + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, wf_file)
     except Exception:
-        print("Failed to load workflows.json")
-        return 1
-    wfs = data.get("workflows", {})
-    if isinstance(wfs, dict):
-        if workflow_id not in wfs:
-            print(f"Workflow {workflow_id} not found")
-            return 1
-        wfs[workflow_id]["status"] = target_status
-    elif isinstance(wfs, list):
-        target = next((w for w in wfs if isinstance(w, dict) and w.get("workflow_id") == workflow_id), None)
-        if not target:
-            print(f"Workflow {workflow_id} not found")
-            return 1
-        target["status"] = target_status
-    else:
+        pass
+
+    if not wf and not os.path.exists(wf_file):
         print(f"Workflow {workflow_id} not found")
         return 1
 
-    tmp = wf_file + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, wf_file)
     print(f"Workflow {workflow_id} {action_label}")
     return 0
 
 
 def pause_workflow(workflow_id):
+    try:
+        res = kernel.pause_workflow(workflow_id)
+        if res.get("ok"):
+            print(f"Workflow {workflow_id} paused")
+            return 0
+    except Exception:
+        pass
     return _update_workflow_status(workflow_id, "paused", "paused")
 
 
 def resume_workflow(workflow_id):
+    try:
+        res = kernel.resume_workflow(workflow_id)
+        if res.get("ok"):
+            print(f"Workflow {workflow_id} resumed")
+            return 0
+    except Exception:
+        pass
     return _update_workflow_status(workflow_id, "running", "resumed")
 
 

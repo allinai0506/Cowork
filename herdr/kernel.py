@@ -58,8 +58,10 @@ def _import_missing_workflows_from_disk(store: StateStore) -> None:
             if isinstance(disk_data, dict):
                 for wid, wf in disk_data.get("workflows", {}).items():
                     wf.setdefault("workflow_id", wid)
-                    if not store.get_workflow(wid):
-                        # ONLY import missing workflows; SQLite is authoritative and never overwritten
+                    existing = store.get_workflow(wid)
+                    is_placeholder = bool(existing and existing.get("status") == "unknown" and not existing.get("project_id"))
+                    if not existing or is_placeholder:
+                        # Import missing workflows or replace auto-generated FK stubs; true SQLite records are authoritative
                         store.save_workflow(wf)
         except Exception:
             pass

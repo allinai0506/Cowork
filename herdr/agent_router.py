@@ -1,6 +1,7 @@
 #!/opt/homebrew/bin/python3
 import json
 import fcntl
+import os
 import time
 from pathlib import Path
 
@@ -76,24 +77,85 @@ def ensure_pool_for_project(project_id):
         save_pools(data)
     return projects[project_id]
 
+def _get_store():
+    try:
+        from .state_store import get_state_store
+    except ImportError:
+        from herdr.state_store import get_state_store
+    if os.environ.get("HERDR_STATE_DB"):
+        return get_state_store(Path(os.environ["HERDR_STATE_DB"]))
+    wf_file = os.environ.get("WORKFLOWS_FILE") or globals().get("WORKFLOWS_FILE")
+    if wf_file:
+        p = Path(wf_file)
+        db_path = p.parent / "state.db" if p.name == "workflows.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    t_file = os.environ.get("TASKS_FILE") or globals().get("TASKS_FILE")
+    if t_file:
+        p = Path(t_file)
+        db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    return get_state_store()
+
+
 def workflow_record(workflow_id):
+    try:
+        store = _get_store()
+        wf = store.get_workflow(workflow_id)
+        if wf and not (wf.get("status") == "unknown" and not wf.get("project_id")):
+            return wf
+    except Exception:
+        pass
     data = _load(WORKFLOWS_FILE, {"workflows": {}})
     return data.get("workflows", {}).get(workflow_id, {})
 
+
 def set_workflow_agent_override(workflow_id, agent):
-    data = _load(WORKFLOWS_FILE, {"workflows": {}})
-    record = data.setdefault("workflows", {}).get(workflow_id)
+    store = None
+    try:
+        store = _get_store()
+    except Exception:
+        pass
+
+    record = None
+    if store:
+        try:
+            record = store.get_workflow(workflow_id)
+        except Exception:
+            pass
+
+    if not record:
+        data = _load(WORKFLOWS_FILE, {"workflows": {}})
+        record = data.setdefault("workflows", {}).get(workflow_id)
+
     if not record:
         return
+
     record["agent_override"] = agent or "auto"
+    if store:
+        try:
+            store.save_workflow(record)
+        except Exception:
+            pass
+
+    data = _load(WORKFLOWS_FILE, {"workflows": {}})
+    data.setdefault("workflows", {})[workflow_id] = record
     _save(WORKFLOWS_FILE, data)
+
 
 def _clean_reservations(data, ttl=300):
     now = time.time()
-    tasks = _load(TASKS_FILE, {"tasks": []})
+    try:
+        store = _get_store()
+        tasks = store.list_tasks()
+    except Exception:
+        t_data = _load(TASKS_FILE, {"tasks": []})
+        tasks = t_data.get("tasks", [])
+
     registered = {
         t.get("task_id")
-        for t in tasks.get("tasks", [])
+        for t in tasks
         if t.get("task_id")
     }
 
@@ -127,13 +189,19 @@ def release_agent_reservation(task_id):
 
 
 def _active_agent_loads(project_id):
-    data = _load(TASKS_FILE, {"tasks": []})
+    try:
+        store = _get_store()
+        tasks = store.list_tasks()
+    except Exception:
+        t_data = _load(TASKS_FILE, {"tasks": []})
+        tasks = t_data.get("tasks", [])
+
     active = {
         "pending", "dispatched", "working", "blocked", "agent_done",
         "rework",
     }
     loads = {}
-    for task in data.get("tasks", []):
+    for task in tasks:
         if task.get("project_id") != project_id:
             continue
         if task.get("status") not in active:

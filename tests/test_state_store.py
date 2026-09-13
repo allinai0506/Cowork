@@ -490,3 +490,102 @@ def test_herdr_task_cli_writes_directly_to_sqlite(store_env):
     assert t_completed["stage_verdict"] == "pass"
 
 
+def test_end_to_end_single_source_of_truth_without_workflows_json(store_env, monkeypatch):
+    """End-to-end verification:
+    1. Register workflow and mark startup ready via projects.py / herdr-factory APIs.
+    2. Set agent override.
+    3. Query SQLite directly (not workflows.json) and verify all fields are persisted.
+    4. Physically DELETE workflows.json.
+    5. agent_router continues to select agents correctly without workflows.json.
+    6. controller continues to advance workflows without workflows.json.
+    7. projects.py continues to query active workflows without workflows.json.
+    """
+    import importlib.util
+    from herdr import projects, agent_router
+
+    store = get_state_store()
+
+    proj = {
+        "project_id": "proj-e2e-test",
+        "project_name": "e2e-project",
+        "project_root": "/tmp/e2e-root",
+        "base_branch": "main",
+        "workspace_id": "ws-e2e-1",
+        "coordinator_pane_id": "pane-coord-1",
+        "workflow_file": str(store_env["cp_dir"] / "dummy_workflow.json"),
+    }
+    Path(proj["workflow_file"]).write_text(json.dumps({
+        "workflow_template": "universal_sdlc",
+        "nodes": [
+            {"id": "requirements", "label": "2需求分析"},
+            {"id": "plan", "label": "3计划", "depends_on": ["requirements"]},
+        ]
+    }), encoding="utf-8")
+
+    wid = "wf-e2e-no-json-01"
+
+    # 1. Register workflow via projects.py
+    projects.register_workflow(wid, proj, requirement="测试纯 SQLite 唯一事实源", title="E2E No JSON Test")
+
+    # 2. Mark startup ready with healthy agents
+    projects.mark_workflow_startup_ready(
+        wid,
+        healthy_agents=["codex", "claude"],
+        unhealthy_agents={"pi": "TIMEOUT"}
+    )
+
+    # 3. Set workflow agent override via agent_router
+    agent_router.set_workflow_agent_override(wid, "codex")
+
+    # 4. Directly query SQLite StateStore WITHOUT reading workflows.json
+    wf_in_sqlite = store.get_workflow(wid)
+    assert wf_in_sqlite is not None
+    assert wf_in_sqlite["workflow_id"] == wid
+    assert wf_in_sqlite["project_id"] == "proj-e2e-test"
+    assert wf_in_sqlite["startup_ready"] is True
+    assert wf_in_sqlite["healthy_agents"] == ["codex", "claude"]
+    assert wf_in_sqlite["unhealthy_agents"] == {"pi": "TIMEOUT"}
+    assert wf_in_sqlite["agent_override"] == "codex"
+
+    # 5. Physically delete workflows.json from disk!
+    if store_env["wf_file"].exists():
+        store_env["wf_file"].unlink()
+    assert not store_env["wf_file"].exists()
+
+    # 6. agent_router continues to work normally without workflows.json
+    chosen = agent_router.choose_agent(wid, "requirements", "feat")
+    assert chosen == "codex"  # Due to agent_override="codex" in SQLite
+
+    # Change agent override in SQLite and choose again
+    agent_router.set_workflow_agent_override(wid, "claude")
+    if store_env["wf_file"].exists():
+        store_env["wf_file"].unlink()
+    assert not store_env["wf_file"].exists()
+
+    chosen2 = agent_router.choose_agent(wid, "requirements", "feat")
+    assert chosen2 == "claude"
+
+    # 7. projects.py queries continue to work normally without workflows.json
+    proj_rec = projects.project_for_workflow(wid)
+    assert proj_rec is not None
+    assert proj_rec["workflow_id"] == wid
+    assert proj_rec["project_id"] == "proj-e2e-test"
+
+    active_wfs = projects.active_workflows_for_project("proj-e2e-test")
+    assert len(active_wfs) == 1
+    assert active_wfs[0]["workflow_id"] == wid
+
+    # 8. services/herdr-controller.py continues to work normally without workflows.json
+    ctrl_spec = importlib.util.spec_from_file_location("controller_e2e_mod", "services/herdr-controller.py")
+    ctrl = importlib.util.module_from_spec(ctrl_spec)
+    ctrl_spec.loader.exec_module(ctrl)
+
+    active_reg = ctrl.active_registered_workflows()
+    assert wid in active_reg
+
+    wf_entry = ctrl._workflow_entry(wid)
+    assert wf_entry.get("workflow_id") == wid
+    assert wf_entry.get("agent_override") == "claude"
+
+
+
