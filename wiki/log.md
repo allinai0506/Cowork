@@ -304,7 +304,27 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 明确九大核心不变量（断点优先、读懂再写、意图定基线、复杂度定规划、风险度定质检、单一控制权、改动即失效、无铁证不宣称完成、交付不越权）；
   - 强化 S0 启动前置门禁：远端代码拉取同步与 CoW (Copy-on-Write) 沙盒隔离建支（一等公民准则）；
   - 规范 S6 审查修复闭环（S6 ➔ S4 ➔ S5 ➔ S6，3 轮熔断机制）与 S8 知识沉淀机制。
-- **同步验收门禁 (`CLAUDE.md`)**：在严格验收清单顶部加入 `统一研发流程合规 (Unified Dev Flow)` 门禁。
+## [2026-09-13] feat | StateStore Unification: Single Source of Truth via SQLite, Eliminating Dual-State Skew
+实现系统核心状态事实源完全归一，彻底消除 JSON 与 SQLite 双状态源裂脑与时序漂移风险：
+- **统一抽象层与引擎实现 (`herdr/state_store.py`)**：
+  - 定义 `StateStore(ABC)` 顶层多态抽象接口，标准化工作流（Workflow）、任务（Task）、工位纠偏（Steering）、审计事件（Events）与检查点快照（Checkpoints）的全生命周期方法；
+  - 实现 `SQLiteStateStore(StateStore)` 生产级状态底座，所有写操作唯一路由到 SQLite WAL 数据库；
+  - 明确 JSON 纯作为只读投射、冷导出 (`export_*_json`) 与无损迁移 (`import_from_json`) 介质，不再作为长期主状态载体；
+  - 提供 `get_state_store()` / `set_state_store()` 全局单例与注入工厂。
+- **底层模式与查询能力补齐 (`herdr/state_db.py`)**：
+  - 新增 `steering_items` 与 `steering_history` 表及索引；
+  - 扩展 `list_workflows`、`delete_workflow`、`get_task`、`list_tasks`、`delete_task`、`save_steer`、`list_steers`、`record_steering_history`、`list_steering_history` 等标准数据操作；
+  - `save_task` 智能自愈：自动保障父级 workflow 占位存在，规避 SQLite `FOREIGN KEY` 约束失败；
+  - 扩展 `migrate_v1_to_v2` 支持无损导入历史 `steering.json`。
+- **调度内核与纠偏模块收敛 (`herdr/kernel.py`, `herdr/steering.py`)**：
+  - 废除业务内部直接 `open("tasks.json")` / `open("workflows.json")` / `open("steering.json")`；
+  - 所有控制原语（pause/resume/force_pass/rollback/step/checkpoint/fork）和干预原语（queue_steer/dispatch/halt）统一通过 `StateStore` 操作；
+  - `load_*_data` 与 `save_*_data` 转化为基于 `StateStore` 的向后兼容读写适配器，且写操作联动同步兼容 JSON。
+- **质量防护与工程治理**：
+  - 沉淀通用工程教训 §30（状态源统一与防裂脑）；
+  - 新增 `tests/test_state_store.py`（8 项单元与集成测试全部通过，含跨模块单事实源防漂移断言）；
+  - 全仓 339 项自动化回归测试 100% 通过。
+
 
 
 
