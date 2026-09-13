@@ -11,6 +11,7 @@ from . import projects
 from . import topology
 from . import preflight
 from . import deep_preflight
+from . import kernel
 
 __all__ = [
     "workflow",
@@ -20,6 +21,7 @@ __all__ = [
     "topology",
     "preflight",
     "deep_preflight",
+    "kernel",
 ]
 
 # Provide backwards-compatible module aliases so legacy flat-file imports
@@ -34,5 +36,6 @@ for _alias, _module in [
     ("herdr_topology", topology),
     ("herdr_preflight", preflight),
     ("herdr_deep_preflight", deep_preflight),
+    ("herdr_kernel", kernel),
 ]:
     sys.modules.setdefault(_alias, _module)

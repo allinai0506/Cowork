@@ -156,6 +156,17 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - **视觉微雕与符号规范**：移除重复符号并全站用 SVG 矢量图标替换 Emoji（`🛠️`、`🟢`、`×` 等）；阶段看板增设流向箭头 `›` 与进行中呼吸光效；运维驾驶舱舰队数据接入 6 列 CSS Grid 规整表格；
 - **质量防护与门禁**：沉淀通用教训 §21；更新 `tests/test_console_frontend_syntax.py`（无障碍属性断言、消除原生 confirm/prompt、单加号与深蓝纯白按钮规则）；全量 272 个测试 100% 通过。
 
-
-
-
+## [2026-09-13] feat | Universal Runtime Phase 1: Kernel Control Primitives & State Snapshots
+实现通用人机协同底座阶段一目标，将调度器内核由“闭门推进”重构为“外部全面受控”：
+- **核心控制元语库 (`herdr/kernel.py`)**：
+  - `pause_workflow` / `resume_workflow`：支持全局及节点粒度的挂起与恢复；
+  - `step_workflow`：单步推进，在暂停态下仅分发一个就绪节点并保持暂停，杜绝自主失控；
+  - `rollback_workflow`：基于 Kahn 拓扑算法求出目标节点及其所有下游传递闭包，原子级联作废任务并重置调度锁；
+  - `force_pass_gate`：可审计的门禁强制放行，记录特批操作人与理由；
+  - `checkpoint` 快照机制：支持持久化快照保存（`create_checkpoint`）、列表（`list_checkpoints`）与原子恢复（`restore_checkpoint`）。
+- **控制台开放 REST API 与操作底座 (`console/herdr_factory_console.py`)**：
+  - 暴露 `/api/kernel/pause`, `/api/kernel/resume`, `/api/kernel/step`, `/api/kernel/rollback`, `/api/kernel/force-pass`, `/api/kernel/checkpoint`, `/api/kernel/checkpoints`；
+  - 前端控制台在更多操作下拉菜单中挂载暂停/恢复、单步、回溯模态框与快照中心，任务列表针对 blocked 状态提供「强制放行」快捷介入。
+- **CLI 命令行工具 (`bin/herdr-factory`)**：
+  - 新增 `step`, `rollback`, `force-pass`, `checkpoint (save|list|restore)` 一级子命令。
+- **质量防护与门禁**：沉淀通用教训 §22；新增 `tests/test_kernel_control_primitives.py` 与 `tests/test_console_kernel_api.py`；全量 284 个测试用例 100% 通过。
