@@ -1304,7 +1304,6 @@ pytest
 # 3. 本地工作区纯净度检查
 git status
 ```
-
 ---
 
 ## 30. 状态源统一与防裂脑：建立 StateStore 单一事实源，规避双状态源数据漂移与直接文件 I/O 陷阱
@@ -1388,10 +1387,3 @@ pytest -v tests/test_projection_engine.py
 # 3. 全仓自动化回归（349 项测试 100% 全部通过）
 pytest -q
 ```
-
-
-
-
-
-
-

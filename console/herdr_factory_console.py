@@ -4,7 +4,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-HOME=Path.home(); HERDR_ROOT=Path(os.environ.get('HERDR_ROOT', str(HOME/'herdr'))); ROOT=HOME/'.herdr-controller'
+HOME=Path.home(); HERDR_ROOT=Path(os.environ.get('HERDR_ROOT', str(Path(__file__).resolve().parent.parent))); ROOT=HOME/'.herdr-controller'
 sys.path.insert(0, str(HERDR_ROOT))
 from herdr import workflow as herdr_workflow
 from herdr import projects as herdr_projects
