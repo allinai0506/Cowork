@@ -2718,14 +2718,15 @@ def _mark_workflow_completed(workflow_id, outcome="delivered"):
     entry["status"] = "completed"
     entry["outcome"] = outcome
     entry["completed_at"] = _now()
-    tmp = WORKFLOWS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, WORKFLOWS_FILE)
+    entry.setdefault("workflow_id", workflow_id)
+    store = _get_store()
+    store.save_workflow(entry)
+
     try:
-        store = _get_store()
-        entry.setdefault("workflow_id", workflow_id)
-        store.save_workflow(entry)
+        tmp = WORKFLOWS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, WORKFLOWS_FILE)
     except Exception:
         pass
 

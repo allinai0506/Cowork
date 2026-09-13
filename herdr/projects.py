@@ -197,13 +197,10 @@ def load_workflows():
 
 
 def save_workflows(data):
-    try:
-        store = _get_store()
-        for wid, wf in data.get("workflows", {}).items():
-            wf.setdefault("workflow_id", wid)
-            store.save_workflow(wf)
-    except Exception:
-        pass
+    store = _get_store()
+    for wid, wf in data.get("workflows", {}).items():
+        wf.setdefault("workflow_id", wid)
+        store.save_workflow(wf)
     _save(WORKFLOWS_FILE, data)
 
 
@@ -407,25 +404,16 @@ def register_workflow(workflow_id, project, requirement="", title=""):
         "startup_ready": False,
         "status": "running",
     }
-    try:
-        store = _get_store()
-        store.save_workflow(wf_entry)
-    except Exception:
-        pass
+    store = _get_store()
+    store.save_workflow(wf_entry)
     data = load_workflows()
     data.setdefault("workflows", {})[workflow_id] = wf_entry
     _save(WORKFLOWS_FILE, data)
 
 
 def mark_workflow_startup_ready(workflow_id, healthy_agents=None, unhealthy_agents=None):
-    store = None
-    record = None
-    try:
-        store = _get_store()
-        record = store.get_workflow(workflow_id)
-    except Exception:
-        pass
-
+    store = _get_store()
+    record = store.get_workflow(workflow_id)
     if not record:
         data = load_workflows()
         record = data.setdefault("workflows", {}).get(workflow_id)
@@ -439,11 +427,7 @@ def mark_workflow_startup_ready(workflow_id, healthy_agents=None, unhealthy_agen
     if unhealthy_agents is not None:
         record["unhealthy_agents"] = unhealthy_agents
 
-    if store:
-        try:
-            store.save_workflow(record)
-        except Exception:
-            pass
+    store.save_workflow(record)
 
     data = load_workflows()
     data.setdefault("workflows", {})[workflow_id] = record

@@ -155,20 +155,9 @@ def workflow_record(workflow_id):
 
 
 def set_workflow_agent_override(workflow_id, agent):
-    store = None
-    try:
-        store = _get_store()
-        _sync_missing_workflows_into_store(store)
-    except Exception:
-        pass
-
-    record = None
-    if store:
-        try:
-            record = store.get_workflow(workflow_id)
-        except Exception:
-            pass
-
+    store = _get_store()
+    _sync_missing_workflows_into_store(store)
+    record = store.get_workflow(workflow_id)
     if not record:
         data = _load(WORKFLOWS_FILE, {"workflows": {}})
         record = data.setdefault("workflows", {}).get(workflow_id)
@@ -177,11 +166,7 @@ def set_workflow_agent_override(workflow_id, agent):
         return
 
     record["agent_override"] = agent or "auto"
-    if store:
-        try:
-            store.save_workflow(record)
-        except Exception:
-            pass
+    store.save_workflow(record)
 
     data = _load(WORKFLOWS_FILE, {"workflows": {}})
     data.setdefault("workflows", {})[workflow_id] = record

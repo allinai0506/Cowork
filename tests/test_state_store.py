@@ -608,4 +608,106 @@ def test_end_to_end_single_source_of_truth_without_workflows_json(store_env, mon
     assert store.get_workflow(wid)["status"] == "running"
 
 
+def test_fail_closed_prevents_silent_write_loss_when_statestore_fails(tmp_path, monkeypatch):
+    """Runtime write operations must fail closed if StateStore fails.
+
+    Under NO circumstances should a failed StateStore write silently proceed to
+    write JSON mirror, which would cause Silent Write Loss.
+    """
+    import sqlite3
+    from unittest.mock import patch
+    from herdr.state_store import get_state_store
+    from herdr import projects
+    from herdr import agent_router
+
+    db_path = tmp_path / "state.db"
+    wf_file = tmp_path / "workflows.json"
+    tasks_file = tmp_path / "tasks.json"
+
+    monkeypatch.setenv("HERDR_STATE_DB", str(db_path))
+    monkeypatch.setenv("WORKFLOWS_FILE", str(wf_file))
+    monkeypatch.setenv("TASKS_FILE", str(tasks_file))
+    monkeypatch.setattr(projects, "WORKFLOWS_FILE", wf_file)
+    monkeypatch.setattr(agent_router, "WORKFLOWS_FILE", wf_file)
+    monkeypatch.setattr(agent_router, "TASKS_FILE", tasks_file)
+
+    store = get_state_store(db_path=db_path)
+    wid = "wf-test-fail-closed"
+    initial_wf = {
+        "workflow_id": wid,
+        "title": "Fail Closed Test",
+        "status": "running",
+        "project_id": "p1",
+        "agent_override": "codex",
+    }
+    store.save_workflow(initial_wf)
+    wf_file.write_text(json.dumps({"workflows": {wid: initial_wf}}), encoding="utf-8")
+
+    simulated_err = sqlite3.OperationalError("database is locked / disk I/O error")
+
+    # 1. projects.save_workflows must fail closed
+    with patch.object(store, "save_workflow", side_effect=simulated_err):
+        with pytest.raises(sqlite3.OperationalError):
+            projects.save_workflows({"workflows": {wid: {"workflow_id": wid, "status": "corrupted"}}})
+        disk_data = json.loads(wf_file.read_text(encoding="utf-8"))
+        assert disk_data["workflows"][wid]["status"] == "running"
+
+    # 2. projects.register_workflow must fail closed
+    with patch.object(store, "save_workflow", side_effect=simulated_err):
+        dummy_proj = {
+            "project_id": "p1",
+            "project_name": "p1",
+            "project_root": "/tmp/p1",
+            "workspace_id": "w1",
+            "coordinator_pane_id": "w1:p1",
+            "workflow_file": "workflow.yaml",
+        }
+        with pytest.raises(sqlite3.OperationalError):
+            projects.register_workflow("wf-uncommitted", dummy_proj)
+        disk_data = json.loads(wf_file.read_text(encoding="utf-8"))
+        assert "wf-uncommitted" not in disk_data["workflows"]
+
+    # 3. agent_router.set_workflow_agent_override must fail closed
+    with patch.object(store, "save_workflow", side_effect=simulated_err):
+        with pytest.raises(sqlite3.OperationalError):
+            agent_router.set_workflow_agent_override(wid, "claude")
+        disk_data = json.loads(wf_file.read_text(encoding="utf-8"))
+        assert disk_data["workflows"][wid]["agent_override"] == "codex"
+
+    # 4. bin/herdr-factory _update_workflow_status must fail closed
+    import importlib.machinery
+    factory_loader = importlib.machinery.SourceFileLoader("factory_fail_closed_mod", str(Path("bin/herdr-factory").resolve()))
+    factory_spec = importlib.util.spec_from_loader("factory_fail_closed_mod", factory_loader)
+    factory = importlib.util.module_from_spec(factory_spec)
+    factory_loader.exec_module(factory)
+    monkeypatch.setattr(factory, "WORKFLOWS_FILE", wf_file)
+
+    with patch.object(store, "save_workflow", side_effect=simulated_err):
+        with pytest.raises(sqlite3.OperationalError):
+            factory._update_workflow_status(wid, "paused", "paused")
+        disk_data = json.loads(wf_file.read_text(encoding="utf-8"))
+        assert disk_data["workflows"][wid]["status"] == "running"
+
+    # 5. projects.mark_workflow_startup_ready must fail closed
+    with patch.object(store, "save_workflow", side_effect=simulated_err):
+        with pytest.raises(sqlite3.OperationalError):
+            projects.mark_workflow_startup_ready(wid, healthy_agents=["codex"])
+        disk_data = json.loads(wf_file.read_text(encoding="utf-8"))
+        assert disk_data["workflows"][wid].get("startup_ready") is not True
+
+    # 6. bin/herdr-factory run_workflow_preflight must fail closed
+    dummy_proc = type("Proc", (), {
+        "returncode": 0,
+        "stdout": json.dumps({"agents": [{"agent": "codex", "final_status": "READY"}]}),
+        "stderr": "",
+    })()
+    with patch("subprocess.run", return_value=dummy_proc):
+        with patch.object(store, "save_workflow", side_effect=simulated_err):
+            with pytest.raises(sqlite3.OperationalError):
+                factory.run_workflow_preflight({"project_id": "p1"}, wid)
+            disk_data = json.loads(wf_file.read_text(encoding="utf-8"))
+            assert "preflight_checked_at" not in disk_data["workflows"][wid]
+
+
+
 

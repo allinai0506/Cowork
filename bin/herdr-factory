@@ -303,11 +303,8 @@ def run_workflow_preflight(project, workflow_id):
     record["unhealthy_agents"] = unhealthy
     record["preflight_checked_at"] = datetime.now().isoformat(timespec="seconds")
 
-    if store:
-        try:
-            store.save_workflow(record)
-        except Exception:
-            pass
+    store = _get_store()
+    store.save_workflow(record)
 
     data = load_json(WORKFLOWS_FILE, {"workflows": {}})
     data.setdefault("workflows", {})[workflow_id] = record
@@ -491,16 +488,14 @@ def status(workflow_id):
 
 
 def _update_workflow_status(workflow_id, target_status, action_label):
-    store = None
-    wf = None
-    try:
-        store = _get_store()
-        wf = store.get_workflow(workflow_id)
-        if wf:
-            wf["status"] = target_status
-            store.save_workflow(wf)
-    except Exception:
-        pass
+    store = _get_store()
+    wf = store.get_workflow(workflow_id)
+    if not wf:
+        print(f"Workflow {workflow_id} not found")
+        return 1
+
+    wf["status"] = target_status
+    store.save_workflow(wf)
 
     wf_file = os.environ.get("WORKFLOWS_FILE") or os.path.expanduser("~/.herdr-controller/workflows.json")
     try:
@@ -519,10 +514,6 @@ def _update_workflow_status(workflow_id, target_status, action_label):
         os.replace(tmp, wf_file)
     except Exception:
         pass
-
-    if not wf and not os.path.exists(wf_file):
-        print(f"Workflow {workflow_id} not found")
-        return 1
 
     print(f"Workflow {workflow_id} {action_label}")
     return 0
