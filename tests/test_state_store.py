@@ -228,3 +228,76 @@ def test_global_state_store_singleton(store_env):
     custom_db = store_env["cp_dir"] / "custom.db"
     s_custom = get_state_store(custom_db)
     assert s_custom.db_path == custom_db
+
+
+def test_cross_module_single_source_of_truth_anti_skew(store_env):
+    """Verify that kernel and steering mutations write to StateStore/SQLite as sole truth."""
+    from unittest.mock import patch
+    from herdr import kernel, steering
+
+    store = get_state_store()
+
+    wid = "wf-anti-skew-001"
+    store.save_workflow({
+        "workflow_id": wid,
+        "title": "Anti Skew Verification",
+        "status": "running",
+        "config": {"nodes": [{"id": "dev"}]},
+    })
+
+    tid = "task-anti-skew-001"
+    store.save_task({
+        "task_id": tid,
+        "workflow_id": wid,
+        "node": "dev",
+        "status": "working",
+        "pane_id": "pane-mock-99",
+    })
+
+    # 1. Kernel pause mutation: verify SQLite reflects status immediately
+    k_res = kernel.pause_workflow(wid)
+    assert k_res["ok"] is True
+    wf_in_sqlite = store.get_workflow(wid)
+    assert wf_in_sqlite["status"] == "paused"
+
+    # 2. Kernel resume mutation: verify SQLite reflects status immediately
+    k_res2 = kernel.resume_workflow(wid)
+    assert k_res2["ok"] is True
+    wf_in_sqlite = store.get_workflow(wid)
+    assert wf_in_sqlite["status"] == "running"
+
+    # 3. Steering queue mutation: verify SQLite reflects steer item immediately
+    st_res = steering.queue_steer(tid, "Hold execution until code review", operator="lead", execute_dispatch=False)
+    assert st_res["ok"] is True
+    steer_id = st_res["steer_id"]
+    steer_in_sqlite = store.get_steer(steer_id)
+    assert steer_in_sqlite is not None
+    assert steer_in_sqlite["instruction"] == "Hold execution until code review"
+    assert steer_in_sqlite["status"] == "pending"
+
+    # 4. Steering dispatch mutation: verify SQLite reflects dispatched status and task history
+    with patch("herdr.steering._send_keys", return_value=True), patch("herdr.steering._send_text", return_value=True):
+        d_res = steering.dispatch_steer_now(tid, steer_id)
+        assert d_res["ok"] is True
+        steer_dispatched = store.get_steer(steer_id)
+        assert steer_dispatched["status"] == "dispatched"
+
+        task_in_sqlite = store.get_task(tid)
+        assert task_in_sqlite["last_steered_at"] is not None
+        assert len(task_in_sqlite["steering_history"]) == 1
+        assert task_in_sqlite["steering_history"][0]["steer_id"] == steer_id
+
+    # 5. Steering halt task: verify SQLite reflects interrupted status
+    with patch("herdr.steering._send_keys", return_value=True):
+        h_res = steering.halt_task(tid, reason="manual pause for audit", operator="lead", execute_kill=True)
+        assert h_res["ok"] is True
+        task_halted = store.get_task(tid)
+        assert task_halted["status"] == "interrupted"
+        assert task_halted["interrupt_reason"] == "manual pause for audit"
+
+    # 6. Verify compatibility files are completely consistent with SQLite
+    wfs_exported = store.export_workflows_json()
+    assert wfs_exported["workflows"][wid]["status"] == "running"
+    tasks_exported = store.export_tasks_json()
+    assert tasks_exported["tasks"][0]["status"] == "interrupted"
+
