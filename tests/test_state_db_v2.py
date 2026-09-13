@@ -469,3 +469,80 @@ def test_cli_checkpoint_commands(state_env):
     )
     assert r_fork.returncode == 0
     assert "[WORKFLOW_FORKED]" in r_fork.stdout
+
+
+def test_unified_state_db_extensions(state_env):
+    """Verify task, workflow, and steering query extensions on state_db."""
+    db = state_env["db_file"]
+    state_db.init_db(db)
+
+    # 1. Workflows listing & deletion
+    state_db.save_workflow({"workflow_id": "wf-ext-1", "title": "WF Ext 1", "status": "running"}, db)
+    state_db.save_workflow({"workflow_id": "wf-ext-2", "title": "WF Ext 2", "status": "completed"}, db)
+    wfs = state_db.list_workflows(db_path=db)
+    assert len(wfs) == 2
+    assert {w["workflow_id"] for w in wfs} == {"wf-ext-1", "wf-ext-2"}
+    wfs_completed = state_db.list_workflows(status="completed", db_path=db)
+    assert len(wfs_completed) == 1
+    assert wfs_completed[0]["workflow_id"] == "wf-ext-2"
+
+    # 2. Tasks get, list, and auto-creation of placeholder workflow if needed
+    t1 = {"task_id": "t-ext-1", "workflow_id": "wf-ext-1", "node": "dev", "status": "working"}
+    t2 = {"task_id": "t-ext-2", "workflow_id": "wf-ext-1", "node": "test", "status": "pending"}
+    # Standalone task with un-saved workflow should NOT fail foreign key:
+    t3 = {"task_id": "t-ext-3", "workflow_id": "wf-standalone", "node": "plan", "status": "pending"}
+    state_db.save_task(t1, db)
+    state_db.save_task(t2, db)
+    state_db.save_task(t3, db)
+
+    fetched_t1 = state_db.get_task("t-ext-1", db)
+    assert fetched_t1 is not None
+    assert fetched_t1["node"] == "dev"
+    assert fetched_t1["status"] == "working"
+
+    all_tasks = state_db.list_tasks(db_path=db)
+    assert len(all_tasks) == 3
+    wf1_tasks = state_db.list_tasks(workflow_id="wf-ext-1", db_path=db)
+    assert len(wf1_tasks) == 2
+    working_tasks = state_db.list_tasks(status="working", db_path=db)
+    assert len(working_tasks) == 1
+
+    # 3. Steering CRUD & history
+    steer_item = {
+        "steer_id": "str-001",
+        "task_id": "t-ext-1",
+        "instruction": "Stop loop and write tests",
+        "operator": "commander",
+        "urgent": True,
+        "status": "pending",
+    }
+    state_db.save_steer(steer_item, db)
+    fetched_steer = state_db.get_steer("str-001", db)
+    assert fetched_steer is not None
+    assert fetched_steer["instruction"] == "Stop loop and write tests"
+    assert fetched_steer["urgent"] is True
+    assert fetched_steer["status"] == "pending"
+
+    pending_steers = state_db.list_steers(task_id="t-ext-1", status="pending", db_path=db)
+    assert len(pending_steers) == 1
+
+    # Update steer status
+    now_ts = time.time()
+    updated = state_db.update_steer_status("str-001", "dispatched", dispatched_at=now_ts, db_path=db)
+    assert updated is True
+    fetched_steer2 = state_db.get_steer("str-001", db)
+    assert fetched_steer2["status"] == "dispatched"
+    assert fetched_steer2["dispatched_at"] == now_ts
+
+    # Steering history
+    state_db.record_steering_history({
+        "action": "steer_dispatched",
+        "task_id": "t-ext-1",
+        "steer_id": "str-001",
+        "instruction": "Stop loop and write tests",
+        "operator": "commander",
+    }, db)
+    history = state_db.list_steering_history(task_id="t-ext-1", db_path=db)
+    assert len(history) == 1
+    assert history[0]["action"] == "steer_dispatched"
+
