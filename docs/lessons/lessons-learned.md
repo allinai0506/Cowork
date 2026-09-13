@@ -1304,9 +1304,41 @@ pytest
 # 3. 本地工作区纯净度检查
 git status
 ```
+---
 
+## 31. 工作流抗停滞自愈、CoW沙盒纯净隔离与总指挥主动干预：终结长推理模型瞬态空闲死锁与母体代码污染
 
+### 问题背景
 
+在多 Agent 复杂编排与长时间运行的工作流（如商业研报生成 `wf-project-0913-01`）实战中，暴露出三处致命的工程死锁与推进阻塞缺陷：
+1. **母体工作区脏修改（WIP）污染 CoW 沙盒**：`herdr-worker.py` 执行 `cp -cR source clone` 时完整拷入了未提交的脏代码。随后在沙盒内检出基于 `origin/main` 的分支时，Git 因未提交文件冲突而拒绝检出并崩溃；且半残 Clone 目录残留导致后续重试因已存在目录死锁；
+2. **长推理模型瞬态停顿引发 Rework 孤儿死锁**：大模型（Codex/Claude）在深度推理或等待工具执行时存在瞬态停顿（>2s）。Controller 过早判定 `agent_done`，协调器因产物未落盘将其置为 `rework`。而在随后的状态机事件循环中，Controller 的 `idle` 事件仅响应 `working` 任务，对 `rework` 的完成事件完全丢弃；导致 Agent 产物最终落盘后任务被永久孤立在 `rework` 状态；
+3. **总指挥侧缺乏全维停滞感知与干预手段**：当工作流因底层死锁或阶段推进悬挂停摆时，控制台无明确告警，缺乏“一键唤醒复审”或“重试推进”的白盒干预机制，人类总指挥无法在不断掉整个现场的情况下主动恢复。
 
+### 经验教训
 
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| CoW 克隆拷入母体脏文件引发检出冲突 | 沙盒是独立副本，绝不能被宿主工作区的未提交改动阻碍分支切换 | 克隆建支前沙盒内部强制执行 `git reset --hard HEAD` 与 `git clean -fd` 纯净归一化；对非活跃残留 Clone 允许自愈覆写 |
+| 仅凭终端空闲判定任务完成 | 瞬态网络卡顿或深度思考容易被误判为执行结束，引发下游协调器抢跑误判 | 引入产物契约优先原则（`check_task_deliverables_ready`），严格校验 `required_outputs` 或 baseline 真实变化 |
+| Rework 状态完成事件被静默丢弃 | 状态机未闭环覆盖返工状态下的完成信号，导致返工任务沦为永久僵尸 | 事件循环、重启对齐与后台巡检全量接入产物就绪检测（`rework_watchdog`），自动推进 `agent_done` 并促醒协调器复验 |
+| 调度停顿不可见与不可救 | 自动化系统难免偶发边界卡顿，缺乏白盒干预手段会导致用户只能粗暴重来 | 建立全维停滞感知（`detect_workflow_stalls`）、Attention Banner 警告横幅与人工干预通道（Force Review / Retry Advance） |
 
+### 操作规范
+
+1. **沙盒纯净隔离与异常自愈**：固化到 `services/herdr-worker.py` 的 `sanitize_clone_sandbox` 与 `create_clone`；
+2. **产物契约校验与 Rework 看门狗**：固化到 `services/herdr-controller.py` 的 `check_task_deliverables_ready`、`handle_event`、`reconcile_task_state` 与主循环 `rework_watchdog`；
+3. **总指挥停滞感知与主动干预控制台**：固化到 `herdr/projection.py`（`detect_workflow_stalls`）、`console/herdr_factory_console.py`（`/api/task/force-review`、`/api/workflow/retry-advance`、Attention Banner 告警条与任务卡片唤醒按钮）。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 运行沙盒隔离与返工自愈回归测试
+pytest -v tests/test_herdr_worker.py tests/test_fix_loop_anti_flapping.py
+
+# 2. 运行白盒遥测停滞检测测试
+pytest -v tests/test_projection_engine.py
+
+# 3. 全仓自动化回归测试
+pytest -q
+```

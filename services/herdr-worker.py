@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import shlex
 import sys
@@ -31,14 +32,52 @@ def run_json(cmd):
     return json.loads(result.stdout)
 
 
+def is_task_active_in_registry(task_id: str) -> bool:
+    """Check if task_id has already been registered and is in active lifecycle."""
+    try:
+        from herdr.state_store import get_state_store
+        t = get_state_store().get_task(task_id)
+        if t and t.get("status") not in ("pending", "failed"):
+            return True
+    except Exception:
+        pass
+    tasks_file = Path.home() / ".herdr-controller" / "tasks.json"
+    if tasks_file.exists():
+        try:
+            with open(tasks_file, "r", encoding="utf-8") as f:
+                for t in json.load(f).get("tasks", []):
+                    if t.get("task_id") == task_id and t.get("status") not in ("pending", "failed"):
+                        return True
+        except Exception:
+            pass
+    return False
+
+
+def sanitize_clone_sandbox(clone):
+    """Purge uncommitted working tree edits and untracked files copied into the clone sandbox.
+
+    Since the clone sandbox is an isolated CoW copy, resetting it does not touch the source repo,
+    ensuring that subsequent branch switches never collide with developer WIP in the source repo.
+    """
+    subprocess.run(["git", "-C", str(clone), "reset", "--hard", "HEAD"], capture_output=True)
+    subprocess.run(["git", "-C", str(clone), "clean", "-fd"], capture_output=True)
+
+
 def create_clone(source, task_id):
     source = Path(source).expanduser().resolve()
     clone = CLONE_ROOT / task_id
 
     if clone.exists():
-        raise RuntimeError(
-            f"Clone already exists: {clone}"
-        )
+        if not is_task_active_in_registry(task_id):
+            print(
+                f"[CLONE HEAL] Removing stale unmanaged clone: {clone}",
+                file=sys.stderr
+            )
+            shutil.rmtree(clone, ignore_errors=True)
+        else:
+            raise RuntimeError(
+                f"Clone already exists: {clone}"
+            )
 
     CLONE_ROOT.mkdir(
         parents=True,
@@ -112,6 +151,8 @@ def create_task_branch(clone, task_id, agent, task_type, base_branch):
             or f"Base branch not found: {base_branch}"
         )
 
+    sanitize_clone_sandbox(clone)
+
     result = subprocess.run(
         [
             "git", "-C", str(clone),
@@ -159,6 +200,8 @@ def checkout_onto_branch(clone, onto_branch):
             f"Onto branch not found on origin: {onto_branch}"
             + (f"\n{detail}" if detail else "")
         )
+
+    sanitize_clone_sandbox(clone)
 
     local_exists = subprocess.run(
         [
@@ -569,109 +612,119 @@ def main():
 
     args = parser.parse_args()
 
-    clone = create_clone(
-        args.source,
-        args.task_id
-    )
-
-    print(f"[CLONE] {clone}")
-
-    if args.onto:
-        # 必须先于 build_baseline_fingerprint:
-        # PR 分支的既有提交不能被记入本任务的基线变更。
-        branch = checkout_onto_branch(clone, args.onto)
-    else:
-        branch = create_task_branch(
-            clone,
-            args.task_id,
-            args.agent,
-            args.task_type,
-            args.base_branch
+    clone = None
+    try:
+        clone = create_clone(
+            args.source,
+            args.task_id
         )
 
-    print(f"[BRANCH] {branch}")
+        print(f"[CLONE] {clone}")
 
-    # 在写入 .agent-task-context 之前记录完整工作区基线。
-    # 包括：
-    # - Clone 创建时已经存在的 tracked 修改
-    # - Clone 创建时已经存在的 untracked 文件
-    baseline_fingerprint = build_baseline_fingerprint(
-        clone
-    )
-
-    baseline_untracked = sorted(
-        baseline_fingerprint["untracked"].keys()
-    )
-
-    print(
-        f"[BASELINE] "
-        f"tracked={len(baseline_fingerprint['tracked'])} "
-        f"untracked={len(baseline_fingerprint['untracked'])}"
-    )
-
-    ctx, complexity_baseline = write_task_context(
-        clone,
-        args.agent,
-        branch
-    )
-
-    print(f"[CONTEXT] {ctx}")
-    print(f"[COMPLEXITY BASELINE] {complexity_baseline}")
-
-    if args.pane_id:
-        pane_id = args.pane_id
-        prepare_existing_pane(pane_id, clone)
-        pane_source = "prebuilt"
-    else:
-        if not args.parent_pane:
-            raise RuntimeError(
-                "--parent-pane is required when --pane-id is not provided"
+        if args.onto:
+            # 必须先于 build_baseline_fingerprint:
+            # PR 分支的既有提交不能被记入本任务的基线变更。
+            branch = checkout_onto_branch(clone, args.onto)
+        else:
+            branch = create_task_branch(
+                clone,
+                args.task_id,
+                args.agent,
+                args.task_type,
+                args.base_branch
             )
-        pane_id = create_pane(args.parent_pane, clone)
-        pane_source = "dynamic"
 
-    print(f"[PANE] {pane_id}")
-    print(f"[PANE SOURCE] {pane_source}")
+        print(f"[BRANCH] {branch}")
 
-    if args.agent == "claude":
-        ensure_claude_workspace_trust(
+        # 在写入 .agent-task-context 之前记录完整工作区基线。
+        # 包括：
+        # - Clone 创建时已经存在的 tracked 修改
+        # - Clone 创建时已经存在的 untracked 文件
+        baseline_fingerprint = build_baseline_fingerprint(
             clone
         )
 
-    agent = start_agent(
-        args.task_id,
-        args.agent,
-        pane_id
-    )
-
-    result = {
-        "task_id": args.task_id,
-        "clone": str(clone),
-        "branch": branch,
-        "baseline_untracked": baseline_untracked,
-        "baseline_fingerprint": baseline_fingerprint,
-        "pane_id": pane_id,
-        "pane_source": pane_source,
-        "agent": agent.get("agent"),
-        "agent_name": agent.get("name"),
-        "status": agent.get("agent_status")
-    }
-
-    print(
-        json.dumps(
-            result,
-            ensure_ascii=False,
-            indent=2
+        baseline_untracked = sorted(
+            baseline_fingerprint["untracked"].keys()
         )
-    )
 
-    print(
-        "HERDR_WORKER_RESULT="
-        + json.dumps(
-            result,
-            ensure_ascii=False
+        print(
+            f"[BASELINE] "
+            f"tracked={len(baseline_fingerprint['tracked'])} "
+            f"untracked={len(baseline_fingerprint['untracked'])}"
         )
-    )
+
+        ctx, complexity_baseline = write_task_context(
+            clone,
+            args.agent,
+            branch
+        )
+
+        print(f"[CONTEXT] {ctx}")
+        print(f"[COMPLEXITY BASELINE] {complexity_baseline}")
+
+        if args.pane_id:
+            pane_id = args.pane_id
+            prepare_existing_pane(pane_id, clone)
+            pane_source = "prebuilt"
+        else:
+            if not args.parent_pane:
+                raise RuntimeError(
+                    "--parent-pane is required when --pane-id is not provided"
+                )
+            pane_id = create_pane(args.parent_pane, clone)
+            pane_source = "dynamic"
+
+        print(f"[PANE] {pane_id}")
+        print(f"[PANE SOURCE] {pane_source}")
+
+        if args.agent == "claude":
+            ensure_claude_workspace_trust(
+                clone
+            )
+
+        agent = start_agent(
+            args.task_id,
+            args.agent,
+            pane_id
+        )
+
+        result = {
+            "task_id": args.task_id,
+            "clone": str(clone),
+            "branch": branch,
+            "baseline_untracked": baseline_untracked,
+            "baseline_fingerprint": baseline_fingerprint,
+            "pane_id": pane_id,
+            "pane_source": pane_source,
+            "agent": agent.get("agent"),
+            "agent_name": agent.get("name"),
+            "status": agent.get("agent_status")
+        }
+
+        print(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                indent=2
+            )
+        )
+
+        print(
+            "HERDR_WORKER_RESULT="
+            + json.dumps(
+                result,
+                ensure_ascii=False
+            )
+        )
+    except Exception:
+        if clone and clone.exists() and not is_task_active_in_registry(args.task_id):
+            print(
+                f"[WORKER ROLLBACK] Cleaning up incomplete clone: {clone}",
+                file=sys.stderr
+            )
+            shutil.rmtree(clone, ignore_errors=True)
+        raise
 
 
 if __name__ == "__main__":
