@@ -20,8 +20,8 @@ if str(HERDR_ROOT) not in sys.path:
 
 from herdr.evaluator import (
     LOOP_DIR_NAME,
-    MetricVector,
     calculate_metrics,
+    generate_blocker_report,
     get_loop_dir,
     init_loop,
     is_converged,
@@ -118,8 +118,11 @@ def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool]:
     new_status = "converged" if converged else ("exhausted" if iteration >= max_iter else "iterating")
     write_state(loop_dir, iteration, max_iter, new_status, converged)
 
-    return metrics, converged
+    # Auto-generate BLOCKER.md when loop is exhausted without convergence
+    if not converged and iteration >= max_iter:
+        generate_blocker_report(loop_dir, metrics, iteration, max_iter)
 
+    return metrics, converged, new_status
 
 def main():
     parser = argparse.ArgumentParser(description="Herdr Autonomous Loop CLI")
@@ -159,9 +162,13 @@ def main():
         sys.exit(0)
 
     elif args.command == "eval":
-        metrics, converged = run_evaluation(target_dir)
+        metrics, converged, loop_status = run_evaluation(target_dir)
         print(f"[HERDR_LOOP_SCORE] {metrics.composite_score}")
         print(f"[HERDR_LOOP_CONVERGED] {converged}")
+        if not converged and loop_status == "exhausted":
+            blocker_path = get_loop_dir(target_dir) / "BLOCKER.md"
+            print(f"[HERDR_LOOP_EXHAUSTED] Max iterations reached. BLOCKER.md at {blocker_path}")
+            print("[HERDR_LOOP_ACTION] Output HERDR_TASK_BLOCKER:<task_id> to escalate to Coordinator")
         sys.exit(0 if converged else 1)
 
     elif args.command == "status":

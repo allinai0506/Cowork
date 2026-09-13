@@ -166,12 +166,26 @@ def main():
 
             screen = pane_visible(pane_id)
             done_marker = f"HERDR_TASK_DONE:{task_id}"
+            blocker_marker = f"HERDR_TASK_BLOCKER:{task_id}"
             orchestration_marker = f"HERDR_ORCH_TASK:{task_id}"
 
             if status in {"dispatched", "working"} and done_marker in screen:
                 changes[task_id] = (
                     "agent_done",
                     "completion_sentinel",
+                )
+                continue
+
+            # Inner loop exhausted: agent self-reported a blocker escalation.
+            # Transition to 'blocked' so the Coordinator can route to human/Coordinator.
+            if status in {"dispatched", "working"} and blocker_marker in screen:
+                changes[task_id] = (
+                    "blocked",
+                    "inner_loop_exhausted",
+                )
+                print(
+                    f"[SENTINEL BLOCKER] task={task_id} pane={pane_id} — inner loop exhausted, escalating to Coordinator",
+                    flush=True,
                 )
                 continue
 

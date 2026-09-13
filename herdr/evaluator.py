@@ -477,3 +477,53 @@ def render_evaluation_markdown(
 2. 仅修改与当前目标相关的代码文件；
 3. 保存代码后，等待评估器重新评分，直至综合得分达到 100.0。
 """.strip()
+
+
+def generate_blocker_report(loop_dir: Path, metrics: MetricVector, iteration: int, max_iter: int) -> Path:
+    """Generate BLOCKER.md escalation report when inner loop exhausts all retries.
+
+    Returns the path to the written BLOCKER.md file.
+    Called automatically by herdr-loop when STATE.md status == 'exhausted'.
+    """
+    failing_list = "\n".join(f"- `{t}`" for t in metrics.failing_tests) or \
+        "- (测试框架无具体失败用例名，请查看 logs/test.log)"
+
+    repro_status = "✅ 通过 / 无复现用例"
+    if metrics.has_repro_test and metrics.repro < 99.9:
+        repro_status = "❌ 未通过"
+
+    blocker_content = f"""# 工位求助单 (Escalation Blocker Report)
+
+> **生成时间**: {time.strftime('%Y-%m-%d %H:%M:%S')}  
+> **状态**: 内循环已耗尽全部 {max_iter} 次重试，自愈失败  
+> **综合得分**: `{metrics.composite_score} / 100.0`
+
+## 当前阻断项
+
+### 失败测试
+{failing_list}
+
+### 静态分析
+- Lint 错误数: `{metrics.lint_errors}`
+- 类型检查错误数: `{metrics.type_errors}`
+
+### 复现测试
+- 状态: `{repro_status}`
+
+## 自愈尝试记录
+- 已执行 {iteration} 轮自检修复，达到最大上限 ({max_iter} 轮)
+- 详细日志请查看 `.herdr-loop/logs/`
+
+## 请求总指挥仲裁
+工位已无法通过内部自愈解决以上问题，可能原因：
+1. 外部依赖或环境配置问题（非代码本身）
+2. 验收标准定义有歧义，需要总指挥重新明确
+3. 需要更换 Agent 或调整策略
+
+**Agent 操作**: 输出 `HERDR_TASK_BLOCKER:<task_id>` 信号并静默等待总指挥仲裁。
+"""
+    blocker_file = loop_dir / "BLOCKER.md"
+    tmp = blocker_file.with_suffix(".md.tmp")
+    tmp.write_text(blocker_content, encoding="utf-8")
+    tmp.replace(blocker_file)
+    return blocker_file
