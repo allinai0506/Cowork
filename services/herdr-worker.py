@@ -169,6 +169,23 @@ def checkout_onto_branch(clone, onto_branch):
     ).returncode == 0
 
     if local_exists:
+        # 本地分支仅允许"领先"origin(未推送的续接提交);
+        # 与 origin 分叉的陈旧本地分支会让任务落在错误基线上,fail-fast。
+        ancestor = subprocess.run(
+            [
+                "git", "-C", str(clone),
+                "merge-base", "--is-ancestor",
+                f"origin/{onto_branch}", onto_branch,
+            ]
+        ).returncode == 0
+
+        if not ancestor:
+            raise RuntimeError(
+                f"Local branch {onto_branch} diverged from "
+                f"origin/{onto_branch}; delete or reset the local branch "
+                "before launching onto it"
+            )
+
         result = subprocess.run(
             [
                 "git", "-C", str(clone),

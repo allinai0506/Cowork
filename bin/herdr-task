@@ -1122,9 +1122,21 @@ def set_status(task_id, new_status, verdict=None, note=None):
         print("blocked verdict requires --note with the blocker list")
         sys.exit(2)
 
+    # 先写入字段再判同状态:同状态重复 set completed 补落 verdict 也要生效。
+    if verdict:
+        task["stage_verdict"] = verdict
+
+    if note:
+        task["stage_verdict_note"] = note
+
     old_status = task["status"]
 
     if old_status == new_status:
+        if new_status == "completed" and (verdict or note):
+            save_tasks(data)
+            print(f"{task_id}: already {new_status}; verdict/note updated")
+            return
+
         print(f"{task_id}: already {new_status}")
         return
 
@@ -1152,12 +1164,6 @@ def set_status(task_id, new_status, verdict=None, note=None):
 
     if new_status in ACTIVE_TASK_STATUSES:
         _clear_suppress_auto_close(task.get("workflow_id"))
-
-    if verdict:
-        task["stage_verdict"] = verdict
-
-    if note:
-        task["stage_verdict_note"] = note
 
     if new_status in COMPLETED_TASK_STATUSES and not task.get("last_result"):
         task["last_result"] = task.get("status")
@@ -1232,7 +1238,7 @@ def launch_task(args):
             capture_output=True,
         )
 
-        if remote_ref.returncode != 0:
+        if fetch.returncode != 0 or remote_ref.returncode != 0:
             print(
                 f"Onto branch not found on origin: {onto_branch}\n"
                 f"{(fetch.stderr.strip() or fetch.stdout.strip())}"

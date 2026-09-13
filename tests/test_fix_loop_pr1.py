@@ -44,7 +44,8 @@ def _resp(returncode=0, stdout="", stderr=""):
 
 
 class CheckoutOntoBranchTest(unittest.TestCase):
-    def _git_side_effect(self, local_exists=True, remote_exists=True):
+    def _git_side_effect(self, local_exists=True, remote_exists=True,
+                         local_ahead=True):
         def side_effect(cmd, **kwargs):
             args = list(cmd)
             if "fetch" in args:
@@ -53,6 +54,8 @@ class CheckoutOntoBranchTest(unittest.TestCase):
                 return _resp(0 if remote_exists else 1)
             if "show-ref" in args:
                 return _resp(0 if local_exists else 1)
+            if "merge-base" in args:
+                return _resp(0 if local_ahead else 1)
             if "switch" in args:
                 return _resp(0)
             return _resp(1, stderr=f"unexpected git call: {args}")
@@ -99,6 +102,37 @@ class CheckoutOntoBranchTest(unittest.TestCase):
                 _worker.checkout_onto_branch("/tmp/clone", "nope/branch")
 
         self.assertIn("Onto branch not found", str(ctx.exception))
+
+    def test_fetch_failure_fails_fast(self):
+        def side_effect(cmd, **kwargs):
+            if "fetch" in cmd:
+                return _resp(1, stderr="fatal: could not read remote")
+            return _resp(1)
+
+        with patch.object(_worker.subprocess, "run", side_effect=side_effect):
+            with self.assertRaises(RuntimeError) as ctx:
+                _worker.checkout_onto_branch("/tmp/clone", "some/branch")
+
+        self.assertIn("Onto branch not found", str(ctx.exception))
+
+    def test_diverged_local_branch_fails_fast(self):
+        def side_effect(cmd, **kwargs):
+            args = list(cmd)
+            if "fetch" in args:
+                return _resp(0)
+            if "rev-parse" in args:
+                return _resp(0)
+            if "show-ref" in args:
+                return _resp(0)
+            if "merge-base" in args:
+                return _resp(1)
+            return _resp(1, stderr=f"unexpected: {args}")
+
+        with patch.object(_worker.subprocess, "run", side_effect=side_effect):
+            with self.assertRaises(RuntimeError) as ctx:
+                _worker.checkout_onto_branch("/tmp/clone", "agent/x/pr")
+
+        self.assertIn("diverged", str(ctx.exception))
 
 
 class ReopenWorkflowTest(unittest.TestCase):

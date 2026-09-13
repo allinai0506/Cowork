@@ -20,10 +20,16 @@ TASKS_FILE = os.path.expanduser("~/.herdr-controller/tasks.json")
 _task_bin = HERDR_ROOT / "bin" / "herdr-task"
 TASK_MANAGER = str(_task_bin) if _task_bin.exists() else os.path.expanduser("~/herdr/bin/herdr-task")
 try:
-    from herdr.projects import project_for_workflow, workflow_config_for
+    from herdr.projects import (
+        project_for_workflow,
+        workflow_config_for,
+    )
     from herdr.workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
 except ImportError:
-    from herdr_projects import project_for_workflow, workflow_config_for
+    from herdr_projects import (
+        project_for_workflow,
+        workflow_config_for,
+    )
     from herdr_workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
 
 STAGE_STATE_FILE = os.path.expanduser(
@@ -42,6 +48,19 @@ WORKFLOWS_FILE = os.path.expanduser("~/.herdr-controller/workflows.json")
 _workflow_close_inflight = set()
 
 
+def _workflow_entry(workflow_id):
+    try:
+        with open(WORKFLOWS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f).get("workflows", {}).get(workflow_id) or {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def workflow_closed(workflow_id):
+    """Registry entry reached a terminal (completed) status."""
+    return _workflow_entry(workflow_id).get("status") == "completed"
+
+
 def maybe_close_completed_workflow(workflow_id):
     """Workflow 全部节点完成后,自动执行物理收尾(关 pane/删 clone/归档)。
 
@@ -49,17 +68,15 @@ def maybe_close_completed_workflow(workflow_id):
     """
     if not workflow_id or workflow_id in _workflow_close_inflight:
         return
-    try:
-        with open(WORKFLOWS_FILE, "r", encoding="utf-8") as f:
-            entry = json.load(f).get("workflows", {}).get(workflow_id) or {}
-        if entry.get("status") == "completed":
-            return
-        # Fix-loop reopen 闩:重开后的 workflow 在首个任务进入 ACTIVE
-        # 之前,旧任务仍全为完成系,必须挡住 sweep 的自消除 close。
-        if entry.get("suppress_auto_close"):
-            return
-    except (OSError, json.JSONDecodeError):
-        pass
+
+    entry = _workflow_entry(workflow_id)
+
+    if entry.get("status") == "completed":
+        return
+    # Fix-loop reopen 闩:重开后的 workflow 在首个任务进入 ACTIVE
+    # 之前,旧任务仍全为完成系,必须挡住 sweep 的自消除 close。
+    if entry.get("suppress_auto_close"):
+        return
 
     _workflow_close_inflight.add(workflow_id)
 
@@ -199,6 +216,19 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg):
     nodes_by_id = {
         n["id"]: n for n in workflow_cfg.get("nodes", [])
     }
+
+    if not nodes_by_id and workflow_cfg.get("stages"):
+        # normalize_workflow 总会合成 nodes;此处兜底纯 stages 配置:
+        # 用 next 链重建线性依赖,保证下游作废闭包仍然成立。
+        prev = None
+        for stage in workflow_cfg.get("stages", []):
+            stage_id = stage.get("key") or stage.get("id")
+            nodes_by_id[stage_id] = {
+                "id": stage_id,
+                "depends_on": [prev] if prev else [],
+            }
+            prev = stage_id
+
     node_ids = _collect_downstream_nodes(nodes_by_id, gate_node_id)
 
     supersedeable = FIX_LOOP_SUPERSEDEABLE
@@ -261,11 +291,12 @@ def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg):
 
 
 def _bump_fix_loop_count(workflow_id, retry_node):
-    state = load_stage_state()
-    key = f"{workflow_id}|fixloop|{retry_node}"
-    count = int(state.get(key, 0)) + 1
-    state[key] = count
-    save_stage_state(state)
+    with lock:
+        state = load_stage_state()
+        key = f"{workflow_id}|fixloop|{retry_node}"
+        count = int(state.get(key, 0)) + 1
+        state[key] = count
+        save_stage_state(state)
     return count
 
 
@@ -290,6 +321,21 @@ def blocked_gate_dependency(workflow_id, ready_node, workflow_cfg):
 def handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg):
     """原子作废 + 计数 + 投递 fix_loop 事件;幂等(无作废即不重发)。"""
     retry_node = gate_cfg.get("retry_node", "implementation")
+
+    nodes_by_id = {
+        n["id"]: n for n in workflow_cfg.get("nodes", [])
+    }
+    if nodes_by_id and retry_node not in nodes_by_id:
+        gate_deps = nodes_by_id.get(gate_node_id, {}).get("depends_on", [])
+        fallback = next(
+            (dep for dep in gate_deps if dep in nodes_by_id),
+            None,
+        ) or next(iter(nodes_by_id))
+        print(
+            f"[FIX LOOP RETRY NODE FALLBACK] "
+            f"{retry_node} not in workflow nodes, using {fallback}"
+        )
+        retry_node = fallback
 
     blockers = []
 
@@ -679,6 +725,11 @@ def check_workflow_stage_advance(workflow_id):
     if not workflow_id:
         return
 
+    # Closed workflows must never advance: a zero-task closed workflow is
+    # vacuously "complete" at every stage and would ghost-advance forever.
+    if workflow_closed(workflow_id):
+        return
+
     pane = coordinator_pane_for_workflow(workflow_id)
     if not pane:
         return
@@ -695,6 +746,11 @@ def check_workflow_stage_advance(workflow_id):
         print(f"[STARTUP WAIT] workflow={workflow_id} preflight/request not ready")
         return
 
+    # 已关闭(含 abandoned)的 workflow 不再参与任何推进/回流判定;
+    # 否则 abandoned 残留的 blocked verdict 会被 sweep 反复回流。
+    if _workflow_entry(workflow_id).get("status") == "completed":
+        return
+
     if workflow_cfg.get("nodes"):
         # Revoke stale 'notified' locks before computing ready nodes,
         # so that regressed stages can be re-triggered.
@@ -707,6 +763,11 @@ def check_workflow_stage_advance(workflow_id):
         }
 
         if is_workflow_completed(workflow_cfg, completed_nodes):
+            # reopen 闩在先:重开现场(sweep 每 2s 一次)不得刷
+            # [WORKFLOW COMPLETE] 噪音,更不得触发 close。
+            if _workflow_entry(workflow_id).get("suppress_auto_close"):
+                return
+
             # 交付终态门禁:任一门禁节点 verdict=blocked 时不得关闭,
             # 回流 fix-loop(由 handle_fix_loop 原子作废并派发事件)。
             nodes_by_id = {
@@ -812,14 +873,18 @@ def check_workflow_stage_advance(workflow_id):
 
 
 def active_registered_workflows():
-    workflows = set()
-    wf_path = Path(os.path.expanduser("~/.herdr-controller/workflows.json"))
-    if wf_path.exists():
-        try:
-            data = json.loads(wf_path.read_text(encoding="utf-8"))
-            workflows.update(data.get("workflows", {}).keys())
-        except Exception:
-            pass
+    try:
+        with open(WORKFLOWS_FILE, "r", encoding="utf-8") as f:
+            entries = json.load(f).get("workflows", {})
+    except (OSError, json.JSONDecodeError):
+        entries = {}
+
+    # 终态(completed)的 workflow 不再参与周期 sweep。
+    workflows = {
+        workflow_id
+        for workflow_id, entry in entries.items()
+        if entry.get("status") != "completed"
+    }
 
     proj_path = Path(os.path.expanduser("~/.herdr-controller/projects.json"))
     if proj_path.exists():
@@ -1429,6 +1494,16 @@ Node Agent 策略
 
         try:
             while True:
+                # Re-validate on every wait iteration: the workflow may be
+                # closed or deregistered while this event sat in the queue.
+                if workflow_closed(workflow_id) or not project_for_workflow(workflow_id):
+                    print(
+                        f"[STAGE ADVANCE DROP] "
+                        f"workflow={workflow_id} "
+                        f"closed/deregistered while queued"
+                    )
+                    return
+
                 startup_record = project_for_workflow(workflow_id) or {}
                 if startup_record.get("startup_ready") is False:
                     print(
@@ -1609,6 +1684,65 @@ task_type:
 # Fix Loop Event
 # ==============================================
 
+def build_fix_loop_message(item, project_name="unknown"):
+    """fix_loop 事件消息;派发命令是建议骨架,裁量在总指挥。"""
+    workflow_id = item["workflow_id"]
+    gate_stage = item["gate_stage"]
+    retry_node = item["retry_node"]
+    loop_count = item["loop_count"]
+    max_loops = item["max_loops"]
+    invalidated = item.get("invalidated") or []
+    suggested_branch = item.get("suggested_branch")
+
+    blockers_text = "\n".join(
+        f"- {b.get('task_id')}: {b.get('note') or '(未记录说明)'}"
+        for b in item.get("blockers") or []
+    ) or "- (未记录 blocker 说明,请读取 gate 阶段任务输出)"
+
+    escalation = ""
+    if loop_count >= max_loops:
+        escalation = (
+            f"\n注意:已达 fix-loop 上限({loop_count}/{max_loops})。"
+            "先向用户请示(继续修 / 换方案 / 放弃),"
+            "未经用户确认不得派发。\n"
+        )
+
+    if suggested_branch:
+        onto_flag = f"--onto {suggested_branch} "
+        branch_line = suggested_branch
+    else:
+        onto_flag = ""
+        branch_line = "(未找到,请自行确认 retry_node 最近 committed 任务的分支)"
+
+    return f"""
+HERDR_CONTROLLER_FIX_LOOP_EVENT
+
+workflow_id: {workflow_id}
+project_name: {project_name}
+gate_stage: {gate_stage} — 验收结论 blocked
+retry_node: {retry_node}
+suggested_branch: {branch_line}
+loop_count: {loop_count}/{max_loops}
+{escalation}
+Controller 已自动作废受影响的 gate 与下游 Task(共 {len(invalidated)} 个,见 Task Registry);
+fix 完成后 DAG 将自动按 test → review → wrapup 顺序重新推进,旧 verdict 一并作废。
+
+Blocker 清单(blocked 结论与修复指引):
+{blockers_text}
+
+你现在只需派发修复 Task(禁止新建 workflow、禁止放弃本 workflow):
+
+~/herdr/bin/herdr-task launch --workflow-id {workflow_id} --stage {retry_node} \\
+  {onto_flag}--agent auto --task-type fix \\
+  --goal "修复 gate {gate_stage} 的阻断项" \\
+  --acceptance "<逐条对应 Blocker 清单>" \\
+  --prompt "<blocker 详情、修复范围与验证方式>"
+
+如需再次修复,对旧 fix task 使用 --supersedes。
+派发完成后结束当前回合,后续推进交给 Controller。
+""".strip()
+
+
 def _handle_fix_loop_item(item):
     """门禁 blocked 的回流通知:作废已由 handle_fix_loop 原子完成,
     这里只负责把 blocker 清单与修复派发指引送到总指挥。"""
@@ -1624,57 +1758,12 @@ def _handle_fix_loop_item(item):
 
     gate_stage = item["gate_stage"]
     retry_node = item["retry_node"]
-    loop_count = item["loop_count"]
-    max_loops = item["max_loops"]
-    invalidated = item.get("invalidated") or []
-    suggested_branch = item.get("suggested_branch")
     project_ctx = project_for_workflow(workflow_id) or {}
 
-    blockers_text = "\n".join(
-        f"- {b.get('task_id')}: {b.get('note') or '(未记录说明)'}"
-        for b in item.get("blockers") or []
-    ) or "- (未记录 blocker 说明,请读取 gate 阶段任务输出)"
-
-    escalation = ""
-    if loop_count >= max_loops:
-        escalation = (
-            f"\n注意:已达 fix-loop 上限({loop_count}/{max_loops})。"
-            "先向用户请示(继续修 / 换方案 / 放弃),"
-            "未经用户确认不得派发。\n"
-        )
-
-    branch_hint = (
-        suggested_branch
-        or "(未找到,请自行确认 retry_node 最近 committed 任务的分支)"
+    message = build_fix_loop_message(
+        item,
+        project_ctx.get("project_name", "unknown"),
     )
-
-    message = f"""
-HERDR_CONTROLLER_FIX_LOOP_EVENT
-
-workflow_id: {workflow_id}
-project_name: {project_ctx.get('project_name', 'unknown')}
-gate_stage: {gate_stage} — 验收结论 blocked
-retry_node: {retry_node}
-suggested_branch: {branch_hint}
-loop_count: {loop_count}/{max_loops}
-{escalation}
-Controller 已自动作废受影响的 gate 与下游 Task(共 {len(invalidated)} 个,见 Task Registry);
-fix 完成后 DAG 将自动按 test → review → wrapup 顺序重新推进,旧 verdict 一并作废。
-
-Blocker 清单(blocked 结论与修复指引):
-{blockers_text}
-
-你现在只需派发修复 Task(禁止新建 workflow、禁止放弃本 workflow):
-
-~/herdr/bin/herdr-task launch --workflow-id {workflow_id} --stage {retry_node} \\
-  --onto {branch_hint} --agent auto --task-type fix \\
-  --goal "修复 gate {gate_stage} 的阻断项" \\
-  --acceptance "<逐条对应 Blocker 清单>" \\
-  --prompt "<blocker 详情、修复范围与验证方式>"
-
-如需再次修复,对旧 fix task 使用 --supersedes。
-派发完成后结束当前回合,后续推进交给 Controller。
-""".strip()
 
     waited = 0
 

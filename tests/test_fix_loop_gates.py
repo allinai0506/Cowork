@@ -97,6 +97,60 @@ class SetVerdictTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             _ht.set_status("t1", "dispatched", verdict="pass")
 
+    def test_same_status_completed_still_persists_verdict(self):
+        # 已 completed 的任务补落 verdict(同状态 early-return 不得吞掉)。
+        self._write(_task())
+        _ht.set_status("t1", "completed")
+        _ht.set_status(
+            "t1", "completed",
+            verdict="blocked",
+            note="B1 阻断",
+        )
+        row = self._registry()
+        self.assertEqual(row["stage_verdict"], "blocked")
+        self.assertEqual(row["stage_verdict_note"], "B1 阻断")
+
+
+class BuildFixLoopMessageTest(unittest.TestCase):
+    def _item(self, **overrides):
+        item = {
+            "workflow_id": "wf-1",
+            "gate_stage": "review",
+            "retry_node": "implementation",
+            "blockers": [{"task_id": "rev1", "note": "B1 阻断"}],
+            "invalidated": ["rev1"],
+            "loop_count": 1,
+            "max_loops": 3,
+            "suggested_branch": "agent/x/pr",
+        }
+        item.update(overrides)
+        return item
+
+    def test_contains_onto_blockers_and_skeleton(self):
+        message = _ctl.build_fix_loop_message(self._item(), "nexusarchive")
+
+        self.assertIn("HERDR_CONTROLLER_FIX_LOOP_EVENT", message)
+        self.assertIn("--onto agent/x/pr", message)
+        self.assertIn("rev1: B1 阻断", message)
+        self.assertIn("--task-type fix", message)
+        self.assertNotIn("注意:已达 fix-loop 上限", message)
+
+    def test_missing_branch_omits_onto_flag(self):
+        message = _ctl.build_fix_loop_message(
+            self._item(suggested_branch=None), "nexusarchive"
+        )
+
+        self.assertNotIn("--onto", message)
+        self.assertIn("(未找到", message)
+
+    def test_escalation_at_loop_limit(self):
+        message = _ctl.build_fix_loop_message(
+            self._item(loop_count=3, max_loops=3), "nexusarchive"
+        )
+
+        self.assertIn("注意:已达 fix-loop 上限(3/3)", message)
+        self.assertIn("先向用户请示", message)
+
 
 class GateVerdictTest(unittest.TestCase):
     def setUp(self):
@@ -294,7 +348,19 @@ class StageAdvanceGateTest(unittest.TestCase):
             ]
         }
 
-    def _patch_env(self, registry, fixloop_calls, advance_marks):
+    def _patch_env(self, registry, fixloop_calls, advance_marks,
+                   workflow_entry=None):
+        tmp = tempfile.TemporaryDirectory(prefix="herdr-gatesweep-")
+        self.addCleanup(tmp.cleanup)
+        workflows_file = Path(tmp.name) / "workflows.json"
+        workflows_file.write_text(json.dumps({
+            "workflows": {
+                "wf-1": workflow_entry or {"status": "in_progress"}
+            }
+        }))
+        _ctl.WORKFLOWS_FILE = str(workflows_file)
+        self.addCleanup(setattr, _ctl, "WORKFLOWS_FILE", _ctl.WORKFLOWS_FILE)
+
         patchers = [
             patch.object(_ctl, "workflow_config_for",
                          return_value=self._workflow_cfg()),
@@ -399,6 +465,98 @@ class StageAdvanceGateTest(unittest.TestCase):
 
         close_mock.assert_called_once_with("wf-1")
         self.assertEqual(fixloop_calls, [])
+
+    def test_completed_status_workflow_never_reflows(self):
+        # abandoned/completed 的 workflow 残留 blocked verdict 也不得被
+        # 周期 sweep 回流(否则已关闭工作流会被反复作废任务)。
+        fixloop_calls, advance_marks = [], []
+        self._patch_env(
+            [
+                _task("rev1", status="cleaned", stage="review",
+                      stage_verdict="blocked"),
+            ],
+            fixloop_calls,
+            advance_marks,
+            workflow_entry={"status": "completed", "outcome": "abandoned"},
+        )
+
+        _ctl.check_workflow_stage_advance("wf-1")
+
+        self.assertEqual(fixloop_calls, [])
+        self.assertEqual(advance_marks, [])
+
+    def test_latched_reopen_sweep_is_silent(self):
+        # reopen 闩存在时:全节点完成也不打 [WORKFLOW COMPLETE]、
+        # 不 close、不回流。
+        fixloop_calls, advance_marks = [], []
+        self._patch_env(
+            [
+                _task("req1", status="cleaned", stage="requirements"),
+                _task("impl1", status="cleaned", stage="implementation"),
+                _task("rev1", status="cleaned", stage="review"),
+                _task("wrap1", status="cleaned", stage="wrapup"),
+            ],
+            fixloop_calls,
+            advance_marks,
+            workflow_entry={
+                "status": "in_progress",
+                "suppress_auto_close": True,
+            },
+        )
+
+        with patch.object(
+            _ctl, "maybe_close_completed_workflow"
+        ) as close_mock:
+            _ctl.check_workflow_stage_advance("wf-1")
+
+        close_mock.assert_not_called()
+        self.assertEqual(fixloop_calls, [])
+
+    def test_reflow_does_not_advance_gate_while_fix_active(self):
+        # 拒绝"给 gate 打 notified"的依据:fix task ACTIVE 期间,
+        # implementation 节点未完成 → review 不 ready,无任何推进;
+        # 无需依赖 notified 残留,也不存在与 fix_loop 竞争的推进。
+        fixloop_calls, advance_marks = [], []
+        self._patch_env(
+            [
+                _task("req1", status="cleaned", stage="requirements"),
+                _task("impl1", status="committed", stage="implementation"),
+                _task("fix1", status="working", stage="implementation"),
+                _task("rev1", status="superseded", stage="review",
+                      stage_verdict="blocked"),
+            ],
+            fixloop_calls,
+            advance_marks,
+        )
+
+        _ctl.check_workflow_stage_advance("wf-1")
+
+        self.assertEqual(fixloop_calls, [])
+        # implementation 节点未完成且依赖已满足 → 既有 ready-node 语义会
+        # 重新提示派发(总指挥看到活动 fix task 即空转结束,属既有噪音,
+        # 非本机制引入);关键是 review 不 ready、无第二次 fix_loop。
+        self.assertEqual(advance_marks, ["implementation"])
+
+    def test_reflow_resumes_gate_after_fix_completes(self):
+        # fix 完成后:implementation 恢复完成,review 节点(全 superseded)
+        # 重新 ready → 正常 stage_advance,重流由此发生。
+        fixloop_calls, advance_marks = [], []
+        self._patch_env(
+            [
+                _task("req1", status="cleaned", stage="requirements"),
+                _task("impl1", status="committed", stage="implementation"),
+                _task("fix1", status="completed", stage="implementation"),
+                _task("rev1", status="superseded", stage="review",
+                      stage_verdict="blocked"),
+            ],
+            fixloop_calls,
+            advance_marks,
+        )
+
+        _ctl.check_workflow_stage_advance("wf-1")
+
+        self.assertEqual(fixloop_calls, [])
+        self.assertEqual(advance_marks, ["review"])
 
 
 class CloseWorkflowGateTest(unittest.TestCase):
