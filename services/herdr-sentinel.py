@@ -211,6 +211,19 @@ def main():
                         flush=True,
                     )
 
+            # Check for in-flight pending steering instructions to inject on idle
+            try:
+                import herdr.steering as herdr_steering
+                if agent_status(pane_id) in {"idle", "unknown", None} and done_marker not in screen:
+                    dispatched_steer = herdr_steering.dispatch_pending_steer(task_id)
+                    if dispatched_steer:
+                        print(
+                            f"[SENTINEL STEER] Injected pending steer {dispatched_steer['steer_id']} for task={task_id} pane={pane_id}",
+                            flush=True,
+                        )
+            except Exception:
+                pass
+
         if update_statuses(changes):
             save_json_atomic(STATE_FILE, state)
             print("[SENTINEL] State updated, controller will auto-sync via registry watcher", flush=True)

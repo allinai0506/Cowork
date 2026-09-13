@@ -982,5 +982,47 @@ bin/herdr-factory step --help
 bin/herdr-factory rollback --help
 ```
 
+---
 
+## 23. 工位实时干预网格（Steering Mesh）：即时软中断、插话队列与结构化干预协议
 
+### 问题背景
+
+在长耗时任务执行或自主多轮推理场景中，工位 Agent（如 Codex、Claude）容易因为理解偏差、提示词歧义或探索方向错误而陷入死循环或产出跑偏代码。早期系统缺乏对运行中 Agent 的有效干预手段：
+1. **无法插话**：人类必须等待 Agent 彻底跑完当前全部 Turn 甚至耗尽 Token 后才能打回重做；
+2. **缺乏紧急制动**：若要停止跑偏的 Agent，只能直接关闭终端 Pane，导致现场未提交代码与上下文彻底损毁；
+3. **指令容易被淹没**：随意的终端输入无法被大模型明确解析为高优先级的总指挥干预指示。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 缺乏即时打断机制 | 暴力 kill 进程或关闭 Pane 会彻底损毁代码现场与 Git 索引 | 统一采用发送受控软中断（SIGINT / ctrl-c），使 Agent 安全停止当前输出，状态转为 `interrupted` 保留完整现场 |
+| 无法在运行间隙平滑插话 | 强行打断容易破坏正在编译或测试的临界区代码 | 建立任务维度的有序插话队列（Steering Queue），支持「紧急立即中断插话」与「间歇自动排队注入」双通道 |
+| 人类插话语义模糊 | 普通文本输入容易被 Agent 混淆为普通上下文或代码输入 | 制定结构化注入协议（`【总指挥实时插话纠偏指令 - STEERING INSTRUCTION】`），注入发起人与审计时间戳 |
+| 巡检进程缺乏队列消费闭环 | 只有 Web/CLI 压入队列，无法自动感知 Agent 闲暇 | 联动 `herdr-sentinel`，在 Agent idle 探测周期中主动发现并消费未派发插话 |
+
+### 操作规范（已固化到 `herdr/steering.py`、`bin/herdr-task` 与 `console/herdr_factory_console.py`）
+
+1. **核心控制元语与状态机流转**：
+   - 状态机扩展：在 `TRANSITIONS` 中引入 `interrupted` 状态，允许从 `dispatched`、`working`、`rework`、`blocked`、`paused` 流转至 `interrupted`，并可安全恢复为 `working` 或 `rework`。
+   - `queue_steer`：支持持久化存储到 `~/.herdr-controller/steering.json`；若 `urgent=True`，触发立即软中断并派发。
+   - `halt_task`：安全注入 `ctrl-c`，更新任务状态与审计历史。
+2. **CLI 与控制台双向联动**：
+   - CLI：`herdr-task halt <task_id>` 与 `herdr-task steer <task_id> "<instruction>" [--urgent]`。
+   - 控制台：在每个活跃工位任务卡片上挂载「插话」与「制动」按钮，配设规范中文引导与模态确认框。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 运行干预网格与控制台接口测试
+pytest tests/test_steering_mesh.py tests/test_console_steering_api.py -v
+
+# 2. 全仓回归测试确保无回归
+pytest
+
+# 3. CLI 命令验证
+bin/herdr-task halt --help
+bin/herdr-task steer --help
+bin/herdr-task steer-queue --help
+```

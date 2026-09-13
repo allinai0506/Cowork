@@ -9,6 +9,7 @@ sys.path.insert(0, str(HERDR_ROOT))
 from herdr import workflow as herdr_workflow
 from herdr import projects as herdr_projects
 from herdr import kernel as herdr_kernel
+from herdr import steering as herdr_steering
 from herdr.agent_binary import resolve_agent_binary
 PROJECTS_FILE=ROOT/'projects.json'; WORKFLOWS_FILE=ROOT/'workflows.json'; TASKS_FILE=ROOT/'tasks.json'; POOLS_FILE=ROOT/'agent-pools.json'; SLOTS_FILE=ROOT/'pane-slots.json'; LOG_DIR=ROOT/'logs'
 HOST='127.0.0.1'; PORT=int(os.environ.get('HERDR_CONSOLE_PORT','8765'))
@@ -483,6 +484,26 @@ def api_kernel_checkpoint_restore(b):
     if not wid:raise RuntimeError('workflow_id 不能为空')
     if not cpid:raise RuntimeError('checkpoint_id 不能为空')
     return herdr_kernel.restore_checkpoint(wid,checkpoint_id=cpid)
+
+def api_task_steer(b):
+    tid=str(b.get('task_id') or '').strip()
+    if not tid:raise RuntimeError('task_id 不能为空')
+    inst=str(b.get('instruction') or '').strip()
+    if not inst:raise RuntimeError('instruction 不能为空')
+    op=str(b.get('operator') or 'human').strip()
+    urgent=bool(b.get('urgent', False))
+    return herdr_steering.queue_steer(tid, instruction=inst, operator=op, urgent=urgent)
+
+def api_task_halt(b):
+    tid=str(b.get('task_id') or '').strip()
+    if not tid:raise RuntimeError('task_id 不能为空')
+    reason=str(b.get('reason') or '人工在控制台紧急制动').strip()
+    op=str(b.get('operator') or 'human').strip()
+    return herdr_steering.halt_task(tid, reason=reason, operator=op)
+
+def api_task_steer_queue(tid):
+    if not tid:return []
+    return herdr_steering.list_task_steers(tid)
 
 def create_candidate(wid):
     allw=load_json(WORKFLOWS_FILE,{'workflows':{}}); w=allw.get('workflows',{}).get(wid)
@@ -1007,6 +1028,7 @@ function renderTasks(){
         ${badge(t.status)}
         <button class="mini" onclick="showTask('${esc(t.task_id)}')">详情</button>
         <button class="mini" onclick="showPane('${esc(t.pane_id||'')}')">工位</button>
+        ${['working','dispatched','rework','blocked','paused'].includes(t.status)?`<button class="mini" style="color:var(--primary)" onclick="showSteerModal('${esc(t.task_id)}')">插话</button><button class="mini" style="color:var(--danger)" onclick="haltTaskPrompt('${esc(t.task_id)}')">制动</button>`:''}
         <button class="mini" onclick="askCoordinator('${esc(t.task_id)}')">让总指挥处理</button>
         ${t.stage_verdict==='blocked'?`<button class="mini" style="color:var(--accent)" onclick="forcePassTask('${esc(t.workflow_id||state.workflowId)}','${esc(t.node||t.stage)}')">强制放行</button>`:''}
       </div>
@@ -1154,6 +1176,9 @@ async function runPreflight(){
   }
 }
 function showAgentOverride(){if(!state.workflowId)return toast('当前没有工作流',true);const cur=state.workflow.agent_override||'auto';openModal('指定后续任务执行者',`<div class="form"><label for="overrideAgent">执行者策略</label><select id="overrideAgent">${['auto','opencode','codex','claude','qodercli','agy','pi'].map(a=>`<option ${a===cur?'selected':''}>${a}</option>`).join('')}</select><button class="btn primary" onclick="saveAgentOverride()">保存</button><div class="muted">只影响后续新建任务。</div></div>`)}async function saveAgentOverride(){try{await api('/api/workflow/agent',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,agent:document.getElementById('overrideAgent').value})});closeModal();await loadWorkflow(state.workflowId);toast('执行者策略已更新')}catch(e){toast(e.message,true)}}async function showTask(id){try{const d=await api('/api/task?id='+encodeURIComponent(id));openModal(id,`<pre>${esc(JSON.stringify(d,null,2))}</pre>`)}catch(e){toast(e.message,true)}}async function showPane(id){if(!id)return toast('没有工位',true);try{const d=await api('/api/pane/read?id='+encodeURIComponent(id));openModal('工位 '+id,`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}async function askCoordinator(id){try{toast('正在通知总指挥…');await api('/api/task/coordinator',{method:'POST',body:JSON.stringify({task_id:id})});toast('总指挥已处理/接收')}catch(e){toast(e.message,true)}}
+function showSteerModal(tid){openModal('总指挥实时插话纠偏',`<div class="form"><div class="muted" style="margin-bottom:8px">任务 ID：${esc(tid)}</div><label for="steerInput">纠偏或引导指令（将直接注入工位执行者）</label><textarea id="steerInput" rows="3" placeholder="例如：优先使用标准库，不要引入外部第三方包" style="width:100%;box-sizing:border-box;margin-bottom:10px"></textarea><div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><input type="checkbox" id="steerUrgent" style="width:auto"><label for="steerUrgent" style="margin:0;cursor:pointer"><strong>紧急插话 (立即软打断工位执行者并注入指令)</strong></label></div><button class="btn primary" onclick="submitSteer('${esc(tid)}')">发送指令</button></div>`)}
+async function submitSteer(tid){const inst=(document.getElementById('steerInput')?.value||'').trim();const urgent=!!document.getElementById('steerUrgent')?.checked;if(!inst)return toast('请输入指令内容',true);closeModal();try{toast('正在发送干预指令…');const res=await api('/api/task/steer',{method:'POST',body:JSON.stringify({task_id:tid,instruction:inst,urgent:urgent})});toast(res.status==='dispatched'?'指令已立即注入工位！':'指令已排入工位队列，将在间歇注入');await loadWorkflow(state.workflowId)}catch(e){toast(e.message,true)}}
+function haltTaskPrompt(tid){showConfirmModal({title:'工位紧急制动 (Halt)',message:'确定要立即打断任务 '+tid+' 的执行吗？系统将向工位发送软中断 (SIGINT)，保留现场并转为受控待命状态。',confirmText:'紧急制动',danger:true,onConfirm:async()=>{try{toast('正在执行紧急制动…');await api('/api/task/halt',{method:'POST',body:JSON.stringify({task_id:tid,reason:'人工在控制台紧急制动'})});toast('工位已安全打断');await loadWorkflow(state.workflowId)}catch(e){toast(e.message,true)}}})}
 async function toggleWorkflowPause(){if(!state.workflowId)return toast('当前没有工作流',true);const curSt=state.workflow&&state.workflow.workflow&&state.workflow.workflow.status;const isPaused=curSt==='paused';const act=isPaused?'resume':'pause';const label=isPaused?'恢复自动调度':'暂停自动调度';showConfirmModal({title:label,message:isPaused?'确认恢复该工作流的自动调度推进？':'确认暂停该工作流的自动推进？当前运行中的工位不会被强制终止。',confirmText:label,onConfirm:async()=>{try{await api('/api/kernel/'+act,{method:'POST',body:JSON.stringify({workflow_id:state.workflowId})});await loadWorkflow(state.workflowId);toast('工作流已'+(isPaused?'恢复':'暂停'))}catch(e){toast(e.message,true)}}})}
 async function stepWorkflow(){if(!state.workflowId)return toast('当前没有工作流',true);try{toast('正在单步推进…');const res=await api('/api/kernel/step',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId})});if(res.ok){await loadWorkflow(state.workflowId);toast('单步已推进: '+res.stepped_label+' ('+res.stepped_node+')')}else{toast('无法单步推进: '+(res.reason==='no_ready_nodes'?'当前无就绪节点':res.reason),true)}}catch(e){toast(e.message,true)}}
 function showRollbackModal(){if(!state.workflowId)return toast('当前没有工作流',true);const stages=(state.workflow&&state.workflow.stages)||[];if(!stages.length)return toast('工作流暂无节点',true);const options=stages.map(s=>`<option value="${esc(s.key)}">${esc(s.label)} (${esc(s.key)})</option>`).join('');openModal('节点回溯 (Rollback)',`<div class="form"><label for="rbTarget">回溯目标节点（该节点及所有下游任务将被重置作废）</label><select id="rbTarget">${options}</select><label for="rbReason">回溯原因</label><input id="rbReason" type="text" value="人工核验需求变更或发现重大缺陷"><button class="btn primary" style="background:#dc2626;border-color:#ef4444" onclick="executeRollback()">确认回溯</button><div class="muted">警告：此操作不可撤销，下游所有产物与任务将被标记为作废。</div></div>`)}
@@ -1252,6 +1277,9 @@ class Handler(BaseHTTPRequestHandler):
                 wid=self.query().get('workflow_id',[''])[0]
                 if not wid:raise RuntimeError('workflow_id 不能为空')
                 return self.send_json(200,api_kernel_checkpoint_list(wid))
+            if p=='/api/task/steer/queue':
+                tid=self.query().get('task_id',[''])[0]
+                return self.send_json(200,api_task_steer_queue(tid))
             return self.send_json(404,error='Not Found')
         except Exception as e:
             self.log_message('GET %s failed: %s', self.path, e)
@@ -1284,6 +1312,8 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/workflow/candidate':return self.send_json(200,create_candidate(str(b['workflow_id'])))
             if p=='/api/workflow/advance':return self.send_json(200,manual_advance(str(b['workflow_id'])))
             if p=='/api/task/coordinator':return self.send_json(200,ask_coordinator(str(b['task_id'])))
+            if p=='/api/task/steer':return self.send_json(200,api_task_steer(b))
+            if p=='/api/task/halt':return self.send_json(200,api_task_halt(b))
             if p=='/api/slot/bind':return self.send_json(200,bind_slot(str(b['pane_id']),str(b.get('agent') or 'auto')))
             if p=='/api/kernel/pause':return self.send_json(200,api_kernel_pause(b))
             if p=='/api/kernel/resume':return self.send_json(200,api_kernel_resume(b))

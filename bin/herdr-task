@@ -58,12 +58,13 @@ KNOWN_AGENTS = [a for a in DEFAULT_ALLOWED if a]
 
 TRANSITIONS = {
     "pending": {"dispatched", "failed"},
-    "dispatched": {"working", "blocked", "agent_done", "paused", "failed", "superseded"},
-    "working": {"blocked", "agent_done", "rework", "paused", "failed", "superseded"},
-    "blocked": {"working", "agent_done", "paused", "failed", "superseded"},
-    "paused": {"working", "rework", "agent_done", "failed", "superseded"},
-    "agent_done": {"completed", "rework", "failed", "superseded"},
-    "rework": {"working", "blocked", "agent_done", "paused", "failed", "superseded"},
+    "dispatched": {"working", "blocked", "agent_done", "paused", "failed", "superseded", "interrupted"},
+    "working": {"blocked", "agent_done", "rework", "paused", "failed", "superseded", "interrupted"},
+    "blocked": {"working", "agent_done", "paused", "failed", "superseded", "interrupted"},
+    "paused": {"working", "rework", "agent_done", "failed", "superseded", "interrupted"},
+    "agent_done": {"completed", "rework", "failed", "superseded", "interrupted"},
+    "rework": {"working", "blocked", "agent_done", "paused", "failed", "superseded", "interrupted"},
+    "interrupted": {"working", "rework", "paused", "failed", "superseded"},
     "completed": {"committed", "cleanup_ready"},
     "committed": {"integrated"},
     "integrated": {"cleanup_ready"},
@@ -80,6 +81,7 @@ ACTIVE_TASK_STATUSES = {
     "agent_done",
     "rework",
     "paused",
+    "interrupted",
 }
 
 COMPLETED_TASK_STATUSES = {
@@ -3526,6 +3528,20 @@ def main():
     resume_cmd = sub.add_parser("resume")
     resume_cmd.add_argument("task_id")
 
+    halt_cmd = sub.add_parser("halt")
+    halt_cmd.add_argument("task_id")
+    halt_cmd.add_argument("--reason", default="human interrupt")
+    halt_cmd.add_argument("--operator", default="human")
+
+    steer_cmd = sub.add_parser("steer")
+    steer_cmd.add_argument("task_id")
+    steer_cmd.add_argument("instruction")
+    steer_cmd.add_argument("--urgent", action="store_true", default=False)
+    steer_cmd.add_argument("--operator", default="human")
+
+    steer_queue_cmd = sub.add_parser("steer-queue")
+    steer_queue_cmd.add_argument("task_id")
+
     args = parser.parse_args()
 
     if args.command == "add":
@@ -3643,6 +3659,43 @@ def main():
 
     elif args.command == "resume":
         resume_task(args.task_id)
+
+    elif args.command == "halt":
+        import herdr.steering as herdr_steering
+        try:
+            res = herdr_steering.halt_task(
+                args.task_id,
+                reason=args.reason,
+                operator=args.operator,
+            )
+            print(f"[HALTED] {res['task_id']}: {res['reason']}")
+        except Exception as e:
+            print(f"Error halting task: {e}")
+            sys.exit(1)
+
+    elif args.command == "steer":
+        import herdr.steering as herdr_steering
+        try:
+            res = herdr_steering.queue_steer(
+                args.task_id,
+                instruction=args.instruction,
+                operator=args.operator,
+                urgent=args.urgent,
+            )
+            mode = "IMMEDIATE" if args.urgent else "QUEUED"
+            print(f"[STEER_{mode}] {res['steer_id']} for {res['task_id']}")
+        except Exception as e:
+            print(f"Error steering task: {e}")
+            sys.exit(1)
+
+    elif args.command == "steer-queue":
+        import herdr.steering as herdr_steering
+        steers = herdr_steering.list_task_steers(args.task_id)
+        if not steers:
+            print(f"No steers for task {args.task_id}")
+        else:
+            for s in steers:
+                print(f"- [{s['status']}] {s['steer_id']} (urgent={s['urgent']}): {s['instruction']}")
 
 
 if __name__ == "__main__":

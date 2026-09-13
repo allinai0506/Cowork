@@ -170,3 +170,21 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - **CLI 命令行工具 (`bin/herdr-factory`)**：
   - 新增 `step`, `rollback`, `force-pass`, `checkpoint (save|list|restore)` 一级子命令。
 - **质量防护与门禁**：沉淀通用教训 §22；新增 `tests/test_kernel_control_primitives.py` 与 `tests/test_console_kernel_api.py`；全量 284 个测试用例 100% 通过。
+
+## [2026-09-13] feat | Universal Runtime Phase 2: Worker Intervention & Steering Mesh
+实现通用人机协同底座阶段二目标，构建工位实时干预网格（Intervention & Steering Mesh）：
+- **核心纠偏模块 (`herdr/steering.py`)**：
+  - `queue_steer`：实现有序插话队列（In-Flight Steering Queue），支持持久化至 `~/.herdr-controller/steering.json`；支持「紧急插话（立即软中断并派发）」与「顺滑插话（排队待间歇注入）」双通道；
+  - `halt_task`：向底层工位 Pane 发送非破坏性受控软中断（SIGINT / ctrl-c），现场保护并流转状态至 `interrupted`；
+  - `format_steer_prompt`：结构化干预提示词协议，确保异构 Agent（Codex/Claude 等）精准吸收总指挥干预指示并留存发起人与审计时间戳；
+  - `dispatch_pending_steer`：支持按需消费出队未派发插话。
+- **看门狗服务联动 (`services/herdr-sentinel.py`)**：
+  - 巡检活跃工位处于 `idle` 且存在待派发插话时，自动在间歇触发提示词注入与回车，实现平滑纠偏闭环。
+- **CLI 命令行扩展 (`bin/herdr-task`)**：
+  - 新增 `halt <task_id>`、`steer <task_id> "<instruction>" [--urgent]` 与 `steer-queue <task_id>` 子命令；
+  - 状态机 `TRANSITIONS` 与 `ACTIVE_TASK_STATUSES` 接入 `interrupted`。
+- **控制台 Web API 与交互扩展 (`console/herdr_factory_console.py`)**：
+  - 暴露 `POST /api/task/steer`, `POST /api/task/halt`, `GET /api/task/steer/queue`；
+  - 活跃工位任务卡片新增「插话」与「制动」快捷行动点，配设弹窗与二次确认保护。
+- **质量防护与门禁**：沉淀通用教训 §23；新增 `tests/test_steering_mesh.py` 与 `tests/test_console_steering_api.py`；全量 293 个测试用例 100% 通过。
+
