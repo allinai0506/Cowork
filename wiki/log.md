@@ -291,6 +291,15 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - **文件健康度与梯度拆分阈值**：废除机械行数硬限，确立 `herdr/` 300~500 行、CLI/Daemon 500~800 行的业务内聚梯度拆分准则。
 - **同步验收门禁 (`CLAUDE.md`)**：在严格验收清单中新增分层纯度与文件健康度核对项。
 
+## [2026-09-13] docs | Upgraded Project Standard Workflow to /unified-dev-flow (S0–S8)
+- **废除旧四阶段作业法，全面拥抱 `/unified-dev-flow` 统一研发流程**：
+  - 在 [`RULES.md`](file:///Users/user/herdr/RULES.md) §1 正式确立策略驱动的 S0–S8 全生命周期研发规范；
+  - 明确九大核心不变量（断点优先、读懂再写、意图定基线、复杂度定规划、风险度定质检、单一控制权、改动即失效、无铁证不宣称完成、交付不越权）；
+  - 强化 S0 启动前置门禁：远端代码拉取同步与 CoW (Copy-on-Write) 沙盒隔离建支（一等公民准则）；
+  - 规范 S6 审查修复闭环（S6 ➔ S4 ➔ S5 ➔ S6，3 轮熔断机制）与 S8 知识沉淀机制。
+- **同步验收门禁 (`CLAUDE.md`)**：在严格验收清单顶部加入 `统一研发流程合规 (Unified Dev Flow)` 门禁。
+
+
 
 
 
