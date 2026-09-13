@@ -148,5 +148,14 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - `services/herdr-notifier.py` 升级 `notify(..., url=None)` 并提供 `build_console_url`：任务关注态与工作流完成时拼接控制台 Deep-Link URL，`terminal-notifier` 可用时点击直达控制台；
 - 质量防护与门禁：沉淀教训 §20，新增 `tests/test_console_deep_link.py` 与 `tests/test_herdr_notifier.py`，已同步部署至 `~/.herdr-console` 并重启守护进程。
 
+## [2026-09-13] feat | Console UI/UX Modernization, Accessibility (WCAG AA) & Interaction Overhaul
+对共事工厂控制台（`console/herdr_factory_console.py`）进行完整交互、排版与可访问性现代化改造：
+- **可访问性 (WCAG AA)**：模态框支持 `role="dialog"`、`aria-modal="true"`、`aria-labelledby`；Toast 提示支持 `role="alert"`；全局支持 `Escape` 键快速退出弹窗；按键聚焦高亮环 `*:focus-visible`；二级暗色对比度提升至 5.8:1；
+- **消除阻塞弹窗**：彻底废弃浏览器原生 `window.confirm` 和 `window.prompt`，统一采用无阻塞原生风格弹窗 `showConfirmModal` / `showPromptModal`；
+- **信息架构与排版收敛**：顶部横排按钮分组重构为「流水线推进组」、「日常工具组」、「更多操作下拉 (`···`)」与右侧主行动点「新需求」，按钮使用符合暗色主题的高级深蓝（`#2563eb`）与纯白文字（`#ffffff`）；
+- **视觉微雕与符号规范**：移除重复符号并全站用 SVG 矢量图标替换 Emoji（`🛠️`、`🟢`、`×` 等）；阶段看板增设流向箭头 `›` 与进行中呼吸光效；运维驾驶舱舰队数据接入 6 列 CSS Grid 规整表格；
+- **质量防护与门禁**：沉淀通用教训 §21；更新 `tests/test_console_frontend_syntax.py`（无障碍属性断言、消除原生 confirm/prompt、单加号与深蓝纯白按钮规则）；全量 272 个测试 100% 通过。
+
+
 
 
