@@ -2,6 +2,9 @@
 
 import importlib.machinery
 import importlib.util
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -49,5 +52,82 @@ class TestStartAgent(unittest.TestCase):
         )
 
 
+
+class TestCleanSandbox(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.source_repo = Path(self.temp_dir) / "source"
+        self.source_repo.mkdir()
+        # Initialize dummy git repo
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.source_repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.source_repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=self.source_repo, check=True, capture_output=True)
+        
+        # Initial commit on main
+        (self.source_repo / "foo.txt").write_text("main version\n")
+        subprocess.run(["git", "add", "foo.txt"], cwd=self.source_repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "initial commit"], cwd=self.source_repo, check=True, capture_output=True)
+
+        # Switch to feature branch and create committed diff
+        subprocess.run(["git", "checkout", "-b", "feat/wip"], cwd=self.source_repo, check=True, capture_output=True)
+        (self.source_repo / "foo.txt").write_text("feature committed version\n")
+        subprocess.run(["git", "commit", "-am", "feature commit"], cwd=self.source_repo, check=True, capture_output=True)
+
+        # Now create an uncommitted dirty modification in working tree
+        (self.source_repo / "foo.txt").write_text("uncommitted dirty WIP\n")
+        (self.source_repo / "untracked.txt").write_text("untracked dirty file\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_create_task_branch_with_dirty_source(self):
+        worker = load_worker()
+        clone_root = Path(self.temp_dir) / "clones"
+        clone_root.mkdir()
+        with patch.object(worker, "CLONE_ROOT", clone_root):
+            clone = worker.create_clone(str(self.source_repo), "test-task-1")
+            self.assertTrue(clone.exists())
+            # Branch switch to base_branch='main' should succeed despite source dirty WIP
+            branch = worker.create_task_branch(clone, "test-task-1", "codex", "feat", "main")
+            self.assertEqual(branch, "agent/codex/feat-test-task-1")
+            
+            # Verify source repo is untouched and still dirty
+            status = subprocess.run(["git", "status", "--porcelain"], cwd=self.source_repo, capture_output=True, text=True).stdout
+            self.assertIn("foo.txt", status)
+            self.assertIn("untracked.txt", status)
+    def test_checkout_onto_branch_with_dirty_source(self):
+        worker = load_worker()
+        clone_root = Path(self.temp_dir) / "clones"
+        clone_root.mkdir()
+        # Set up a remote origin and push feat/wip so onto branch check passes
+        origin_repo = Path(self.temp_dir) / "origin"
+        subprocess.run(["git", "clone", "--bare", str(self.source_repo), str(origin_repo)], check=True, capture_output=True)
+        subprocess.run(["git", "remote", "add", "origin", str(origin_repo)], cwd=self.source_repo, check=True, capture_output=True)
+        subprocess.run(["git", "push", "origin", "feat/wip"], cwd=self.source_repo, check=True, capture_output=True)
+
+        with patch.object(worker, "CLONE_ROOT", clone_root):
+            clone = worker.create_clone(str(self.source_repo), "test-task-onto")
+            branch = worker.checkout_onto_branch(clone, "feat/wip")
+            self.assertEqual(branch, "feat/wip")
+
+    def test_stale_unmanaged_clone_healed(self):
+        worker = load_worker()
+        clone_root = Path(self.temp_dir) / "clones"
+        clone_root.mkdir()
+        stale_dir = clone_root / "stale-task"
+        stale_dir.mkdir()
+        (stale_dir / "leftover.txt").write_text("broken")
+
+        with patch.object(worker, "CLONE_ROOT", clone_root):
+            # Task 'stale-task' is not in registry, so create_clone should auto-remove and recreate
+            with patch.object(worker, "is_task_active_in_registry", return_value=False):
+                clone = worker.create_clone(str(self.source_repo), "stale-task")
+                self.assertTrue(clone.exists())
+                self.assertFalse((clone / "leftover.txt").exists())
+                self.assertTrue((clone / ".git").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
+
+

@@ -1939,6 +1939,47 @@ task_type:
 # Agent events
 # ============================================================
 
+def check_task_deliverables_ready(task):
+    """Check whether deliverables required by the task or node are present and non-empty."""
+    clone_path = task.get("clone_path")
+    if not clone_path or not os.path.exists(clone_path):
+        return False
+
+    wf_id = task.get("workflow_id")
+    node_id = task.get("node") or task.get("stage")
+    required_outputs = []
+    if wf_id and node_id:
+        try:
+            wf_cfg = workflow_config_for(wf_id)
+            if wf_cfg:
+                node = find_node(wf_cfg, node_id)
+                if node:
+                    required_outputs = node.get("required_outputs", [])
+        except Exception:
+            pass
+
+    if required_outputs:
+        for rel in required_outputs:
+            p = os.path.join(clone_path, rel)
+            if not os.path.exists(p) or os.path.getsize(p) == 0:
+                return False
+        return True
+
+    # Fallback to checking git status for any changes
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(clone_path), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=3
+        )
+        if res.stdout.strip():
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def handle_event(task_id, agent_status):
     task = get_task(task_id)
 
@@ -1951,9 +1992,9 @@ def handle_event(task_id, agent_status):
         f"[TASK] "
         f"id={task_id} "
         f"workflow={task.get('workflow_id')} "
-        f"stage={task['stage']} "
-        f"pane={task['pane_id']} "
-        f"agent={task['agent']} "
+        f"stage={task.get('stage')} "
+        f"pane={task.get('pane_id')} "
+        f"agent={task.get('agent')} "
         f"status={agent_status} "
         f"task_status={current_status}"
     )
@@ -1977,29 +2018,51 @@ def handle_event(task_id, agent_status):
             )
 
     elif agent_status == "idle":
-        # Agent 已经实际进入 working 后再回到 idle，
-        # 等价于本轮交互结束。
-        # dispatched -> idle 不算完成，避免尚未执行就误判。
+        pane_id = task.get("pane_id")
+        has_done_marker = False
+        if pane_id:
+            try:
+                res = subprocess.run(
+                    ["herdr", "pane", "read", pane_id, "--source", "visible"],
+                    text=True,
+                    capture_output=True,
+                    timeout=3
+                )
+                screen = (res.stdout or "") + (res.stderr or "")
+                if f"HERDR_TASK_DONE:{task_id}" in screen:
+                    has_done_marker = True
+            except Exception:
+                pass
+
         if current_status == "working":
-            pane_id = task.get("pane_id")
-            has_done_marker = False
-            if pane_id:
+            # 契约驱动前置检验：若任务有明确 required_outputs 但尚未生成，且无显式 DONE 标记，
+            # 说明 Agent 正在长推理或多阶段阅读中，暂缓判定为完成，防止提前触发 rework
+            wf_id = task.get("workflow_id")
+            node_id = task.get("node") or task.get("stage")
+            req_outputs = []
+            if wf_id and node_id:
                 try:
-                    res = subprocess.run(
-                        ["herdr", "pane", "read", pane_id, "--source", "visible"],
-                        text=True,
-                        capture_output=True,
-                        timeout=3
-                    )
-                    screen = (res.stdout or "") + (res.stderr or "")
-                    if f"HERDR_TASK_DONE:{task_id}" in screen:
-                        has_done_marker = True
+                    wf_cfg = workflow_config_for(wf_id)
+                    if wf_cfg:
+                        node = find_node(wf_cfg, node_id)
+                        if node:
+                            req_outputs = node.get("required_outputs", [])
                 except Exception:
                     pass
 
+            if req_outputs and not has_done_marker:
+                if not check_task_deliverables_ready(task):
+                    print(
+                        f"[COMPLETION DEFERRED] "
+                        f"task={task_id} "
+                        f"required outputs {req_outputs} not ready; "
+                        f"treating idle as transient think time"
+                    )
+                    return
+
             if not has_done_marker and not os.environ.get("HERDR_CONTROLLER_TEST"):
                 # 屏幕上无明确完成标记，进行短暂防抖二次确认，防止推理/长命令间歇抖动
-                time.sleep(2)
+                time.sleep(3)
                 runtime_check = get_agent_runtime_status(pane_id) if pane_id else None
                 if runtime_check == "working":
                     print(
@@ -2020,6 +2083,22 @@ def handle_event(task_id, agent_status):
                     "done"
                 )
 
+        elif current_status == "rework":
+            # 自愈修复：若任务处于 rework 状态，当 Agent 输出 DONE 标记或产物已落盘就绪时，
+            # 自动推进至 agent_done，彻底避免孤儿停滞！
+            if has_done_marker or check_task_deliverables_ready(task):
+                print(
+                    f"[REWORK HEALED] "
+                    f"task={task_id} "
+                    f"deliverables verified, advancing rework -> agent_done"
+                )
+                if set_task_status(task_id, "agent_done"):
+                    task = get_task(task_id)
+                    enqueue_coordinator_event(
+                        task,
+                        "done"
+                    )
+
     elif agent_status == "blocked":
         if current_status in (
             "working",
@@ -2038,7 +2117,9 @@ def handle_event(task_id, agent_status):
                 )
 
     elif agent_status == "done":
-        if current_status == "working":
+        if current_status in ("working", "rework"):
+            if current_status == "rework" and not check_task_deliverables_ready(task):
+                return
             if set_task_status(
                 task_id,
                 "agent_done"
@@ -2203,8 +2284,17 @@ def reconcile_task_state(task_id):
             current = "working"
 
         elif current == "rework":
-            # rework 状态下的 runtime=done 必然是上一轮已退出进程的陈旧残留，
-            # 绝不能直接作为本轮完成，必须等待新派发启动后实际进入 working。
+            # 只有当产物已经真实就绪时，才允许从 rework 恢复为 agent_done；
+            # 否则必须等待新派发启动后实际进入 working。
+            if check_task_deliverables_ready(task):
+                print(
+                    f"[RECOVERY REWORK HEALED] "
+                    f"task={task_id} deliverables detected -> restore agent_done"
+                )
+                if set_task_status(task_id, "agent_done"):
+                    task = get_task(task_id)
+                    if task and task.get("status") == "agent_done":
+                        enqueue_coordinator_event(task, "done")
             return
 
         if current == "working":
@@ -2224,22 +2314,32 @@ def reconcile_task_state(task_id):
 
         return
 
-    # Agent 曾经进入 working，随后 Controller 重启时发现已经 idle，
-    # 视为本轮执行已经结束。
-    if runtime == "idle" and current == "working":
-        if not set_task_status(
-            task_id,
-            "agent_done"
-        ):
-            return
+    # Agent 曾经进入 working/rework，随后 Controller 重启时发现已经 idle
+    if runtime == "idle":
+        if current == "working":
+            if not set_task_status(
+                task_id,
+                "agent_done"
+            ):
+                return
 
-        task = get_task(task_id)
+            task = get_task(task_id)
 
-        if task and task.get("status") == "agent_done":
-            enqueue_coordinator_event(
-                task,
-                "done"
-            )
+            if task and task.get("status") == "agent_done":
+                enqueue_coordinator_event(
+                    task,
+                    "done"
+                )
+        elif current == "rework":
+            if check_task_deliverables_ready(task):
+                print(
+                    f"[RECOVERY REWORK HEALED] "
+                    f"task={task_id} idle + deliverables detected -> restore agent_done"
+                )
+                if set_task_status(task_id, "agent_done"):
+                    task = get_task(task_id)
+                    if task and task.get("status") == "agent_done":
+                        enqueue_coordinator_event(task, "done")
 
         return
 
@@ -2470,6 +2570,19 @@ def registry_watcher():
                             task,
                             "done"
                         )
+
+                if status == "rework" and not workflow_closed(task.get("workflow_id")):
+                    pane_id = task.get("pane_id")
+                    if pane_id:
+                        runtime = get_agent_runtime_status(pane_id)
+                        if runtime in ("idle", "done") and check_task_deliverables_ready(task):
+                            print(
+                                f"[REWORK WATCHDOG HEAL] "
+                                f"task={task_id} deliverables detected and agent is {runtime} -> advance to agent_done"
+                            )
+                            if set_task_status(task_id, "agent_done"):
+                                task = get_task(task_id)
+                                enqueue_coordinator_event(task, "done")
 
         except Exception as e:
             print(

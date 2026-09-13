@@ -216,3 +216,54 @@ def test_cli_project_and_artifacts(projection_env):
     r_art = subprocess.run(cmd_art, env=env, capture_output=True, text=True)
     assert r_art.returncode == 0
     assert "任务产物清单" in r_art.stdout
+
+
+def test_detect_workflow_stalls_rework_orphan(projection_env):
+    now = time.time()
+    tasks = [
+        {
+            "task_id": "t_rework_stall",
+            "workflow_id": "wf_stall_1",
+            "status": "rework",
+            "updated_at": now - 60,
+        }
+    ]
+    stall = projection.detect_workflow_stalls("wf_stall_1", tasks)
+    assert stall["is_stalled"] is True
+    assert stall["stall_type"] == "rework_orphan"
+    assert stall["target_task_id"] == "t_rework_stall"
+    assert stall["suggested_action"] == "force_review"
+    assert "t_rework_stall" in stall["message"]
+
+
+def test_detect_workflow_stalls_stage_advance_hang(projection_env):
+    now = time.time()
+    tasks = [
+        {
+            "task_id": "t_done_1",
+            "workflow_id": "wf_hang_1",
+            "status": "cleaned",
+            "updated_at": now - 70,
+        }
+    ]
+    stall = projection.detect_workflow_stalls("wf_hang_1", tasks)
+    assert stall["is_stalled"] is True
+    assert stall["stall_type"] == "stage_advance_hang"
+    assert stall["suggested_action"] == "retry_advance"
+    assert stall["target_task_id"] is None
+
+
+def test_detect_workflow_stalls_normal_working(projection_env):
+    now = time.time()
+    tasks = [
+        {
+            "task_id": "t_working_normal",
+            "workflow_id": "wf_normal_1",
+            "status": "working",
+            "updated_at": now - 10,
+        }
+    ]
+    stall = projection.detect_workflow_stalls("wf_normal_1", tasks)
+    assert stall["is_stalled"] is False
+    assert stall["stall_type"] is None
+
