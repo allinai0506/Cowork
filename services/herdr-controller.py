@@ -89,6 +89,260 @@ def maybe_close_completed_workflow(workflow_id):
     ).start()
 
 
+# ============================================================
+# Gate verdicts & fix-loop
+# ============================================================
+
+# 常见门禁阶段的内置默认;显式配置(workflow 节点 gate / stage-policies.json)
+# 优先于这里。verdict 缺失(lenient)时门禁不生效,存量 workflow 行为不变。
+GATE_DEFAULTS = {
+    "test": {"retry_node": "implementation"},
+    "review": {"retry_node": "implementation"},
+    "wrapup": {"retry_node": "implementation"},
+}
+
+FIX_LOOP_MAX = int(os.environ.get("HERDR_FIX_LOOP_MAX", "3"))
+
+# 可作废状态集合,必须与 bin/herdr-task TRANSITIONS 中
+# 允许 → superseded 的状态保持一致(pending/committed/integrated 除外)。
+FIX_LOOP_SUPERSEDEABLE = {
+    "dispatched",
+    "working",
+    "blocked",
+    "agent_done",
+    "rework",
+    "cleaned",
+    "failed",
+}
+
+
+def resolve_gate_config(node, node_id):
+    gate = (node or {}).get("gate") or get_stage_policy(node_id).get("gate")
+
+    if gate is None:
+        gate = GATE_DEFAULTS.get(node_id)
+
+    if not gate:
+        return None
+
+    return {
+        "retry_node": gate.get("retry_node", "implementation"),
+        "max_loops": int(gate.get("max_loops", FIX_LOOP_MAX)),
+    }
+
+
+def gate_verdict(workflow_id, node_id):
+    """Fail-safe 门禁结论:任一未作废任务的 blocked 结论即 blocked。"""
+    verdict = None
+
+    for task in load_tasks():
+        if task.get("workflow_id") != workflow_id:
+            continue
+        if node_id not in (task.get("node"), task.get("stage")):
+            continue
+        if task.get("status") == "superseded":
+            continue
+
+        task_verdict = task.get("stage_verdict")
+
+        if task_verdict == "blocked":
+            return "blocked"
+        if task_verdict == "pass":
+            verdict = "pass"
+
+    return verdict
+
+
+def latest_branch_for_node(workflow_id, node_id):
+    best = None
+
+    for task in load_tasks():
+        if task.get("workflow_id") != workflow_id:
+            continue
+        if node_id not in (task.get("node"), task.get("stage")):
+            continue
+        if not task.get("branch"):
+            continue
+        if best is None or task.get("updated_at", 0) > best.get("updated_at", 0):
+            best = task
+
+    return best.get("branch") if best else None
+
+
+def _collect_downstream_nodes(nodes_by_id, root_id):
+    """root 节点自身 + 传递闭包的全部下游节点。"""
+    dependents = {}
+
+    for node in nodes_by_id.values():
+        for dep in node.get("depends_on", []):
+            dependents.setdefault(dep, set()).add(node["id"])
+
+    seen = {root_id}
+    frontier = [root_id]
+
+    while frontier:
+        current = frontier.pop()
+        for nxt in dependents.get(current, ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                frontier.append(nxt)
+
+    return seen
+
+
+def invalidate_for_fix_loop(workflow_id, gate_node_id, workflow_cfg):
+    """作废 gate 节点及其全部下游的非 superseded 任务(fix-loop 回流前提)。
+
+    completed/cleanup_ready 中间态先 finalize 规范化到 cleaned——
+    completed→superseded 会被状态机拒绝;pending 不可作废,跳过。
+    """
+    nodes_by_id = {
+        n["id"]: n for n in workflow_cfg.get("nodes", [])
+    }
+    node_ids = _collect_downstream_nodes(nodes_by_id, gate_node_id)
+
+    supersedeable = FIX_LOOP_SUPERSEDEABLE
+    invalidated = []
+
+    for task in load_tasks():
+        if task.get("workflow_id") != workflow_id:
+            continue
+        if (
+            task.get("node") not in node_ids
+            and task.get("stage") not in node_ids
+        ):
+            continue
+
+        status = task.get("status")
+        task_id = task["task_id"]
+
+        if status == "superseded":
+            continue
+
+        if status in ("completed", "cleanup_ready"):
+            result = subprocess.run(
+                [TASK_MANAGER, "finalize", task_id],
+                text=True,
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                print(
+                    f"[FIX LOOP INVALIDATE ERROR] finalize {task_id}: "
+                    f"{result.stderr.strip() or result.stdout.strip()}"
+                )
+                continue
+            status = (get_task(task_id) or {}).get("status")
+
+        if status not in supersedeable:
+            print(
+                f"[FIX LOOP INVALIDATE SKIP] task={task_id} "
+                f"status={status} cannot be superseded"
+            )
+            continue
+
+        result = subprocess.run(
+            [
+                TASK_MANAGER, "supersede", task_id,
+                "--reason", f"fix-loop: gate {gate_node_id} blocked",
+            ],
+            text=True,
+            capture_output=True,
+        )
+
+        if result.returncode == 0:
+            invalidated.append(task_id)
+        else:
+            print(
+                f"[FIX LOOP INVALIDATE ERROR] supersede {task_id}: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
+
+    return invalidated
+
+
+def _bump_fix_loop_count(workflow_id, retry_node):
+    state = load_stage_state()
+    key = f"{workflow_id}|fixloop|{retry_node}"
+    count = int(state.get(key, 0)) + 1
+    state[key] = count
+    save_stage_state(state)
+    return count
+
+
+def blocked_gate_dependency(workflow_id, ready_node, workflow_cfg):
+    """ready_node 的依赖中是否存在 verdict=blocked 的门禁节点。"""
+    nodes_by_id = {
+        n["id"]: n for n in workflow_cfg.get("nodes", [])
+    }
+
+    for dep in ready_node.get("depends_on", []):
+        gate_cfg = resolve_gate_config(nodes_by_id.get(dep), dep)
+
+        if not gate_cfg:
+            continue
+
+        if gate_verdict(workflow_id, dep) == "blocked":
+            return dep, gate_cfg
+
+    return None
+
+
+def handle_fix_loop(workflow_id, gate_node_id, gate_cfg, workflow_cfg):
+    """原子作废 + 计数 + 投递 fix_loop 事件;幂等(无作废即不重发)。"""
+    retry_node = gate_cfg.get("retry_node", "implementation")
+
+    blockers = []
+
+    for task in load_tasks():
+        if task.get("workflow_id") != workflow_id:
+            continue
+        if gate_node_id not in (task.get("node"), task.get("stage")):
+            continue
+        if task.get("status") == "superseded":
+            continue
+        if task.get("stage_verdict") == "blocked":
+            blockers.append(
+                {
+                    "task_id": task.get("task_id"),
+                    "note": task.get("stage_verdict_note", ""),
+                }
+            )
+
+    invalidated = invalidate_for_fix_loop(
+        workflow_id, gate_node_id, workflow_cfg
+    )
+
+    if not invalidated:
+        return
+
+    loop_count = _bump_fix_loop_count(workflow_id, retry_node)
+
+    coordinator_queue.put(
+        {
+            "kind": "fix_loop",
+            "workflow_id": workflow_id,
+            "gate_stage": gate_node_id,
+            "retry_node": retry_node,
+            "blockers": blockers,
+            "invalidated": invalidated,
+            "loop_count": loop_count,
+            "max_loops": gate_cfg.get("max_loops", FIX_LOOP_MAX),
+            "suggested_branch": latest_branch_for_node(
+                workflow_id, retry_node
+            ),
+        }
+    )
+
+    print(
+        f"[FIX LOOP QUEUED] "
+        f"workflow={workflow_id} "
+        f"gate={gate_node_id} "
+        f"retry={retry_node} "
+        f"loop={loop_count} "
+        f"invalidated={len(invalidated)}"
+    )
+
+
 def coordinator_pane_for_workflow(workflow_id=None):
     if workflow_id:
         project = project_for_workflow(workflow_id) or {}
@@ -453,6 +707,30 @@ def check_workflow_stage_advance(workflow_id):
         }
 
         if is_workflow_completed(workflow_cfg, completed_nodes):
+            # 交付终态门禁:任一门禁节点 verdict=blocked 时不得关闭,
+            # 回流 fix-loop(由 handle_fix_loop 原子作废并派发事件)。
+            nodes_by_id = {
+                n["id"]: n for n in workflow_cfg.get("nodes", [])
+            }
+            blocked_gates = []
+
+            for node_id in sorted(completed_nodes):
+                gate_cfg = resolve_gate_config(
+                    nodes_by_id.get(node_id), node_id
+                )
+                if (
+                    gate_cfg
+                    and gate_verdict(workflow_id, node_id) == "blocked"
+                ):
+                    blocked_gates.append((node_id, gate_cfg))
+
+            if blocked_gates:
+                for gate_node_id, gate_cfg in blocked_gates:
+                    handle_fix_loop(
+                        workflow_id, gate_node_id, gate_cfg, workflow_cfg
+                    )
+                return
+
             print(
                 f"[WORKFLOW COMPLETE] "
                 f"workflow={workflow_id}"
@@ -462,6 +740,16 @@ def check_workflow_stage_advance(workflow_id):
 
         ready_nodes = get_ready_nodes(workflow_cfg, completed_nodes)
         for ready_node in ready_nodes:
+            blocked_dep = blocked_gate_dependency(
+                workflow_id, ready_node, workflow_cfg
+            )
+            if blocked_dep:
+                gate_node_id, gate_cfg = blocked_dep
+                handle_fix_loop(
+                    workflow_id, gate_node_id, gate_cfg, workflow_cfg
+                )
+                continue
+
             ready_id = ready_node["id"]
             if not mark_stage_advance_queued(workflow_id, ready_id):
                 continue
@@ -496,6 +784,11 @@ def check_workflow_stage_advance(workflow_id):
 
         next_stage = stage.get("next")
         if not next_stage:
+            continue
+
+        gate_cfg = resolve_gate_config(None, stage_key)
+        if gate_cfg and gate_verdict(workflow_id, stage_key) == "blocked":
+            handle_fix_loop(workflow_id, stage_key, gate_cfg, workflow_cfg)
             continue
 
         if not mark_stage_advance_queued(workflow_id, next_stage):
@@ -683,7 +976,12 @@ Agent 本轮执行已经结束。
 
 如果验收通过：
 
-~/herdr/bin/herdr-task set {task_id} completed
+~/herdr/bin/herdr-task set {task_id} completed --verdict pass
+
+如果质量门结论为不通过(评审不通过、验收标准未达成等),
+禁止伪造成 pass,必须如实落盘 blocker 清单:
+
+~/herdr/bin/herdr-task set {task_id} completed --verdict blocked --note "<blocker 清单与修复指引>"
 
 如果需要返工：
 
@@ -806,7 +1104,7 @@ agent: {task.get('agent', 'unknown')}
    ~/herdr/bin/herdr-task verify-baseline {task_id}
 4. 根据任务目标和验收标准完成正式验收。
 5. 必须将 Task 状态更新为以下之一：
-   - completed
+   - completed（门禁阶段必须带 --verdict pass|blocked，blocked 另附 --note）
    - rework
    - failed
 6. 不要只输出文字报告而不更新 Task Registry。
@@ -1035,6 +1333,13 @@ def _process_coordinator_item(item, wf_lock):
 
 def _handle_coordinator_item(item):
     """Actual item handling logic (stage_advance or normal task event)."""
+    # ==============================================
+    # Fix Loop (gate verdict blocked)
+    # ==============================================
+    if item.get("kind") == "fix_loop":
+        _handle_fix_loop_item(item)
+        return
+
     # ==============================================
     # Workflow Stage Advance
     # ==============================================
@@ -1299,6 +1604,119 @@ task_type:
             pass  # task_done is called by coordinator_worker dispatcher
 
         return
+
+# ==============================================
+# Fix Loop Event
+# ==============================================
+
+def _handle_fix_loop_item(item):
+    """门禁 blocked 的回流通知:作废已由 handle_fix_loop 原子完成,
+    这里只负责把 blocker 清单与修复派发指引送到总指挥。"""
+    workflow_id = item["workflow_id"]
+    coord_pane = coordinator_pane_for_workflow(workflow_id)
+
+    if not coord_pane:
+        print(
+            f"[FIX LOOP SKIP] "
+            f"no coordinator pane for workflow={workflow_id}"
+        )
+        return
+
+    gate_stage = item["gate_stage"]
+    retry_node = item["retry_node"]
+    loop_count = item["loop_count"]
+    max_loops = item["max_loops"]
+    invalidated = item.get("invalidated") or []
+    suggested_branch = item.get("suggested_branch")
+    project_ctx = project_for_workflow(workflow_id) or {}
+
+    blockers_text = "\n".join(
+        f"- {b.get('task_id')}: {b.get('note') or '(未记录说明)'}"
+        for b in item.get("blockers") or []
+    ) or "- (未记录 blocker 说明,请读取 gate 阶段任务输出)"
+
+    escalation = ""
+    if loop_count >= max_loops:
+        escalation = (
+            f"\n注意:已达 fix-loop 上限({loop_count}/{max_loops})。"
+            "先向用户请示(继续修 / 换方案 / 放弃),"
+            "未经用户确认不得派发。\n"
+        )
+
+    branch_hint = (
+        suggested_branch
+        or "(未找到,请自行确认 retry_node 最近 committed 任务的分支)"
+    )
+
+    message = f"""
+HERDR_CONTROLLER_FIX_LOOP_EVENT
+
+workflow_id: {workflow_id}
+project_name: {project_ctx.get('project_name', 'unknown')}
+gate_stage: {gate_stage} — 验收结论 blocked
+retry_node: {retry_node}
+suggested_branch: {branch_hint}
+loop_count: {loop_count}/{max_loops}
+{escalation}
+Controller 已自动作废受影响的 gate 与下游 Task(共 {len(invalidated)} 个,见 Task Registry);
+fix 完成后 DAG 将自动按 test → review → wrapup 顺序重新推进,旧 verdict 一并作废。
+
+Blocker 清单(blocked 结论与修复指引):
+{blockers_text}
+
+你现在只需派发修复 Task(禁止新建 workflow、禁止放弃本 workflow):
+
+~/herdr/bin/herdr-task launch --workflow-id {workflow_id} --stage {retry_node} \\
+  --onto {branch_hint} --agent auto --task-type fix \\
+  --goal "修复 gate {gate_stage} 的阻断项" \\
+  --acceptance "<逐条对应 Blocker 清单>" \\
+  --prompt "<blocker 详情、修复范围与验证方式>"
+
+如需再次修复,对旧 fix task 使用 --supersedes。
+派发完成后结束当前回合,后续推进交给 Controller。
+""".strip()
+
+    waited = 0
+
+    while coordinator_status(workflow_id) not in ("idle", "done"):
+        if waited >= 120:
+            print(
+                f"[FIX LOOP WAIT TIMEOUT] "
+                f"workflow={workflow_id}"
+            )
+            return
+
+        time.sleep(2)
+        waited += 2
+
+    result = subprocess.run(
+        [
+            "herdr",
+            "agent",
+            "prompt",
+            coord_pane,
+            message,
+            "--wait",
+            "--timeout",
+            "600000"
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if result.returncode == 0:
+        print(
+            f"[FIX LOOP NOTIFIED] "
+            f"workflow={workflow_id} "
+            f"gate={gate_stage} "
+            f"retry={retry_node}"
+        )
+    else:
+        print(
+            f"[FIX LOOP ERROR] "
+            f"workflow={workflow_id}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
 
 # ==============================================
 # Normal Task Event

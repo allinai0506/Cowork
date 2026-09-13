@@ -406,8 +406,14 @@ def ask_coordinator(tid):
     if r.returncode!=0:raise RuntimeError(r.stderr.strip() or r.stdout.strip())
     return {'ok':True}
 
+def _blocked_verdict_tasks(wid):
+    return [t for t in tasks_for_workflow(wid)
+            if t.get('status')!='superseded' and t.get('stage_verdict')=='blocked']
+
 def manual_advance(wid):
     d=workflow_detail(wid); done=None; nxt=None
+    bl=_blocked_verdict_tasks(wid)
+    if bl:raise RuntimeError('存在 blocked 验收结论('+', '.join(t['task_id'] for t in bl)+'),禁止手工推进;请先走 fix-loop(修复→重测→复审)或作废过期结论')
     for i,s in enumerate(d['stages']):
         if s['status'] in {'cleaned','finalizing'}:
             done=s['key']; nxt=d['stages'][i+1]['key'] if i+1<len(d['stages']) else None
@@ -422,6 +428,8 @@ def manual_advance(wid):
 def create_candidate(wid):
     allw=load_json(WORKFLOWS_FILE,{'workflows':{}}); w=allw.get('workflows',{}).get(wid)
     if not w:raise RuntimeError('Workflow 不存在')
+    bl=_blocked_verdict_tasks(wid)
+    if bl:raise RuntimeError('存在 blocked 验收结论('+', '.join(t['task_id'] for t in bl)+'),拒绝创建候选分支;请先完成 fix-loop 闭环或显式处理阻断,避免把未修复的交付合入候选分支')
     p=project_for_workflow(wid); repo=p.get('project_root'); base=w.get('original_base_branch') or p.get('base_branch'); cand=w.get('candidate_branch') or f'herdr/workflow-{wid}'
     tracked=run(['git','-C',repo,'status','--porcelain','--untracked-files=no'],check=True).stdout.strip()
     if tracked:raise RuntimeError('主仓库存在 tracked 修改，拒绝创建候选分支:\n'+tracked)
