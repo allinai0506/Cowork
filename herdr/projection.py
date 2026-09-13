@@ -300,6 +300,49 @@ def project_task(task_id: str) -> Dict[str, Any]:
     }
 
 
+def detect_workflow_stalls(workflow_id: str, tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Detect workflow deadlocks, orphan reworks, or hanging stage transitions."""
+    now = time.time()
+
+    # 1. Detect rework orphan: task staying in 'rework' for > 45 seconds
+    for t in tasks:
+        if t.get("status") == "rework":
+            last_ts = t.get("updated_at") or t.get("started_at") or t.get("created_at") or now
+            if isinstance(last_ts, (int, float)) and (now - last_ts > 45):
+                tid = t.get("task_id")
+                return {
+                    "is_stalled": True,
+                    "stall_type": "rework_orphan",
+                    "message": f"工位 {tid} 返工已停滞超 45 秒，等待协调器复验促醒",
+                    "suggested_action": "force_review",
+                    "target_task_id": tid,
+                }
+
+    # 2. Detect stage advance hang: all current tasks done/cleaned, but workflow still running
+    terminal_statuses = {"completed", "committed", "integrated", "cleanup_ready", "cleaned"}
+    if tasks and all(t.get("status") in terminal_statuses for t in tasks):
+        latest_finish = max(
+            (t.get("updated_at") or t.get("created_at") or 0)
+            for t in tasks
+        )
+        if isinstance(latest_finish, (int, float)) and latest_finish > 0 and (now - latest_finish > 45):
+            return {
+                "is_stalled": True,
+                "stall_type": "stage_advance_hang",
+                "message": "上一阶段所有任务均已完成，但后继阶段推进悬挂已超 45 秒",
+                "suggested_action": "retry_advance",
+                "target_task_id": None,
+            }
+
+    return {
+        "is_stalled": False,
+        "stall_type": None,
+        "message": "",
+        "suggested_action": None,
+        "target_task_id": None,
+    }
+
+
 def project_workflow(workflow_id: str) -> Dict[str, Any]:
     """Produce aggregated white-box projection across all tasks in a workflow."""
     wf_data = load_workflows_data()
@@ -310,6 +353,8 @@ def project_workflow(workflow_id: str) -> Dict[str, Any]:
     tasks_data = load_tasks_data()
     wf_tasks = [t for t in tasks_data.get("tasks", []) if t.get("workflow_id") == workflow_id]
 
+    stall_info = detect_workflow_stalls(workflow_id, wf_tasks)
+
     task_projections = []
     completed_count = 0
     blocked_count = 0
@@ -317,6 +362,9 @@ def project_workflow(workflow_id: str) -> Dict[str, Any]:
     for t in wf_tasks:
         try:
             p = project_task(t["task_id"])
+            if stall_info["is_stalled"] and stall_info.get("target_task_id") == t["task_id"]:
+                p["blockers"].insert(0, stall_info["message"])
+                p["blocker"] = stall_info["message"]
             task_projections.append(p)
             if p["status"] in {"completed", "committed", "integrated", "cleanup_ready", "cleaned"}:
                 completed_count += 1
@@ -333,6 +381,8 @@ def project_workflow(workflow_id: str) -> Dict[str, Any]:
             "completed_tasks": completed_count,
             "blocked_tasks": blocked_count,
         },
+        "stall": stall_info,
         "tasks": task_projections,
         "projected_at": time.time(),
     }
+

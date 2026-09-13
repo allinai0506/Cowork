@@ -317,7 +317,9 @@ def workflow_detail(wid):
     p=project_for_workflow(wid); ts=tasks_for_workflow(wid); ss=[]
     for k,l in STAGES:
         x=stage_summary(ts,k); x['label']=l; ss.append(x)
-    return {'workflow':{'workflow_id':wid,**_with_subject(w)},'project':p,'stages':ss,'tasks':ts,'coordinator':agent_runtime(w.get('coordinator_pane_id')),'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto')}
+    stall_info=herdr_projection.detect_workflow_stalls(wid,ts)
+    return {'workflow':{'workflow_id':wid,**_with_subject(w)},'project':p,'stages':ss,'tasks':ts,'coordinator':agent_runtime(w.get('coordinator_pane_id')),'candidate_branch':w.get('candidate_branch'),'agent_override':w.get('agent_override','auto'),'stall':stall_info}
+
 
 def task_detail(tid):
     t=next((x for x in tasks() if x.get('task_id')==tid),None)
@@ -505,6 +507,35 @@ def api_task_halt(b):
 def api_task_steer_queue(tid):
     if not tid:return []
     return herdr_steering.list_task_steers(tid)
+
+def api_task_force_review(b):
+    tid=str(b.get('task_id') or '').strip()
+    if not tid:raise RuntimeError('task_id 不能为空')
+    store=herdr_kernel.get_state_store()
+    task=store.get_task(tid)
+    if not task:raise RuntimeError(f'未找到任务 {tid}')
+    task['status']='agent_done'
+    task['updated_at']=time.time()
+    store.save_task(task)
+    wid=task.get('workflow_id')
+    notified=False
+    if wid:
+        wf=store.get_workflow(wid)
+        if wf and wf.get('coordinator_pane_id'):
+            c=wf['coordinator_pane_id']
+            msg=f'''HERDR_TASK_FORCE_REVIEW\n\ntask_id: {tid}\nworkflow_id: {wid}\n\n总指挥已人工唤醒评审，请立即对工位产物进行复审验收。'''
+            try:
+                r=run(['herdr','agent','prompt',c,msg,'--wait','--timeout','10000'],15)
+                notified=(r.returncode==0)
+            except Exception:
+                pass
+    return {'task_id':tid,'status':'agent_done','notified':notified}
+
+def api_workflow_retry_advance(b):
+    wid=str(b.get('workflow_id') or '').strip()
+    if not wid:raise RuntimeError('workflow_id 不能为空')
+    return manual_advance(wid)
+
 
 def api_task_projection(tid):
     if not tid:raise RuntimeError('task_id 不能为空')
@@ -1048,7 +1079,7 @@ function updateAttentionHub(){
   const ts=(state.workflow&&state.workflow.tasks)||[];
   const cntAll=ts.length;
   const decisionTasks=ts.filter(t=>t.stage_verdict==='blocked'||t.status==='blocked'||t.node_type==='gate');
-  const attentionTasks=ts.filter(t=>['failed','interrupted'].includes(t.status)||(t.blocker&&t.blocker.length));
+  const attentionTasks=ts.filter(t=>['failed','interrupted','rework'].includes(t.status)||(t.blocker&&t.blocker.length));
   const activeTasks=ts.filter(t=>['dispatched','working','rework','paused'].includes(t.status));
   const elAll=document.getElementById('cntAll');if(elAll)elAll.textContent=cntAll;
   const elDec=document.getElementById('cntDecision');if(elDec)elDec.textContent=decisionTasks.length;
@@ -1059,7 +1090,22 @@ function updateAttentionHub(){
   if(!state.workflowId||state.opsMode){ab.style.display='none';return}
   ab.style.display='flex';
   const readyCnt=Math.max(0,cntAll-decisionTasks.length-attentionTasks.length);
-  ab.innerHTML=`<div style="display:flex;align-items:center;gap:10px"><span class="att-badge">人机协同态势</span><span class="att-text">${activeTasks.length} 个执行者正在协同 · ${readyCnt} 个正常推进 · ${attentionTasks.length} 个需关注 · <strong style="color:${decisionTasks.length?'var(--accent)':'var(--text)'}">${decisionTasks.length} 个待你拍板</strong></span></div><div>${decisionTasks.length?`<button class="btn primary" style="padding:4px 10px;font-size:12px" onclick="setTaskFilter('decision')">立即拍板</button>`:''}</div>`;
+  const stall=state.workflow&&state.workflow.stall;
+  if(stall&&stall.is_stalled){
+    ab.style.background='linear-gradient(90deg, #3d1c06 0%, #1f140a 100%)';
+    ab.style.borderColor='var(--warn)';
+    let actBtn='';
+    if(stall.suggested_action==='force_review'&&stall.target_task_id){
+      actBtn=`<button class="btn primary" style="background:#d97706;border-color:#b45309;padding:4px 10px;font-size:12px" onclick="forceReviewTask('${stall.target_task_id}')">🔔 立即唤醒评审</button>`;
+    }else if(stall.suggested_action==='retry_advance'){
+      actBtn=`<button class="btn primary" style="background:#2563eb;border-color:#1d4ed8;padding:4px 10px;font-size:12px" onclick="retryStageAdvance('${state.workflowId}')">⚡ 尝试推进阶段</button>`;
+    }
+    ab.innerHTML=`<div style="display:flex;align-items:center;gap:10px"><span class="att-badge" style="background:var(--warn);color:#000">推进停滞告警</span><span class="att-text" style="color:#fef08a">⚠️ ${esc(stall.message)}</span></div><div>${actBtn}</div>`;
+  }else{
+    ab.style.background='linear-gradient(90deg,#14243a 0%,#111a26 100%)';
+    ab.style.borderColor='var(--accent)';
+    ab.innerHTML=`<div style="display:flex;align-items:center;gap:10px"><span class="att-badge">人机协同态势</span><span class="att-text">${activeTasks.length} 个执行者正在协同 · ${readyCnt} 个正常推进 · ${attentionTasks.length} 个需关注 · <strong style="color:${decisionTasks.length?'var(--accent)':'var(--text)'}">${decisionTasks.length} 个待你拍板</strong></span></div><div>${decisionTasks.length?`<button class="btn primary" style="padding:4px 10px;font-size:12px" onclick="setTaskFilter('decision')">立即拍板</button>`:''}</div>`;
+  }
 }
 function renderStages(){
   const ss=(state.workflow&&state.workflow.stages)||[];
@@ -1083,7 +1129,7 @@ function renderTasks(){
   if(f==='decision'){
     ts=ts.filter(t=>t.stage_verdict==='blocked'||t.status==='blocked'||t.node_type==='gate');
   }else if(f==='attention'){
-    ts=ts.filter(t=>['failed','interrupted'].includes(t.status)||(t.blocker&&t.blocker.length));
+    ts=ts.filter(t=>['failed','interrupted','rework'].includes(t.status)||(t.blocker&&t.blocker.length));
   }else if(f==='active'){
     ts=ts.filter(t=>['dispatched','working','rework','paused'].includes(t.status));
   }
@@ -1101,6 +1147,7 @@ function renderTasks(){
         <button class="mini" style="color:var(--accent);font-weight:600" onclick="openSignoffChamber('${esc(t.task_id)}')">成果会签</button>
         <button class="mini" onclick="showPane('${esc(t.pane_id||'')}')">工位</button>
         ${['working','dispatched','rework','blocked','paused'].includes(t.status)?`<button class="mini" style="color:var(--accent)" onclick="showSteerModal('${esc(t.task_id)}')">插话</button><button class="mini" style="color:var(--bad)" onclick="haltTaskPrompt('${esc(t.task_id)}')">制动</button>`:''}
+        ${t.status==='rework'?`<button class="mini" style="color:var(--warn);font-weight:600" onclick="forceReviewTask('${esc(t.task_id)}')">唤醒评审</button>`:''}
         <button class="mini" onclick="askCoordinator('${esc(t.task_id)}')">让总指挥处理</button>
         ${t.stage_verdict==='blocked'?`<button class="mini" style="color:var(--accent)" onclick="forcePassTask('${esc(t.workflow_id||state.workflowId)}','${esc(t.node||t.stage)}')">强制放行</button>`:''}
       </div>
@@ -1250,7 +1297,24 @@ async function runPreflight(){
 function showAgentOverride(){if(!state.workflowId)return toast('当前没有工作流',true);const cur=state.workflow.agent_override||'auto';openModal('指定后续任务执行者',`<div class="form"><label for="overrideAgent">执行者策略</label><select id="overrideAgent">${['auto','opencode','codex','claude','qodercli','agy','pi'].map(a=>`<option ${a===cur?'selected':''}>${a}</option>`).join('')}</select><button class="btn primary" onclick="saveAgentOverride()">保存</button><div class="muted">只影响后续新建任务。</div></div>`)}async function saveAgentOverride(){try{await api('/api/workflow/agent',{method:'POST',body:JSON.stringify({workflow_id:state.workflowId,agent:document.getElementById('overrideAgent').value})});closeModal();await loadWorkflow(state.workflowId);toast('执行者策略已更新')}catch(e){toast(e.message,true)}}async function showTask(id){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(id)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(id)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const raw=td||proj||{};const st=d.status||(td&&td.task&&td.task.status)||'unknown';const intent=d.intent||(td&&td.task&&td.task.goal)||'无明确意图描述';const blockers=Array.isArray(d.blockers)?d.blockers:(d.blocker?[d.blocker]:[]);const ms=Array.isArray(d.milestones)?d.milestones:[];const arts=Array.isArray(d.artifacts)?d.artifacts:[];const acts=Array.isArray(d.recent_activity)?d.recent_activity:(typeof d.recent_activity==='string'&&d.recent_activity?d.recent_activity.split('\n'):[]);const blkHtml=blockers.length?`<div class="proj-blk"><strong>⚠️ 卡点告警:</strong><span>${esc(blockers.join('; '))}</span></div>`:'';const msHtml=ms.length?`<div class="proj-sec"><div class="proj-lbl">动态路标</div>${ms.map(m=>`<div class="proj-ms"><span class="proj-ms-dot ${m.status}">${m.status==='completed'?'✓':(m.status==='in_progress'?'›':'·')}</span><span style="${m.status==='completed'?'color:var(--text)':(m.status==='in_progress'?'color:var(--warn);font-weight:600':'color:var(--muted)')}">${esc(m.label)}</span></div>`).join('')}</div>`:'';const artHtml=arts.length?`<div class="proj-sec"><div class="proj-lbl">核心产物</div>${arts.map(a=>`<div class="proj-art"><div class="proj-art-hd"><span>${esc(a.name||a.kind)}</span><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="muted">${esc(a.summary||'')}</div></div>`).join('')}</div>`:'';const actHtml=acts.length?`<div class="proj-sec"><div class="proj-lbl">近期动态提炼</div><ul class="proj-acts">${acts.map(a=>`<li>${esc(a)}</li>`).join('')}</ul></div>`:'';const body=`<div class="proj-box"><div style="display:flex;justify-content:space-between;align-items:center;padding-bottom:8px;border-bottom:1px solid var(--line)"><div><span class="badge ${st}">${esc(st)}</span><span style="margin-left:8px;font-size:12px;color:var(--muted)">执行者: <strong>${esc(d.agent||'-')}</strong></span><span style="margin-left:8px;font-size:12px;color:var(--muted)">工位: <strong>${esc(d.node||'-')}</strong></span></div><button class="mini" onclick="const el=document.getElementById('taskRawPre');if(el)el.style.display=el.style.display==='none'?'block':'none'">原始数据</button></div>${blkHtml}<div class="proj-sec"><div class="proj-lbl">当前语义意图</div><div class="proj-txt">${esc(intent)}</div></div>${msHtml}${artHtml}${actHtml}<div id="taskRawPre" style="display:none;margin-top:10px"><div class="proj-lbl">原始调试数据</div><pre>${esc(JSON.stringify(raw,null,2))}</pre></div></div>`;openModal('任务白盒简报 · '+id,body)}catch(e){toast(e.message,true)}}async function showPane(id){if(!id)return toast('没有工位',true);try{const d=await api('/api/pane/read?id='+encodeURIComponent(id));openModal('工位 '+id,`<pre>${esc(d.output)}</pre>`)}catch(e){toast(e.message,true)}}async function askCoordinator(id){try{toast('正在通知总指挥…');await api('/api/task/coordinator',{method:'POST',body:JSON.stringify({task_id:id})});toast('总指挥已处理/接收')}catch(e){toast(e.message,true)}}
 async function openSignoffChamber(taskId){try{const [td,proj]=await Promise.all([api('/api/task?id='+encodeURIComponent(taskId)).catch(()=>null),api('/api/task/projection?id='+encodeURIComponent(taskId)).catch(()=>null)]);const d=proj||(td&&td.task)||{};const t=(td&&td.task)||{};const wid=t.workflow_id||state.workflowId;const node=t.node||t.stage||'';const arts=Array.isArray(d.artifacts)?d.artifacts:[];const isBlocked=t.stage_verdict==='blocked'||t.status==='blocked';let artCards='<div class="empty">暂无生成产物</div>';if(arts.length){artCards=arts.map(a=>`<div class="proj-sec" style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><strong>${esc(a.name||a.kind)}</strong><span class="badge ${a.passed?'cleaned':(a.kind==='evaluation'?'failed':'waiting')}">${esc(a.kind)}</span></div><div class="task-meta" style="margin-bottom:6px">${esc(a.path||'')}</div><div class="proj-txt" style="background:#080b0f;padding:8px 10px;border-radius:8px;font-family:ui-monospace,Menlo,monospace;font-size:12px;max-height:160px;overflow:auto">${esc(a.content||a.summary||'（文件产物记录正常）')}</div></div>`).join('')}const html=`<div class="signoff-box"><div class="signoff-head"><div><div style="font-size:16px;font-weight:700">${esc(taskDisplayName(t))}</div><div class="task-meta">任务 ID: ${esc(taskId)} · 执行者: <b>${esc(t.agent||'-')}</b> · 节点: <b>${esc(node)}</b></div></div><div>${badge(t.status)}</div></div>${isBlocked?'<div class="proj-blk"><strong>⚠️ 门禁会签等待:</strong> 当前节点触发门禁阻断，需要人类总指挥核查产物并决策放行或打回。</div>':''}<div class="proj-sec"><div class="proj-lbl">核心交付物与成果列表</div>${artCards}</div><div class="form"><label for="signoffFeedback">审批意见 / 批注说明（可选）</label><input id="signoffFeedback" placeholder="例如：数据核准，批准通过；或：海外收入拆解不全，请补充"></div><div class="signoff-actions"><button class="btn" onclick="closeModal()">暂不处理</button><button class="btn danger-btn" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'reject\')">批注打回</button><button class="btn primary" onclick="submitSignoffDecision(\'${esc(taskId)}\',\'${esc(wid)}\',\'${esc(node)}\',\'approve\')">通过并放行</button></div></div>`;openModal('成果交付会签室 (Artifact Signoff Chamber)',html)}catch(e){toast(e.message,true)}}
 async function submitSignoffDecision(taskId,wid,node,act){const feedback=(document.getElementById('signoffFeedback')?.value||'').trim();closeModal();try{toast(act==='approve'?'正在通过并放行…':'正在批注打回…');const res=await api('/api/task/signoff',{method:'POST',body:JSON.stringify({task_id:taskId,workflow_id:wid,node:node,action:act,feedback:feedback,operator:'总指挥'})});if(res.ok){await loadWorkflow(wid);toast(act==='approve'?'已通过并放行门禁！':'已完成批注打回，已回退至上游重新推进')}else{toast('操作失败: '+(res.error||'未知错误'),true)}}catch(e){toast(e.message,true)}}
+async function forceReviewTask(tid){
+  try{
+    toast('正在唤醒评审…');
+    await api('/api/task/force-review',{method:'POST',body:JSON.stringify({task_id:tid})});
+    toast('已将工位推进至 agent_done 并促醒协调器验收');
+    refreshAll();
+  }catch(e){toast('唤醒评审失败: '+e.message,true)}
+}
+async function retryStageAdvance(wid){
+  try{
+    toast('正在尝试推进阶段…');
+    await api('/api/workflow/retry-advance',{method:'POST',body:JSON.stringify({workflow_id:wid||state.workflowId})});
+    toast('已触发阶段推进');
+    refreshAll();
+  }catch(e){toast('推进失败: '+e.message,true)}
+}
 function toggleDeepDrawer(){const d=document.getElementById('deepDrawer');if(!d)return;const isCollapsed=d.classList.contains('collapsed');d.classList.toggle('collapsed');const txt=document.getElementById('drawerToggleText');if(txt)txt.textContent=isCollapsed?'▼ 折叠收起':'▲ 展开抽屉';if(isCollapsed)refreshDeepDrawer()}
+
 function switchDrawerTab(tab){state.drawerTab=tab;['tty','logs','raw'].forEach(t=>{const el=document.getElementById('dtab'+t.charAt(0).toUpperCase()+t.slice(1));if(el)el.classList.toggle('active',t===tab)});refreshDeepDrawer()}
 async function refreshDeepDrawer(){const pre=document.getElementById('drawerPre');if(!pre)return;pre.textContent='正在拉取底层现场数据…';try{if(state.drawerTab==='tty'){const ts=(state.workflow&&state.workflow.tasks)||[];const activeTask=ts.find(t=>['working','dispatched','rework','paused'].includes(t.status))||ts[0];const paneId=activeTask?activeTask.pane_id:(state.project&&state.project.slots&&state.project.slots[0]&&state.project.slots[0].pane_id);if(!paneId){pre.textContent='当前暂无活动工位 TTY';return}const d=await api('/api/pane/read?id='+encodeURIComponent(paneId));pre.textContent=`[工位 ${paneId} 实时终端现场]\n`+(d.output||'（工位暂无输出）')}else if(state.drawerTab==='logs'){const d=await api('/api/logs?kind=controller');pre.textContent='[调度器内核日志 Controller Log]\n'+(d.output||'（暂无日志）')}else if(state.drawerTab==='raw'){if(!state.workflowId){pre.textContent='请先选择一个工作流';return}const d=await api('/api/workflow/projection?id='+encodeURIComponent(state.workflowId));pre.textContent=JSON.stringify(d,null,2)}}catch(e){pre.textContent='拉取失败: '+e.message}}
 function showSteerModal(tid){openModal('总指挥实时插话纠偏',`<div class="form"><div class="muted" style="margin-bottom:8px">任务 ID：${esc(tid)}</div><label for="steerInput">纠偏或引导指令（将直接注入工位执行者）</label><textarea id="steerInput" rows="3" placeholder="例如：优先使用标准库，不要引入外部第三方包" style="width:100%;box-sizing:border-box;margin-bottom:10px"></textarea><div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><input type="checkbox" id="steerUrgent" style="width:auto"><label for="steerUrgent" style="margin:0;cursor:pointer"><strong>紧急插话 (立即软打断工位执行者并注入指令)</strong></label></div><button class="btn primary" onclick="submitSteer('${esc(tid)}')">发送指令</button></div>`)}
@@ -1396,6 +1460,8 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/workflow/agent':return self.send_json(200,set_agent_override(str(b['workflow_id']),str(b.get('agent') or 'auto')))
             if p=='/api/workflow/candidate':return self.send_json(200,create_candidate(str(b['workflow_id'])))
             if p=='/api/workflow/advance':return self.send_json(200,manual_advance(str(b['workflow_id'])))
+            if p=='/api/task/force-review':return self.send_json(200,api_task_force_review(b))
+            if p=='/api/workflow/retry-advance':return self.send_json(200,api_workflow_retry_advance(b))
             if p=='/api/task/coordinator':return self.send_json(200,ask_coordinator(str(b['task_id'])))
             if p=='/api/task/steer':return self.send_json(200,api_task_steer(b))
             if p=='/api/task/halt':return self.send_json(200,api_task_halt(b))

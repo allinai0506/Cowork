@@ -336,6 +336,26 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 总结任务启动现场未隔离导致提交误入他人功能 PR（PR #17 事故）及并发分支冲突（PR #18）的深层根因；
   - 固化 S0 准备阶段强制门禁（`git fetch origin` 同步主仓库 + CoW 沙盒独立建支为一等公民）。
 
+## [2026-09-14] feat | Anti-Stall Workflow Healing, CoW Sandbox Isolation & Commander Telemetry
+- **三支柱抗死锁工程闭环落地**：
+  - **支柱 1（沙盒物理纯净隔离与原子清理，`services/herdr-worker.py`）**：
+    - 新增 `sanitize_clone_sandbox`：在沙盒建支前内部强制执行 `git reset --hard HEAD` 与 `git clean -fd`，彻底隔离母体未提交工作区修改（WIP），杜绝 `git switch` 检出冲突；
+    - 新增未注册/陈旧沙盒残留自愈清理机制，异常时执行原子化删除，消除半残 Clone 阻塞重试；
+    - 配套 `tests/test_herdr_worker.py` 新增 3 项隔离与自愈测试。
+  - **支柱 2（产物契约优先交付与 Rework 看门狗，`services/herdr-controller.py`）**：
+    - 新增 `check_task_deliverables_ready`：严格依据 `required_outputs` 或 baseline 差异判断交付物就绪，规避长推理模型思考间歇瞬态空闲误判；
+    - 补齐状态机 `rework` 空闲事件处理与自愈推进逻辑，并在主循环中引入 `rework_watchdog`，彻底终结返工孤儿死锁；
+    - 配套 `tests/test_fix_loop_anti_flapping.py` 新增 2 项自愈与产物防抢跑测试。
+  - **支柱 3（总指挥白盒停滞感知与主动干预，`herdr/projection.py`, `console/herdr_factory_console.py`）**：
+    - 新增 `detect_workflow_stalls`：自动识别返工停滞（>45s）与阶段推进悬挂（>45s），注入白盒遥测；
+    - 控制台前端 Attention Banner 动态变色预警与一键动作面板（`[🔔 立即唤醒评审]`, `[⚡ 尝试推进阶段]`），工位卡片新增 `[唤醒评审]`；
+    - 控制台后端打通 `/api/task/force-review` 与 `/api/workflow/retry-advance`；
+    - 配套 `tests/test_projection_engine.py` 扩充 3 项停滞与投影集成测试。
+- **治理规范与知识归档**：
+  - 沉淀并归档通用工程教训 §31（工作流抗停滞自愈、CoW沙盒纯净隔离与总指挥主动干预）；
+  - 全仓自动化回归测试达 349 项（100% 绿灯通过）。
+
+
 
 
 
