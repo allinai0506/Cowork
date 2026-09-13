@@ -54,6 +54,10 @@ def maybe_close_completed_workflow(workflow_id):
             entry = json.load(f).get("workflows", {}).get(workflow_id) or {}
         if entry.get("status") == "completed":
             return
+        # Fix-loop reopen 闩:重开后的 workflow 在首个任务进入 ACTIVE
+        # 之前,旧任务仍全为完成系,必须挡住 sweep 的自消除 close。
+        if entry.get("suppress_auto_close"):
+            return
     except (OSError, json.JSONDecodeError):
         pass
 

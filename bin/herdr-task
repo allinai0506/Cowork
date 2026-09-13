@@ -1142,6 +1142,9 @@ def set_status(task_id, new_status):
     if new_status in ACTIVE_TASK_STATUSES and not task.get("started_at"):
         task["started_at"] = now
 
+    if new_status in ACTIVE_TASK_STATUSES:
+        _clear_suppress_auto_close(task.get("workflow_id"))
+
     if new_status in COMPLETED_TASK_STATUSES and not task.get("last_result"):
         task["last_result"] = task.get("status")
 
@@ -1192,6 +1195,35 @@ def launch_task(args):
         project.get("base_branch")
         or "dev"
     )
+
+    onto_branch = getattr(args, "onto", None)
+
+    if onto_branch:
+        # Fix-loop 续接:任务必须落在既有分支(如开放中的 PR 分支)上。
+        fetch = subprocess.run(
+            [
+                "git", "-C", source_repo,
+                "fetch", "origin", onto_branch,
+            ],
+            text=True,
+            capture_output=True,
+        )
+        remote_ref = subprocess.run(
+            [
+                "git", "-C", source_repo,
+                "rev-parse", "--verify", "--quiet",
+                f"refs/remotes/origin/{onto_branch}",
+            ],
+            text=True,
+            capture_output=True,
+        )
+
+        if remote_ref.returncode != 0:
+            print(
+                f"Onto branch not found on origin: {onto_branch}\n"
+                f"{(fetch.stderr.strip() or fetch.stdout.strip())}"
+            )
+            sys.exit(2)
 
     requested_agent = args.agent if args.agent else "auto"
 
@@ -1250,6 +1282,9 @@ def launch_task(args):
         "--task-type", args.task_type,
         "--base-branch", base_branch,
     ]
+
+    if onto_branch:
+        worker_cmd += ["--onto", onto_branch]
 
     if prebuilt_pane:
         worker_cmd += ["--pane-id", prebuilt_pane]
@@ -2797,6 +2832,102 @@ def supersede_task(task_id, new_task_id=None, reason=None):
     print(msg)
 
 
+def _clear_suppress_auto_close(workflow_id):
+    """Fix-loop reopen 闩:该 workflow 任一任务进入 ACTIVE 时清除。
+
+    闩存在的意义是封住 reopen 后"旧任务仍全为完成系、周期 sweep
+    立即 auto-close"的自消除窗口;首个 fix task 落盘即为摘除时机,
+    此时 implementation 节点已回归未完成。
+    """
+    if not workflow_id:
+        return
+
+    entry, entries = _load_workflow_entry(workflow_id)
+
+    if entry is None or not entry.get("suppress_auto_close"):
+        return
+
+    entry.pop("suppress_auto_close", None)
+
+    tmp = WORKFLOWS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, WORKFLOWS_FILE)
+
+    print(f"[AUTO-CLOSE LATCH CLEARED] workflow={workflow_id}")
+
+
+def reopen_workflow(workflow_id):
+    """重开已关闭的 workflow(fix-loop 续用同一 workflow/PR 上下文)。
+
+    仅 completed 可重开;总指挥 pane 必须存活(验收与派发的消息终点)。
+    重开即置 suppress_auto_close 闩,防止周期 sweep 在 fix task 派发前
+    将 workflow 自消除回 completed。
+    """
+    entry, entries = _load_workflow_entry(workflow_id)
+
+    if entry is None:
+        print(f"Unknown workflow: {workflow_id}")
+        sys.exit(1)
+
+    if entry.get("status") != "completed":
+        print(
+            f"[REOPEN ABORT] workflow={workflow_id} "
+            f"status={entry.get('status')}: only completed workflows can reopen"
+        )
+        sys.exit(2)
+
+    coordinator_pane = entry.get("coordinator_pane_id")
+
+    if not coordinator_pane:
+        print(
+            f"[REOPEN ABORT] workflow={workflow_id}: "
+            "record has no coordinator_pane_id"
+        )
+        sys.exit(2)
+
+    listing = _herdr("pane", "list")
+    alive = False
+
+    if listing.returncode == 0:
+        try:
+            result = json.loads(listing.stdout).get("result", {})
+            panes = (
+                result.get("panes", result)
+                if isinstance(result, dict)
+                else result
+            )
+            alive = any(
+                pane.get("pane_id") == coordinator_pane
+                for pane in (panes or [])
+            )
+        except (json.JSONDecodeError, TypeError):
+            alive = False
+
+    if not alive:
+        print(
+            f"[REOPEN ABORT] coordinator pane {coordinator_pane} is not alive; "
+            "rebuild the coordinator pane first, then reopen"
+        )
+        sys.exit(2)
+
+    entry["status"] = "in_progress"
+    entry["suppress_auto_close"] = True
+    entry["reopened_at"] = _now()
+
+    tmp = WORKFLOWS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, WORKFLOWS_FILE)
+
+    stage_reset(workflow_id)
+
+    print(
+        f"[WORKFLOW REOPENED] {workflow_id} "
+        f"(suppress_auto_close latch set; clears on first active task)"
+    )
+
+
 def stage_reset(workflow_id, stage=None):
     """Clear stage-state.json advance lock(s) for a workflow.
 
@@ -2930,6 +3061,13 @@ def main():
         default=None,
         help="Task ID of the old task being replaced. Atomically marks it as superseded."
     )
+    launch.add_argument(
+        "--onto",
+        default=None,
+        help="Checkout this existing branch instead of creating a task branch "
+             "(commits land on it, e.g. to continue an open PR). "
+             "Fetched from origin; fails fast if missing."
+    )
 
     dispatch = sub.add_parser("dispatch")
     dispatch.add_argument("task_id")
@@ -2979,6 +3117,9 @@ def main():
         action="store_true",
         help="delete clones even without integration evidence",
     )
+
+    reopen_wf = sub.add_parser("reopen-workflow")
+    reopen_wf.add_argument("workflow_id")
     close_wf.add_argument(
         "--dry-run",
         dest="dry_run",
@@ -3080,6 +3221,9 @@ def main():
             purge_clones=args.purge_clones,
             dry_run=args.dry_run,
         )
+
+    elif args.command == "reopen-workflow":
+        reopen_workflow(args.workflow_id)
 
     elif args.command == "get":
         get_task(args.task_id)
