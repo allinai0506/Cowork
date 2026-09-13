@@ -102,8 +102,12 @@ def resolve_project(explicit_path=None, create=True, template_name="software-dev
     return project_by_root(root)
 
 
-def project_command(path=None):
-    project = resolve_project(path, create=True)
+def project_command(path=None, workspace=None, template="software-development-v1"):
+    if workspace:
+        from herdr.projects import adopt_workspace_as_project
+        project = adopt_workspace_as_project(workspace, root=path, template_name=template)
+    else:
+        project = resolve_project(path, create=True, template_name=template)
     print(json.dumps(project, ensure_ascii=False, indent=2))
     return 0
 
@@ -124,6 +128,25 @@ def projects_command():
             f"coordinator={p.get('coordinator_pane_id')}"
         )
     return 0
+
+
+def unregister_command(path=None, close_workspace=False, force=False):
+    from herdr.projects import unregister_project, detect_git_root
+    target = path
+    if not target:
+        try:
+            target = detect_git_root(os.getcwd())
+        except Exception:
+            target = os.getcwd()
+    try:
+        record = unregister_project(target, close_workspace=close_workspace, force=force)
+        print(f"项目已成功注销: {record.get('project_name', target)} ({record.get('project_root', '')})")
+        if close_workspace and record.get('workspace_id'):
+            print(f"对应 Herdr 空间 {record['workspace_id']} 已关闭。")
+        return 0
+    except (ValueError, RuntimeError) as e:
+        print(f"注销失败: {e}", file=sys.stderr)
+        return 1
 
 
 def doctor():
@@ -540,8 +563,14 @@ def main():
 
     project_cmd = sub.add_parser("project")
     project_cmd.add_argument("--project")
+    project_cmd.add_argument("--workspace", help="Adopt an existing Herdr workspace as a factory space")
+    project_cmd.add_argument("--template", default="software-development-v1", help="Workflow template name")
 
     sub.add_parser("projects")
+    unreg_cmd = sub.add_parser("unregister", help="Unregister a project from Herdr Factory")
+    unreg_cmd.add_argument("--project", default=None, help="Project root or ID (defaults to current directory)")
+    unreg_cmd.add_argument("--close-workspace", action="store_true", help="Also close the Herdr workspace")
+    unreg_cmd.add_argument("--force", action="store_true", help="Force unregister even if active workflows exist")
 
     slots_cmd = sub.add_parser("slots")
     slots_cmd.add_argument("--project")
@@ -581,10 +610,13 @@ def main():
         sys.exit(templates_command())
 
     if args.command == "project":
-        sys.exit(project_command(args.project))
+        sys.exit(project_command(args.project, workspace=args.workspace, template=args.template))
 
     if args.command == "projects":
         sys.exit(projects_command())
+
+    if args.command == "unregister":
+        sys.exit(unregister_command(args.project, close_workspace=args.close_workspace, force=args.force))
 
     if args.command == "slots":
         sys.exit(slots_command(args.project))

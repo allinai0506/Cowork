@@ -661,4 +661,41 @@ grep "rework -> agent_done" ~/.herdr-controller/logs/sentinel.out.log:75
 
 ---
 
+## 16. 空间底座与工厂车间的概念断层：未接入空间的负向死胡同与控制台创建闭环缺失
+
+### 问题背景
+
+用户在 Herdr 终端多路复用底座中自由开辟新 Space（如 `wC` 只有 1 个工位），进入共事工厂控制台后显示为红色的"未注册"，右侧看板全灰禁用并提示"该空间仅展示，不参与当前自动工作流调度"。用户发现陷入死胡同：
+1. 若在 Herdr 建空间：无法自动应用工厂标准的阶段节点模板（1总指挥 + 6阶段Tab + Anchor）；
+2. 若在工厂控制台建：控制台界面只有"＋ 新需求"（针对已有项目），完全没有"＋ 新建工厂空间"入口，也没有为未接入终端提供"注册/装配"按钮，造成严重的体验割裂与认知焦虑。
+
+### 经验教训
+
+| 教训 | 说明 |
+|---|---|
+| 容器底座与业务车间必须分层明晰 | Herdr 是终端进程容器（无感知 DAG 与模板）；Factory 是流水线调度器。凡需套用模板的流水线，产品入口必须由工厂统一装配与发起 |
+| 永远不要给用户只抛出负向禁令而不给正向转化出口 | 当检测到"未注册/未接入"空间时，不能只提示"不参与调度"，必须就地提供"一键按模板装配为工厂空间"的操作卡片，打通闭环 |
+| 标签文案切忌制造系统故障的假象 | 外部普通终端不是系统错误或未授权，不可使用强烈的红色"未注册"恐吓用户；应使用中性的"独立终端"或"未接入"，并明确引导装配 |
+| 生命周期闭环：有注册必有安全注销 | 接入项目后必须提供注销/解绑入口。注销守卫严禁触碰本地代码，必须拦截活跃任务防意外中断，并支持终端空间弹性保留/关闭 |
+
+### 操作规范
+
+1. **新建车间入口统一收敛**：Console 侧边栏常驻【＋ 新建工厂空间】，用户提供本地 Git 路径与模板后，自动调用底层 `herdr/projects.py:create_project` 创建 Workspace 并装配好全部节点工位；
+2. **已有终端空间原地装配**：针对未接入的普通终端空间，Console 右侧看板渲染装配引导卡片，调用 `herdr/projects.py:adopt_workspace_as_project` 就地复用终端并补齐缺失的阶段 Tab 和 Anchor 锚点；
+3. **安全注销守卫**：实现 `herdr/projects.py:unregister_project`，校验是否有活跃任务（未终态则拒绝，`--force` 显式放行）；Console 与 CLI（`herdr-factory unregister`）均提供注销操作，弹窗明确告知“代码绝对不删”，默认保留终端空间为【独立终端】，可选一键关闭空间窗口；
+4. **CLI 与 Web 端契约对齐**：`herdr-factory project --workspace <wid>` 保持与 Web `POST /api/project/adopt` 对齐，`herdr-factory unregister` 与 `POST /api/project/unregister` 对齐。
+
+### 验证命令 / 证据
+
+```bash
+# 控制台项目创建与空间装配测试
+pytest tests/test_console_project_creation.py
+
+# 项目安全注销与状态拦截测试
+pytest tests/test_project_unregister.py
+
+# CLI 帮助与选项验证
+herdr-factory project --help     # 包含 --workspace 与 --template
+herdr-factory unregister --help  # 包含 --project, --close-workspace, --force
+```
 
