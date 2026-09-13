@@ -4,36 +4,55 @@
 
 ---
 
-## 1. Everything Claude Code 标准作业流程 (Standard Workflow)
+## 1. 统一研发流程规范 (Unified Dev Flow: S0–S8)
 
-开发任务必须严格按照以下四个阶段顺序闭环执行，严禁跳步或无方案直接开工：
+本项目全面采用 **`/unified-dev-flow` 统一研发流程** 作为最高作业规范。所有在此仓库中工作的开发者与 AI Agent 必须无条件严格遵循以策略驱动（Policy-driven）的 S0–S8 全生命周期闭环，严禁跳步或无方案直接开工：
 
 ```mermaid
 graph LR
-    P[1. Plan 规划] --> T[2. TDD 开发]
-    T --> C[3. Code-Review 质检]
-    C --> R[4. Refactor-Clean 维护]
+    S0["S0 准备 (Sync & CoW)"] --> S13["S1-S3 意图/规范/规划"]
+    S13 --> S4["S4 TDD 实现"]
+    S4 --> S5["S5 证据验证"]
+    S5 --> S6["S6 审查闭环 (Review-Fix)"]
+    S6 --> S7["S7 规范交付 (PR)"]
+    S7 --> S8["S8 知识沉淀 (Capture)"]
 ```
 
-### 1.1 规划阶段 (Plan)
-- **明确目标与边界**：在修改任何代码前，必须彻底调研现有逻辑、依赖链路与影响面。
-- **输出执行方案**：重大结构调整、依赖变更或核心算法变动，必须先沉淀技术方案并与用户/上下文对齐。
-- **明确验收准则**：开工前必须确定具体的测试用例与验证命令。
+### 1.1 九大核心不变量 (Core Invariants)
+1. **断点优先 (Resume before classification)**：接手任务前优先检查是否存在已有工作流或未完现场，杜绝盲目覆盖。
+2. **读懂再写 (Read before committing)**：修改前必须彻底调研现有逻辑、依赖链路与影响面，严禁盲目开工。
+3. **意图定基线 (Intent selects the base route)**：根据任务真实意图（Bug / Feature / Refactor / Migration / Docs 等）裁剪阶段，不走冗余弯路。
+4. **复杂度定规划 (Complexity determines planning depth)**：轻量修改快速对齐，复杂重构深入设计，拒绝一刀切。
+5. **风险度定质检 (Risk determines assurance depth)**：核心调度算法与状态机变更必须经过最高强度对抗测试与静态审查。
+6. **单一控制权 (One controller owns execution)**：同一时刻仅由一个主控者推进执行，严禁嵌套死循环。
+7. **改动即失效 (Any change invalidates stale evidence)**：源码或测试发生任何变动，既有验证与审查结论立即失效，必须重新跑测。
+8. **无铁证不宣称完成 (No completion claim without fresh evidence)**：坚决抵制口头“已修复”，必须输出实时命令的 PASS 铁证。
+9. **交付不越权 (Delivery never exceeds authorization)**：交付范围与分支目标严格受控，严禁越权修改主干。
 
-### 1.2 开发阶段 (TDD - Test-Driven Development)
-- **测试先行**：优先在 `tests/` 编写对应业务逻辑的失败测试用例。
-- **最小化实现**：编写能够让测试通过的最简且优雅的代码，坚决避免过度工程。
-- **本地实时反馈**：频繁运行 `pytest`，确保新逻辑可验证、老逻辑零回归。
-
-### 1.3 质检阶段 (Code-Review)
-- **架构一致性审查**：新代码是否符合项目目录规范（`herdr/`、`services/`、`bin/`）与分层设计。
-- **消灭 AI Slop (AI 废话与无用样板)**：坚决删除防御性过度的无用判空、冗余包装类与复读机式注释。
-- **圈复杂度与边界防护**：检查循环嵌套、超时控制、异常捕获粒度与类型安全性。
-
-### 1.4 维护阶段 (Refactor-Clean)
-- **代码重构与坏味道清理**：合并重复模式，精简接口，清理未使用的变量与废弃导入。
-- **文档同步更新**：代码路径或命令变更后，必须即时同步 `README.md`、`docs/`、`CLAUDE.md` 及 `AGENTS.md`。
-- **环境与文件零污染**：严禁残留 `.tmp`、`.bak`、临时脚本或未在 `.gitignore` 声明的缓存文件。
+### 1.2 关键阶段执行标准 (S0–S8)
+- **S0 准备阶段 (Prepare - 强制一等公民)**：
+  - **远端同步**：执行 `git fetch origin`，将最新代码同步至本地主仓库，严禁基于过期基线开工。
+  - **CoW 沙盒建支**：严禁在主干工作区直接开发，严禁复用他人分支。必须使用 CoW (Copy-on-Write) 沙盒机制（`herdr-task launch` 或独立沙盒分支）隔离执行。
+- **S1~S3 意图、规范与规划 (Intent, Spec & Plan)**：
+  - 明确“为什么改”与“改动边界”，识别潜在风险与技术债；
+  - 形成轻量或结构化 Plan 方案，必须等待关键约束对齐后方可进入编码。
+- **S4 实现阶段 (Implement - TDD 先行)**：
+  - 严格遵循测试驱动开发模式（RED ➔ GREEN ➔ REFACTOR）；
+  - 编写最小优雅实现，坚决避免过度工程与 AI Slop。
+- **S5 验证阶段 (Verify - 证据驱动)**：
+  - 运行全量自动化测试套件（`pytest`），执行相关 CLI 检查；
+  - 必须获取新鲜的真实执行结果，以命令输出作为唯一事实来源。
+- **S6 审查阶段 (Review - 修复闭环)**：
+  - 审查架构一致性（严格遵守 `herdr/` 纯核心与装配外壳解耦）；
+  - 严查圈复杂度，坚决查杀无用样板类、过度防御判空与复读机注释；
+  - 若审查发现问题，进入 **S6 ➔ S4 ➔ S5 ➔ S6** 修复闭环；连续 3 轮无法收敛强制升级人工介入。
+- **S7 交付阶段 (Deliver - 规范收口)**：
+  - 检查 Git 树纯净度，清理任何非受控临时文件；
+  - 推送专属隔离分支，创建或更新标准化 PR。
+- **S8 知识沉淀阶段 (Capture - 经验归档)**：
+  - 检查本次是否排查了复杂 Bug、解决了同类复发问题或踩了技术坑；
+  - 凡符合通用教训的，按四段式规范归档至 `docs/lessons/lessons-learned.md`；
+  - 同步更新 LLM Wiki 主索引及演进日志 `wiki/log.md`。
 
 ---
 
@@ -47,10 +66,13 @@ graph LR
   - 运维与安装脚本必须放入 `scripts/`
   - 文档必须按分类放入 `docs/` 对应子目录
 
-### 🔴 空间隔离红线
-- **严禁在主干工作区直接修改代码执行业务 Task**：
-  - 任何针对研发项目的 Task 派发必须使用 `herdr-task launch`。
-  - 所有 Agent 必须在独立的 CoW Clone（`~/.herdr-controller/clones/<task-id>`）中隔离运行。
+### 🔴 空间隔离与 CoW 沙盒建支红线 (一等公民)
+- **远端同步绝对前置**：任何任务执行前，必须首先从远端拉取最新代码（`git fetch origin`），并同步更新到本地主仓库（`main`），杜绝因基线漂移造成代码覆盖或隐式冲突。
+- **CoW (Copy-on-Write) 沙盒建支为一等公民**：
+  - 严禁在主干工作区或未经隔离的目录下直接修改代码执行业务 Task。
+  - 严禁直接复用他人或历史遗留的未结功能分支。
+  - 任何研发任务派发必须使用 `herdr-task launch`。
+  - 所有 Agent 与开发者必须在独立的 CoW Clone（`~/.herdr-controller/clones/<task-id>`）或隔离沙盒中基于最新主干创建全新分支运行，确保任务现场物理与逻辑隔离、随时可销毁可回滚。
 
 ### 🔴 任务验收真伪红线
 - **严禁使用普通 `git status` 替代基线验收**：
