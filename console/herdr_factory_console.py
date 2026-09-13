@@ -511,16 +511,38 @@ def api_task_steer_queue(tid):
 def api_task_force_review(b):
     tid=str(b.get('task_id') or '').strip()
     if not tid:raise RuntimeError('task_id 不能为空')
-    store=herdr_kernel.get_state_store()
-    task=store.get_task(tid)
-    if not task:raise RuntimeError(f'未找到任务 {tid}')
-    task['status']='agent_done'
-    task['updated_at']=time.time()
-    store.save_task(task)
+    task = None
+    store = None
+    if hasattr(herdr_kernel, "get_state_store"):
+        try:
+            store = herdr_kernel.get_state_store()
+            task = store.get_task(tid)
+        except Exception:
+            store = None
+    if task is None:
+        tdata = herdr_kernel.load_tasks_data()
+        for t in tdata.get('tasks', []):
+            if t.get('task_id') == tid:
+                task = t
+                break
+        if not task: raise RuntimeError(f'未找到任务 {tid}')
+        task['status'] = 'agent_done'
+        task['updated_at'] = time.time()
+        herdr_kernel.save_tasks_data(tdata)
+    else:
+        task['status'] = 'agent_done'
+        task['updated_at'] = time.time()
+        store.save_task(task)
+
     wid=task.get('workflow_id')
     notified=False
     if wid:
-        wf=store.get_workflow(wid)
+        wf = None
+        if store:
+            wf = store.get_workflow(wid)
+        else:
+            wdata = herdr_kernel.load_workflows_data()
+            wf = wdata.get('workflows', {}).get(wid)
         if wf and wf.get('coordinator_pane_id'):
             c=wf['coordinator_pane_id']
             msg=f'''HERDR_TASK_FORCE_REVIEW\n\ntask_id: {tid}\nworkflow_id: {wid}\n\n总指挥已人工唤醒评审，请立即对工位产物进行复审验收。'''
