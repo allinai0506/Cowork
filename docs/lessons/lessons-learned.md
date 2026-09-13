@@ -844,3 +844,51 @@ with tempfile.TemporaryDirectory() as d:
 - 测试文件: `tests/test_inner_loop_protocol.py`
 - 设计文档: `docs/walkthroughs/北极星架构体系：通用人机协同运行时 (Universal Human-Agent Collaborative Runtime).md`
 
+---
+
+## 20. macOS CLI 通知宿主归属与点击跳转断裂：osascript 误归属脚本编辑器，需 Deep-Link 与 terminal-notifier 闭环
+
+### 问题背景
+
+`services/herdr-notifier.py` 负责在任务状态发生改变（`blocked`, `failed`, `human_review`）或工作流完成时发出 macOS 原生系统通知。早期实现直接使用 `/usr/bin/osascript -e 'display notification ...'`。
+**故障现象**：
+1. **宿主归属错误**：macOS 将通过 CLI 调用的 `osascript` 默认归属为“脚本编辑器（Script Editor.app）”。用户点击通知横幅时，系统强行激活脚本编辑器，由于缺少上下文，要么报错“无法打开”，要么打开一个空白脚本窗口。
+2. **动作跳转断裂**：AppleScript 原生 `display notification` 语法不支持携带 URL 或点击回调；而 Web 控制台（`console/herdr_factory_console.py`）只从 `localStorage` 读取状态，缺乏根据 URL 查询参数自动定位工作流和聚焦任务的能力。
+
+### 经验教训
+
+1. **CLI 系统通知必须有明确的点击目标与语义落地点**：通知的目的不仅是告知状态，更关键的是让用户一键进入问题现场。无跳转通道的通知在复杂的后台多 Agent 协同体系中会演变成阻断性噪点。
+2. **AppleScript 与现代 macOS 通知系统的结构性代差**：`osascript` 仅适合极简提示，无法承担带 Deep-Link 调度的现代通知需求。必须在架构中优先采用支持 `-open <url>` 的原生工具（如 `terminal-notifier`），同时保留平滑降级（Graceful Degradation）以保障向后兼容。
+3. **前端控制台必须支持外部 Deep-Link 传参**：控制台不能仅依赖内部状态管理或本地存储记忆；必须实现 URL 查询参数（`workflow_id`, `task_id`, `pane_id`）作为一等公民，形成“通知发出 -> 点击唤起浏览器 -> 控制台自动路由 -> 任务卡片高亮并弹窗”的完整闭环。
+
+### 操作规范（已固化到 `services/herdr-notifier.py`、`console/herdr_factory_console.py`）
+
+1. **通知工具双模分流与降级**：
+   - 使用 `shutil.which("terminal-notifier")` 探测环境；
+   - 存在时使用 `terminal-notifier -title ... -subtitle ... -message ... -open <deep_link_url> -sound Glass`；
+   - 缺失时回退到 `osascript`，并在日志中输出一次友好安装指引（`brew install terminal-notifier`）。
+2. **控制台 URL 路由契约**：
+   - 启动初始化解析 `window.location.search`；
+   - `workflow_id` 自动定位目标工作流与项目空间；
+   - `task_id` 自动滚动到对应卡片、挂载 `.task-highlight` 样式并唤起 `showTask()` 弹窗。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 运行通知服务与控制台深链接自动化测试（含 mock 与 fallback 验证）
+python3 -m unittest tests/test_herdr_notifier.py tests/test_console_deep_link.py
+
+# 2. 控制台 JS 语法与 view-state 回归
+python3 -m unittest tests/test_console_frontend_syntax.py tests/test_console_view_state.py
+
+# 3. 发送测试通知验证 fallback 与 URL 构建
+python3 services/herdr-notifier.py --test
+```
+
+### 相关文档 / 关联证据
+
+- 实现文件：[`services/herdr-notifier.py`](file:///Users/user/herdr/services/herdr-notifier.py)、[`console/herdr_factory_console.py`](file:///Users/user/herdr/console/herdr_factory_console.py)
+- 测试文件：[`tests/test_herdr_notifier.py`](file:///Users/user/herdr/tests/test_herdr_notifier.py)、[`tests/test_console_deep_link.py`](file:///Users/user/herdr/tests/test_console_deep_link.py)
+- 知识库演进记录：[`wiki/architecture.md`](file:///Users/user/herdr/wiki/architecture.md)、[`wiki/log.md`](file:///Users/user/herdr/wiki/log.md)
+
+

@@ -1,5 +1,5 @@
 #!/opt/homebrew/bin/python3
-import argparse, json, subprocess, time
+import argparse, json, shutil, subprocess, time, urllib.parse
 from pathlib import Path
 
 HOME = Path.home()
@@ -9,6 +9,9 @@ STATE_FILE = ROOT / "notifier-state.json"
 
 ATTENTION = {"blocked", "failed", "human_review", "needs_action"}
 STAGES = {"requirements","plan","implementation","test","review","wrapup"}
+
+CONSOLE_BASE_URL = "http://127.0.0.1:8765"
+_HINT_SHOWN = False
 
 def load(path, default):
     try:
@@ -24,7 +27,39 @@ def save(path, data):
 def esc(s):
     return str(s).replace("\\", "\\\\").replace('"', '\\"')
 
-def notify(title, subtitle, message):
+def build_console_url(workflow_id=None, task_id=None):
+    params = []
+    if workflow_id:
+        params.append(f"workflow_id={urllib.parse.quote(str(workflow_id))}")
+    if task_id:
+        params.append(f"task_id={urllib.parse.quote(str(task_id))}")
+    if params:
+        return f"{CONSOLE_BASE_URL}/?{'&'.join(params)}"
+    return f"{CONSOLE_BASE_URL}/"
+
+def notify(title, subtitle, message, url=None):
+    global _HINT_SHOWN
+    tn = shutil.which("terminal-notifier")
+    if tn:
+        cmd = [
+            tn,
+            "-title", str(title),
+            "-subtitle", str(subtitle),
+            "-message", str(message),
+            "-sound", "Glass",
+        ]
+        if url:
+            cmd += ["-open", str(url)]
+        subprocess.run(cmd, capture_output=True, text=True)
+        return
+
+    if not _HINT_SHOWN:
+        print(
+            "[NOTIFIER HINT] terminal-notifier 未安装，通知回退为 osascript（无法点击直达页面）。建议安装: brew install terminal-notifier",
+            flush=True,
+        )
+        _HINT_SHOWN = True
+
     script = (
         f'display notification "{esc(message)}" '
         f'with title "{esc(title)}" '
@@ -97,12 +132,16 @@ def scan(state):
                 "failed": "Herdr Factory · Task 失败",
             }.get(cur, "Herdr Factory · 需要人工审核")
 
+            wf_id = t.get("workflow_id")
+            url = build_console_url(workflow_id=wf_id, task_id=tid)
+
             notify(
                 title,
                 f"{project(t)} · {tid}",
                 f"Workflow: {t.get('workflow_id','unknown')}\n"
                 f"Agent: {t.get('agent','unknown')} · Pane: {t.get('pane_id','unknown')}\n"
-                f"{reason(t)}"
+                f"{reason(t)}",
+                url=url,
             )
 
         last[tid] = cur
@@ -115,10 +154,12 @@ def scan(state):
 
     for wf, ts in groups.items():
         if wf not in completed and workflow_complete(ts):
+            url = build_console_url(workflow_id=wf)
             notify(
                 "Herdr Factory · Workflow 完成",
                 f"{project(ts[0])} · {wf}",
-                "工作流所有节点已全部完成并通过清理验收"
+                "工作流所有节点已全部完成并通过清理验收",
+                url=url,
             )
             completed.add(wf)
 
@@ -136,7 +177,8 @@ def main():
         notify(
             "Herdr Factory · 通知测试",
             "macOS Notification Center",
-            "通知系统已经正常工作。以后 BLOCKED / FAILED / Workflow 完成会提醒你。"
+            "通知系统已经正常工作。以后 BLOCKED / FAILED / Workflow 完成会提醒你。",
+            url=build_console_url(),
         )
         print("TEST_NOTIFICATION_SENT")
         return

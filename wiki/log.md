@@ -141,4 +141,12 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - `console/herdr_factory_console.py` 新建模态框表单重构为「项目 → 本次任务名称 → 模板 → 执行者策略 → 自然语言需求」，支持需求失焦智能自动提取标题，工作流切换器格式升级为「任务名称 (短ID)」。
 - 质量防护与门禁：沉淀教训 §14，新增 `tests/test_console_frontend_syntax.py`（raw string 声明守卫 + `node -c` 无头 JS 编译验证），新增 `tests/test_workflow_naming_and_title.py`，全量 197 个测试 100% 通过。
 
+## [2026-09-13] feat | Console URL Deep-Link & Notifier Click-to-Open Integration
+解决 macOS CLI 通知默认归属“脚本编辑器”且无法定位到具体任务/工作流页面的痛点：
+- [[architecture]] §2.3 更新 Herdr Notifier 架构描述：优先使用 `terminal-notifier` 附带 `-open` 直达链接，未安装时安全降级为 `osascript`；
+- `console/herdr_factory_console.py` 前端支持 `window.location.search` (`workflow_id`, `task_id`, `pane_id`, `ops`) 参数解析；打开直达链接时自动切换空间与工作流，平滑滚动聚焦并自动呼出 `showTask` / `showPane` 弹窗；
+- `services/herdr-notifier.py` 升级 `notify(..., url=None)` 并提供 `build_console_url`：任务关注态与工作流完成时拼接控制台 Deep-Link URL，`terminal-notifier` 可用时点击直达控制台；
+- 质量防护与门禁：沉淀教训 §20，新增 `tests/test_console_deep_link.py` 与 `tests/test_herdr_notifier.py`，已同步部署至 `~/.herdr-console` 并重启守护进程。
+
+
 
