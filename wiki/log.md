@@ -331,6 +331,12 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 
 
 
+## [2026-09-13] docs | Codified Lesson 29 on Remote Sync & CoW Sandbox Discipline
+- **归档通用工程教训 §29 (`docs/lessons/lessons-learned.md`)**：
+  - 总结任务启动现场未隔离导致提交误入他人功能 PR（PR #17 事故）及并发分支冲突（PR #18）的深层根因；
+  - 固化 S0 准备阶段强制门禁（`git fetch origin` 同步主仓库 + CoW 沙盒独立建支为一等公民）。
+
+
 
 
 
