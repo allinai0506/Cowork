@@ -38,6 +38,11 @@ COORDINATOR_PANE = "w6:p1H"
 
 WORKFLOWS_FILE = os.path.expanduser("~/.herdr-controller/workflows.json")
 
+# working → done 间隔低于该阈值视为疑似零执行（死会话 Queued Prompt 残留）。
+ZERO_EXEC_MIN_SECONDS = float(
+    os.environ.get("HERDR_ZERO_EXEC_MIN_SECONDS", "5")
+)
+
 # 已触发过 close-workflow 的 workflow,防止轮询期间重复派发。
 _workflow_close_inflight = set()
 
@@ -630,6 +635,36 @@ agent_status: blocked
 blocked 只表示等待处理，不代表任务结束。
 """.strip()
 
+    if event_type == "zero_exec":
+        elapsed = working_elapsed_seconds(task)
+        elapsed_text = f"{elapsed:.1f}" if elapsed is not None else "未知"
+
+        return f"""
+HERDR_CONTROLLER_ZERO_EXEC_EVENT
+
+workflow_id: {workflow_id}
+task_id: {task_id}
+stage: {task['stage']}
+pane_id: {task['pane_id']}
+agent: {task['agent']}
+实际执行时长: {elapsed_text} 秒（阈值 {ZERO_EXEC_MIN_SECONDS} 秒）
+
+该 Task 从开始执行到上报完成间隔过短，疑似零执行。
+最常见原因：Agent 会话已退出（如 /quit），
+派发 Prompt 以 Queued 形态残留，从未被真正提交执行。
+
+你现在只负责查证与恢复，不允许验收任务。必须执行：
+
+1. 使用 Herdr 读取 {task['pane_id']} 当前画面，
+   判断 Agent 是否真正执行过本任务。
+2. 若会话已死或 Prompt 从未提交：
+   向原 Pane 直接重送本任务的完整 Prompt
+   （禁止新建 Task、禁止新开 Pane）。
+3. Agent 真正开始执行后，Controller 会自动记录 working，
+   并在真正完成后走正常 done 验收流。
+4. 禁止把本 Task 落盘为 completed / rework / failed。
+""".strip()
+
     if event_type == "done":
         return f"""
 HERDR_CONTROLLER_DONE_EVENT
@@ -689,7 +724,7 @@ Agent 本轮执行已经结束。
 
 如果任务无法恢复：
 
-~/herdr/bin/herdr-task set {task_id} failed
+~/herdr/bin/herdr-task set {task_id} failed --reason "<失败性质与建议的人工决策>"
 
 阶段推进前必须执行：
 
@@ -804,7 +839,7 @@ agent: {task.get('agent', 'unknown')}
 5. 必须将 Task 状态更新为以下之一：
    - completed
    - rework
-   - failed
+   - failed（必须附带 --reason 说明失败性质与建议的人工决策）
 6. 不要只输出文字报告而不更新 Task Registry。
 """.strip()
 
@@ -1434,6 +1469,67 @@ task_type:
 # Agent events
 # ============================================================
 
+def working_elapsed_seconds(task, now=None):
+    """working 状态的持续时长;无法判定时返回 None(不启用守卫)。"""
+    if not task:
+        return None
+
+    if now is None:
+        now = time.time()
+
+    for entry in reversed(task.get("status_history") or []):
+        if entry.get("to") == "working" or entry.get("status") == "working":
+            return now - entry["at"]
+
+    if task.get("started_at"):
+        return now - task["started_at"]
+
+    return None
+
+
+def route_zero_exec_suspect(task_id, elapsed):
+    print(
+        f"[ZERO-EXEC SUSPECT] "
+        f"task={task_id} "
+        f"elapsed={elapsed:.2f}s "
+        f"threshold={ZERO_EXEC_MIN_SECONDS}s"
+    )
+
+    if set_task_status(task_id, "blocked"):
+        task = get_task(task_id)
+
+        if task:
+            enqueue_coordinator_event(
+                task,
+                "zero_exec"
+            )
+
+
+def complete_working_task(task_id):
+    """working → agent_done 收口,带零执行守卫。
+
+    执行间隔低于阈值时大概率是死会话上的 Queued Prompt 残留
+    (Agent 从未真正执行),此时不得进入 done 验收流,
+    改为 blocked 并让总指挥查证恢复。
+    """
+    elapsed = working_elapsed_seconds(get_task(task_id))
+
+    if elapsed is not None and elapsed < ZERO_EXEC_MIN_SECONDS:
+        route_zero_exec_suspect(task_id, elapsed)
+        return
+
+    if set_task_status(
+        task_id,
+        "agent_done"
+    ):
+        task = get_task(task_id)
+
+        enqueue_coordinator_event(
+            task,
+            "done"
+        )
+
+
 def handle_event(task_id, agent_status):
     task = get_task(task_id)
 
@@ -1476,16 +1572,7 @@ def handle_event(task_id, agent_status):
         # 等价于本轮交互结束。
         # dispatched -> idle 不算完成，避免尚未执行就误判。
         if current_status == "working":
-            if set_task_status(
-                task_id,
-                "agent_done"
-            ):
-                task = get_task(task_id)
-
-                enqueue_coordinator_event(
-                    task,
-                    "done"
-                )
+            complete_working_task(task_id)
 
     elif agent_status == "blocked":
         if current_status in (
@@ -1506,16 +1593,7 @@ def handle_event(task_id, agent_status):
 
     elif agent_status == "done":
         if current_status == "working":
-            if set_task_status(
-                task_id,
-                "agent_done"
-            ):
-                task = get_task(task_id)
-
-                enqueue_coordinator_event(
-                    task,
-                    "done"
-                )
+            complete_working_task(task_id)
 
 
 # ============================================================
@@ -1570,6 +1648,12 @@ def reconcile_task_state(task_id):
     # Registry 已经知道 Agent 执行结束，
     # 但 Controller 可能在通知总指挥前重启。
     if current == "agent_done":
+        elapsed = working_elapsed_seconds(task)
+
+        if elapsed is not None and elapsed < ZERO_EXEC_MIN_SECONDS:
+            route_zero_exec_suspect(task_id, elapsed)
+            return
+
         print(
             f"[RECOVERY] "
             f"task={task_id} "

@@ -501,3 +501,48 @@ grep "herdr-agent-state" ~/.qoder-cn/logs/runs/<run>/qodercli.log  # hook.starte
 ```
 
 决策全记录：`docs/walkthroughs/20260913-qodercn-agent-identity-fix.md`。
+
+## 12. 死会话上的假 done:派发无送达校验,验收流把"从未执行"当"失败"收口
+
+### 问题背景
+
+wf-nexusarchive-…-084418 的 wrapup 任务(qodercli)派发时,前任会话已两次
+`/quit` 正常退出,新进程停在空提示符,派发 Prompt 以 Queued 形态残留、从未
+提交执行。Agent 0.4 秒 idle 被事件流判为 `working → agent_done`,Controller
+照常走 done 验收流,总指挥 `verify-baseline` 无变化后如实落盘 `failed`
+(无 reason,通知只有"需要人工查看")。`failed` 是终态:controller 不再过问、
+sentinel 只扫 ACTIVE、通知无决策指引,工作流就此静默停滞,直到人工介入——
+总指挥读 Pane 回滚查明根因、原 Pane 重送 Prompt 复活 Agent、
+`launch --supersedes` 借 `failed → superseded` 合法转移派新任务才解卡。
+同批任务中 requirements-01 也有 0.09s 假 done(被总指挥验收时侥幸消化)。
+
+### 经验教训
+
+| 教训 | 说明 |
+|------|------|
+| "Agent 回了"不等于"Agent 干了" | 完成/空闲事件只证明会话状态变化;执行时长 + 基线变化才是执行的证据。0.4s 的 agent_done 在重任务语境下近乎必然是假阳性 |
+| 状态机的终态 = 人工决策点,必须有可行动的告警 | 终态静默(不通知、通知无指引)把"等待人决策"退化成"系统失联"。failed 落盘必须携带失败性质与建议出路,并进入人的通知通道 |
+| 终态恢复的合法出路要预先存在 | `failed → superseded` + `launch --supersedes` 这条合法转移,让"agent 复活了但状态回不去"的死结有干净解法;复活死任务(加 failed→rework)反而违背"生而隔离,死而清零" |
+| 恢复动作要指向事故的真实形态 | 本次正确恢复是"查证死会话 → 原 Pane 重送 Prompt",而非机械重派(会再次 Queued 残留)或新建 Pane(丢失既有会话上下文) |
+
+### 操作规范
+
+1. Controller 在 `working → agent_done` 收口执行零执行守卫:间隔低于
+   `ZERO_EXEC_MIN_SECONDS`(默认 5s)→ 落 `blocked` 并向总指挥派
+   `zero_exec` 事件(查证 Pane → 原 Pane 重送 Prompt),禁止按正常验收
+   落盘 completed/rework/failed;RECOVERY 恢复路径同守卫
+   (`services/herdr-controller.py#complete_working_task`);
+2. `herdr-task set <task> failed --reason "<失败性质与建议决策>"`:
+   reason 落盘 `failure_reason`,notifier 通知正文自动展示;controller
+   验收模板强制总指挥带 reason;
+3. 遇疑似假 done,排查顺序:tasks.json 的 `status_history` 间隔 →
+   Pane 回滚看会话死活与 Queued 残留 → 恢复走原 Pane 重送 →
+   注册表走 `--supersedes` 派替代任务。
+
+### 验证命令 / 证据
+
+- 单测:`/opt/homebrew/bin/pytest tests/test_zero_exec_guard.py`(11 passed);
+- 事故数据:tasks.json `wrapup-01-mainchain-summary` 的
+  `status_history`(working 1789263891.38 → agent_done 1789263891.76);
+- 复盘与决策:`docs/walkthroughs/20260913-zero-exec-guard.md`;
+- 知识同步:`wiki/task-lifecycle.md` §1.1、`wiki/log.md` [2026-09-13]。

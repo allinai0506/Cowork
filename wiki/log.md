@@ -99,3 +99,15 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   `docs/walkthroughs/20260913-workflow-finalize.md`;教训沉淀 §9。
 - 验证:134 tests passed;真实端到端——wf-…-232500 手动收尾 + 历史 workflow
   自动收尾,9/9 workflows completed,pane 24→1。
+
+## [2026-09-13] fix | Zero-execution guard + failure reason propagation
+wf-nexusarchive-…-084418 的 wrapup Task 在死会话 Pane 上产出 0.4s 假 `agent_done`,
+总指挥按正常验收流落盘 `failed`,终态静默导致工作流停滞(排查与恢复过程见
+`docs/walkthroughs/20260913-zero-exec-guard.md`)。本次修复:
+- Added [[task-lifecycle]] §1.1:Controller `working → agent_done` 收口新增
+  零执行守卫(间隔 < `ZERO_EXEC_MIN_SECONDS` 默认 5s → `blocked` + `zero_exec`
+  事件,指令总指挥查证死会话并向原 Pane 重送 Prompt),覆盖 idle/done 事件
+  路径与 RECOVERY 恢复路径;顺带合并了 handle_event 两处重复收口逻辑。
+- `herdr-task set failed --reason` 落盘 `failure_reason`;controller 验收模板
+  要求 failed 必须带 reason,notifier 通知正文随之可行动。
+- 验证:151 tests passed(新增 11);controller 经 `launchctl kickstart` 优雅重启。

@@ -1102,7 +1102,7 @@ def get_task(task_id):
     )
 
 
-def set_status(task_id, new_status):
+def set_status(task_id, new_status, reason=None):
     data = load_tasks()
     task = find_task(data, task_id)
 
@@ -1138,6 +1138,9 @@ def set_status(task_id, new_status):
     task["status"] = new_status
     task["updated_at"] = now
     task["last_activity_at"] = now
+
+    if new_status == "failed" and reason:
+        task["failure_reason"] = reason
 
     if new_status in ACTIVE_TASK_STATUSES and not task.get("started_at"):
         task["started_at"] = now
@@ -2992,6 +2995,11 @@ def main():
     set_cmd = sub.add_parser("set")
     set_cmd.add_argument("task_id")
     set_cmd.add_argument("status")
+    set_cmd.add_argument(
+        "--reason",
+        default=None,
+        help="失败原因，落盘为 failure_reason 供 Notifier 通知展示",
+    )
 
     stage_cmd = sub.add_parser("stage-status")
     stage_cmd.add_argument("workflow_id")
@@ -3085,7 +3093,7 @@ def main():
         get_task(args.task_id)
 
     elif args.command == "set":
-        set_status(args.task_id, args.status)
+        set_status(args.task_id, args.status, args.reason)
 
     elif args.command == "stage-status":
         stage_status(

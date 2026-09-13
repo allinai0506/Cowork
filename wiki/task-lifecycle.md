@@ -49,6 +49,23 @@ Evidence:
 - `bin/herdr-task:TRANSITIONS`
 - `bin/herdr-task#set_status`
 
+### 1.1 零执行守卫 (Zero-Execution Guard)
+
+`FACT` Controller 在 `working → agent_done` 收口处(`handle_event` 的 idle/done 两条路径与重启恢复路径 `reconcile_task_state`)执行零执行守卫:执行间隔(自 `status_history` 最近一次进入 `working` 的时间,兜底 `started_at`)低于 `ZERO_EXEC_MIN_SECONDS`(默认 5 秒,env `HERDR_ZERO_EXEC_MIN_SECONDS` 可调)时,判定疑似零执行——典型成因是 Agent 会话已退出(如 `/quit`),派发 Prompt 以 Queued 形态残留、从未被提交执行。
+
+守卫触发后任务转入 `blocked`(状态机合法转移),并向总指挥派发 `zero_exec` 事件:指令其读取 Pane 查证会话死活、向原 Pane 重送完整 Prompt 恢复执行,禁止按正常验收落盘 `completed/rework/failed`。Agent 真实执行后(间隔超过阈值)自动回到正常 `done` 验收流。
+
+Evidence:
+- `services/herdr-controller.py#complete_working_task` / `#route_zero_exec_suspect` / `#working_elapsed_seconds`
+- `services/herdr-controller.py#reconcile_task_state`(RECOVERY 分支同守卫)
+- `services/herdr-controller.py#build_coordinator_message`(zero_exec 模板)
+
+`FACT` 任务落盘 `failed` 时可附带 `--reason`,持久化为 `failure_reason` 字段;`herdr-notifier` 扫描到 `failed` 转移时,macOS 通知正文优先展示该字段(兜底"需要人工查看"),让人工决策点带着可行动的上下文。
+
+Evidence:
+- `bin/herdr-task#set_status`(reason 落盘)
+- `services/herdr-notifier.py#reason`(failure_reason 消费方)
+
 ---
 
 ## 2. CoW (Copy-on-Write) 沙盒隔离机制
