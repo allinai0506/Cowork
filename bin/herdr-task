@@ -42,8 +42,8 @@ except ImportError:
     from herdr_topology import ensure_stage_topology
     from herdr_agent_binary import resolve_binary
 
-TASKS_FILE = os.path.expanduser("~/.herdr-controller/tasks.json")
-WORKFLOW_FILE = os.path.expanduser("~/.herdr-controller/workflow.json")
+TASKS_FILE = os.environ.get("TASKS_FILE") or os.path.expanduser("~/.herdr-controller/tasks.json")
+WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE") or os.path.expanduser("~/.herdr-controller/workflow.json")
 DEFAULT_AGENT_LABELS = ["opencode", "codex", "qodercli", "claude", "agy", "pi"]
 
 try:
@@ -1187,6 +1187,57 @@ def set_status(task_id, new_status, verdict=None, note=None):
     print(f"{task_id}: {old_status} -> {new_status}")
 
 
+def auto_init_task_loop(clone_path, goal, acceptance_list, test_cmd=None, lint_cmd=None, repro_cmd=None, node=None, task_type=None):
+    """Auto-initialize .herdr-loop contract and evaluator inside the task clone."""
+    # Skip auto-init for non-implementation/non-code nodes unless explicit test_cmd is provided
+    if not test_cmd:
+        if task_type in {"docs"}:
+            return
+        if node and any(k in str(node).lower() for k in ("review", "design", "doc", "wrapup")):
+            return
+
+    try:
+        from herdr.evaluator import init_loop
+    except Exception:
+        return
+
+    acceptance = "\n".join(f"- {a}" for a in acceptance_list) if acceptance_list else ""
+    clone = Path(clone_path)
+
+    # Detect test command if not provided
+    if not test_cmd:
+        if (clone / "package.json").exists():
+            test_cmd = "npm test"
+        elif (clone / "pytest.ini").exists() or (clone / "tests").is_dir():
+            test_cmd = "pytest"
+        elif (clone / "Cargo.toml").exists():
+            test_cmd = "cargo test"
+
+    # Detect lint command if not provided
+    if not lint_cmd:
+        if (clone / "package.json").exists():
+            try:
+                pkg_data = json.loads((clone / "package.json").read_text(encoding="utf-8"))
+                if "lint" in pkg_data.get("scripts", {}):
+                    lint_cmd = "npm run lint"
+            except Exception:
+                pass
+        elif (clone / "pyproject.toml").exists():
+            lint_cmd = "ruff check ."
+
+    try:
+        init_loop(
+            target_dir=clone,
+            goal=goal,
+            acceptance=acceptance,
+            test_cmd=test_cmd or "pytest",
+            lint_cmd=lint_cmd or "true",
+            repro_cmd=repro_cmd or "",
+        )
+    except Exception as e:
+        print(f"[HERDR_LOOP_WARN] Failed to auto-init loop: {e}")
+
+
 def launch_task(args):
     data = load_tasks()
 
@@ -1377,7 +1428,19 @@ def launch_task(args):
     print(f"[WORKER] pane_source={pane_source}")
     print(f"[WORKER] agent={resolved_agent} requested={requested_agent}")
 
-    # 2. 注册 Task
+    # 2. 初始化工位自优化微循环 (.herdr-loop)
+    auto_init_task_loop(
+        clone_path,
+        args.goal,
+        args.acceptance,
+        test_cmd=getattr(args, "test_cmd", None),
+        lint_cmd=getattr(args, "lint_cmd", None),
+        repro_cmd=getattr(args, "repro_cmd", None),
+        node=node_id,
+        task_type=args.task_type,
+    )
+
+    # 3. 注册 Task
     data = load_tasks()
 
     now = _now()
@@ -1425,7 +1488,7 @@ def launch_task(args):
 
     print(f"[REGISTERED] {args.task_id}")
 
-    # 3. Dispatch
+    # 4. Dispatch
     dispatch_task(
         args.task_id,
         args.prompt
@@ -1437,15 +1500,6 @@ def dispatch_task(task_id, prompt):
     # 2) verify lifecycle / prompt marker
     # 3) if prompt is sitting in the composer, focus + Enter
     # 4) if it never arrived, focus + send-text + delayed Enter
-    prompt = (
-        prompt
-        + "\n\nHERDR orchestration protocol:\n"
-        + "HERDR_ORCH_TASK:" + task_id + "\n"
-        + "When all requested work is genuinely finished, output on its own line "
-        + "the prefix HERDR_TASK_DONE: followed immediately by this task id. "
-        + "Do not quote it and do not output it before the task is complete.\n"
-    )
-
     data = load_tasks()
     task = find_task(data, task_id)
 
@@ -1459,6 +1513,30 @@ def dispatch_task(task_id, prompt):
             f"{task['status']}"
         )
         sys.exit(2)
+
+    loop_dir = Path(task.get("clone_path", "")) / ".herdr-loop"
+    loop_suffix = ""
+    if loop_dir.exists():
+        loop_suffix = (
+            "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            + "自优化循环协议 (.herdr-loop 驱动)\n"
+            + "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            + "工位已装配量化评估环境：\n"
+            + "1. 目标契约已写入 .herdr-loop/GOAL.md\n"
+            + "2. 修改代码后运行评估评分：~/herdr/bin/herdr-loop eval\n"
+            + "3. 检查评分卡与 .herdr-loop/EVALUATION.md，直至综合得分达到 100.0\n"
+            + "4. 达成 100.0 分后方可输出完成标记。\n"
+        )
+
+    prompt = (
+        prompt
+        + loop_suffix
+        + "\nHERDR orchestration protocol:\n"
+        + "HERDR_ORCH_TASK:" + task_id + "\n"
+        + "When all requested work is genuinely finished, output on its own line "
+        + "the prefix HERDR_TASK_DONE: followed immediately by this task id. "
+        + "Do not quote it and do not output it before the task is complete.\n"
+    )
 
     pane_id = task["pane_id"]
     marker = "HERDR_ORCH_TASK:" + task_id
@@ -1740,6 +1818,58 @@ def verify_baseline(task_id):
             ensure_ascii=False
         )
     )
+
+
+def verify_metrics(task_id, min_score=99.9, if_present=False):
+    """Verify that .herdr-loop/METRICS.json exists and meets required score threshold."""
+    data = load_tasks()
+    task = find_task(data, task_id)
+
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+
+    clone = task.get("clone_path")
+    if not clone or not os.path.isdir(clone):
+        print(f"Clone not found: {clone}")
+        sys.exit(2)
+
+    loop_dir = Path(clone) / ".herdr-loop"
+    metrics_file = loop_dir / "METRICS.json"
+
+    if not metrics_file.exists():
+        if if_present:
+            print(f"TASK_METRICS: skipped (no .herdr-loop configured for task {task_id})")
+            sys.exit(0)
+        print(f"No metrics found for task {task_id} (.herdr-loop/METRICS.json missing)")
+        sys.exit(3)
+
+    try:
+        metrics_data = json.loads(metrics_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"Invalid metrics file: {e}")
+        sys.exit(4)
+
+    score = float(metrics_data.get("composite_score", 0.0))
+    passed = score >= min_score
+
+    print(f"TASK_METRICS: score={score:.2f} (target>={min_score:.2f}) passed={passed}")
+    print(
+        "HERDR_METRICS_RESULT="
+        + json.dumps(
+            {
+                "task_id": task_id,
+                "score": score,
+                "target": min_score,
+                "passed": passed,
+                "metrics": metrics_data,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    if not passed:
+        sys.exit(5)
 
 
 def commit_task(task_id, message=None):
@@ -3173,6 +3303,21 @@ def main():
              "(commits land on it, e.g. to continue an open PR). "
              "Fetched from origin; fails fast if missing."
     )
+    launch.add_argument(
+        "--test-cmd",
+        default=None,
+        help="Custom test command for .herdr-loop automated evaluation",
+    )
+    launch.add_argument(
+        "--lint-cmd",
+        default=None,
+        help="Custom lint command for .herdr-loop automated evaluation",
+    )
+    launch.add_argument(
+        "--repro-cmd",
+        default=None,
+        help="Target reproduction test command for fix-loop automated evaluation",
+    )
 
     dispatch = sub.add_parser("dispatch")
     dispatch.add_argument("task_id")
@@ -3180,6 +3325,20 @@ def main():
 
     verify_cmd = sub.add_parser("verify-baseline")
     verify_cmd.add_argument("task_id")
+
+    verify_metrics_cmd = sub.add_parser("verify-metrics")
+    verify_metrics_cmd.add_argument("task_id")
+    verify_metrics_cmd.add_argument(
+        "--min-score",
+        type=float,
+        default=99.9,
+        help="Minimum composite score required (default: 99.9)",
+    )
+    verify_metrics_cmd.add_argument(
+        "--if-present",
+        action="store_true",
+        help="Skip cleanly (exit 0) if task does not have .herdr-loop configured",
+    )
 
     commit_cmd = sub.add_parser("commit")
     commit_cmd.add_argument("task_id")
@@ -3313,6 +3472,13 @@ def main():
     elif args.command == "verify-baseline":
         verify_baseline(
             args.task_id
+        )
+
+    elif args.command == "verify-metrics":
+        verify_metrics(
+            args.task_id,
+            min_score=args.min_score,
+            if_present=args.if_present,
         )
 
     elif args.command == "commit":

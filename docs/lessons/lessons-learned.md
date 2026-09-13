@@ -624,3 +624,41 @@ node -c /tmp/check_syntax.js                  # 期望 exit 0
 
 ---
 
+## 15. 终端屏幕旧完成标记残留击穿 rework 状态陷阱（非派发态严禁判定 agent_done）
+
+### 问题背景
+
+在 `wf-nexusarchive-54433229-20260913-111049` 中，评审任务 `review-01-superadmin-quality` 发现实现存在 P1 角色漏判。评审 Agent 完成分析并在屏幕输出 `HERDR_TASK_DONE:review-01-superadmin-quality` 后退出。
+总指挥误将该评审任务设为 `rework`。巡检守护进程 `services/herdr-sentinel.py` 周期性读取 Pane 终端屏幕，因终端历史缓冲区依然保留上一次执行留下的 `HERDR_TASK_DONE` 文本，Sentinel 误判为“Agent 已重新执行完成”，在 3 秒内自动触发：
+`[SENTINEL STATE] review-01-superadmin-quality: rework -> agent_done (completion_sentinel)`
+并将 Controller 重启。总指挥陷入重复通知与判断死循环，Controller 大量报 `[COORDINATOR BUSY]`。
+
+### 经验教训
+
+| 教训 | 说明 |
+|---|---|
+| 屏幕回显不可逆 | 终端屏幕（TTY/Pane）是有状态的滚动缓冲区；Agent 进程退出后历史文本依然可见，不能直接当作新一轮执行的凭证 |
+| 状态转移前置条件必须严格封闭 | 只有处于 `dispatched` 或 `working`（即真正被下发了新 Prompt 且处于运行期）的任务，屏幕上的完成标记才合法；`rework` 或 `blocked` 态在被重新下发前绝对不可直接变 `agent_done` |
+| 阶段评审打回 ≠ 评审任务自身 rework | 评审发现被审代码有 bug，评审任务自身是成功的（完成职能）；应该打 `verdict: blocked` 驱动回流，而不是把评审任务自身设为 `rework` |
+
+### 操作规范
+
+1. **Sentinel 判定守卫（已固化到 `services/herdr-sentinel.py`）**：
+   必须限定 `status in {"dispatched", "working"}` 时方可扫描屏幕 `HERDR_TASK_DONE` 标记，严禁在 `rework` 或 `blocked` 态未重新派发前判定完成；
+2. **总指挥验收指引（已固化到 `services/herdr-controller.py`）**：
+   门禁评审/测试任务发现代码缺陷，必须执行 `herdr-task set <id> completed --verdict blocked --note "<blocker>"`，严禁对评审任务使用 `rework`；
+3. **引入微循环环境**：使用 `.herdr-loop` 配合 `herdr-task verify-metrics` 进行量化评分门禁验收。
+
+### 验证命令 / 证据
+
+```bash
+# 全量测试套件（含微循环与外部流 208 用例）
+pytest tests/  # 期望 208 passed
+
+# 真实事故日志证据
+grep "rework -> agent_done" ~/.herdr-controller/logs/sentinel.out.log:75
+```
+
+---
+
+

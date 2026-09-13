@@ -1,0 +1,180 @@
+#!/opt/homebrew/bin/python3
+"""Herdr Autonomous Loop Driver (herdr-loop).
+
+CLI for managing Pane-level inner loops and automated evaluation cycles
+under the 5-element paradigm (Goal, Metrics, Data, Markdown, Cron).
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# Ensure herdr package is in path
+HERDR_ROOT = Path(__file__).resolve().parent.parent
+if str(HERDR_ROOT) not in sys.path:
+    sys.path.insert(0, str(HERDR_ROOT))
+
+from herdr.evaluator import (
+    LOOP_DIR_NAME,
+    MetricVector,
+    calculate_metrics,
+    get_loop_dir,
+    init_loop,
+    is_converged,
+    read_state,
+    render_evaluation_markdown,
+    render_metrics_markdown,
+    write_state,
+)
+
+
+def run_evaluation(target_dir: Path) -> tuple[MetricVector, bool]:
+    """Run EVALUATOR.sh, compute metrics, update all markdown & json files."""
+    loop_dir = get_loop_dir(target_dir)
+    evaluator_sh = loop_dir / "EVALUATOR.sh"
+    if not evaluator_sh.exists():
+        raise FileNotFoundError(f"Evaluator script not found at {evaluator_sh}")
+
+    log_dir = loop_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Run the evaluator script with timeout safety
+    test_exit = 1
+    lint_exit = 0
+    repro_exit = 0
+    try:
+        runner = subprocess.run(
+            [str(evaluator_sh)],
+            cwd=str(target_dir),
+            text=True,
+            capture_output=True,
+            timeout=300,
+        )
+        for line in runner.stdout.splitlines():
+            if line.startswith("TEST_EXIT="):
+                test_exit = int(line.split("=")[1])
+            elif line.startswith("LINT_EXIT="):
+                lint_exit = int(line.split("=")[1])
+            elif line.startswith("REPRO_EXIT="):
+                repro_exit = int(line.split("=")[1])
+    except subprocess.TimeoutExpired:
+        test_exit = 124
+        timeout_msg = "\n[HERDR_TIMEOUT] Evaluation script timed out after 300 seconds."
+        test_file = log_dir / "test.log"
+        if test_file.exists():
+            test_file.write_text(test_file.read_text(encoding="utf-8") + timeout_msg, encoding="utf-8")
+        else:
+            test_file.write_text(timeout_msg.strip(), encoding="utf-8")
+
+    test_log = (log_dir / "test.log").read_text(encoding="utf-8") if (log_dir / "test.log").exists() else ""
+    lint_log = (log_dir / "lint.log").read_text(encoding="utf-8") if (log_dir / "lint.log").exists() else ""
+    repro_log = (log_dir / "repro.log").read_text(encoding="utf-8") if (log_dir / "repro.log").exists() else None
+
+    # Calculate metrics
+    metrics = calculate_metrics(
+        test_output=test_log,
+        test_exit_code=test_exit,
+        lint_output=lint_log,
+        lint_exit_code=lint_exit,
+        repro_output=repro_log,
+        repro_exit_code=repro_exit if repro_log is not None else None,
+    )
+
+    state = read_state(loop_dir)
+    iteration = state.get("iteration", 0) + 1
+    max_iter = state.get("max_iterations", 5)
+    converged = is_converged(metrics)
+
+    def _write_atomic(path: Path, content: str):
+        tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(path)
+
+    # Persist METRICS.json
+    _write_atomic(loop_dir / "METRICS.json", json.dumps(metrics.to_dict(), indent=2, ensure_ascii=False))
+    
+    # Persist METRICS.md
+    _write_atomic(loop_dir / "METRICS.md", render_metrics_markdown(metrics, iteration, max_iter))
+    
+    # Persist EVALUATION.md
+    err_context = ""
+    if not converged:
+        snippets = []
+        if (test_exit != 0 or metrics.failing_tests) and test_log.strip():
+            snippets.append(f"--- 基础测试输出 ---\n{test_log.strip()}")
+        if lint_exit != 0 and lint_log.strip():
+            snippets.append(f"--- 质量与静态检查输出 ---\n{lint_log.strip()}")
+        if repro_exit != 0 and repro_log and repro_log.strip():
+            snippets.append(f"--- 靶向复现用例输出 ---\n{repro_log.strip()}")
+        err_context = "\n\n".join(snippets)
+
+    _write_atomic(loop_dir / "EVALUATION.md", render_evaluation_markdown(metrics, iteration, max_iter, err_context))
+
+    # Update STATE.md
+    new_status = "converged" if converged else ("exhausted" if iteration >= max_iter else "iterating")
+    write_state(loop_dir, iteration, max_iter, new_status, converged)
+
+    return metrics, converged
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Herdr Autonomous Loop CLI")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # init
+    init_cmd = sub.add_parser("init", help="Initialize .herdr-loop in directory")
+    init_cmd.add_argument("--dir", default=".", help="Target project/clone directory")
+    init_cmd.add_argument("--goal", required=True, help="Task goal")
+    init_cmd.add_argument("--acceptance", default="", help="Acceptance criteria")
+    init_cmd.add_argument("--test-cmd", default="", help="Test execution command")
+    init_cmd.add_argument("--lint-cmd", default="", help="Lint execution command")
+    init_cmd.add_argument("--repro-cmd", default="", help="Target reproduction test command")
+    init_cmd.add_argument("--max-iter", type=int, default=5, help="Max iteration count")
+
+    # eval
+    eval_cmd = sub.add_parser("eval", help="Run evaluation and update metrics")
+    eval_cmd.add_argument("--dir", default=".", help="Target project/clone directory")
+
+    # status
+    status_cmd = sub.add_parser("status", help="Get current loop score and state")
+    status_cmd.add_argument("--dir", default=".", help="Target project/clone directory")
+
+    args = parser.parse_args()
+    target_dir = Path(args.dir).resolve()
+
+    if args.command == "init":
+        init_loop(
+            target_dir=target_dir,
+            goal=args.goal,
+            acceptance=args.acceptance,
+            test_cmd=args.test_cmd,
+            lint_cmd=args.lint_cmd,
+            max_iterations=args.max_iter,
+            repro_cmd=args.repro_cmd,
+        )
+        sys.exit(0)
+
+    elif args.command == "eval":
+        metrics, converged = run_evaluation(target_dir)
+        print(f"[HERDR_LOOP_SCORE] {metrics.composite_score}")
+        print(f"[HERDR_LOOP_CONVERGED] {converged}")
+        sys.exit(0 if converged else 1)
+
+    elif args.command == "status":
+        loop_dir = get_loop_dir(target_dir)
+        state = read_state(loop_dir)
+        m_file = loop_dir / "METRICS.json"
+        score = 0.0
+        if m_file.exists():
+            data = json.loads(m_file.read_text(encoding="utf-8"))
+            score = data.get("composite_score", 0.0)
+        print(json.dumps({"state": state, "score": score}, ensure_ascii=False, indent=2))
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
