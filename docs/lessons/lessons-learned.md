@@ -1121,4 +1121,50 @@ pytest tests/test_console_frontend_syntax.py tests/test_console_templates.py -v
 pytest
 ```
 
+---
+
+## 26. 人机对等协同工作舱：注意力过滤模型、沉浸式成果会签与折叠式物理抽屉
+
+### 问题背景
+
+在多智能体流水线并发推进时，人类交互界面通常面临两大极端缺陷：
+1. **认知过载与信噪比过低**：直接向人类倾泻全量 Agent 终端日志，面对十几个并发工位，人类总指挥无法在 5 秒内获知“哪些在正常推进、哪些遇到卡点、哪些正在等待我拍板”；
+2. **缺乏结构化成果审批底座**：Agent 输出产物后，人类只能在终端或文件浏览器中找文件，缺少第一公民化的交付物会签室；遇到门禁阻断时无法快捷提供批注并回退重跑，难以形成高质量的人机协作内循环；
+3. **物理现场与日常视窗强耦合**：强行隐藏原生终端会阻碍深度排障，而将终端长期平铺又造成巨大的视觉污染与性能损耗。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 30 个 Agent 同时跑，人类无所适从 | 认知注意力是系统最稀缺的资源 | 构建 **注意力中心 (Attention Hub)**：通过态势条与过滤标签（全部 / 待我拍板 / 需关注 / 进行中），首屏噪音降低 90% |
+| 产物深藏文件系统，门禁决策脱节 | 产物（Artifacts）必须作为第一公民 | 构建 **成果交付会签室 (Artifact Signoff Chamber)**：沉浸式呈现交付物（Markdown、CSV、Diff、评分），提供「一键通过」与「批注打回」闭环 |
+| 批注打回缺乏上下文联动 | 打回不能仅仅变状态，必须指导后续重跑 | 会签打回时支持选择 `retry_target` 节点，原子回溯工作流拓扑，并将人类修改意见以高优先级插话形式注入工位 |
+| 终端平铺与完全隐藏的两难 | 物理现场应“随叫随到，平时隐蔽” | 构建 **底层物理抽屉 (Deep Physical Drawer)**：底部常驻折叠栏，点击秒级展开查看 Live TTY、内核日志与遥测 JSON，排障完毕一键折叠 |
+
+### 操作规范（已固化到 `console/herdr_factory_console.py` 与 `tests/test_console_signoff_api.py`）
+
+1. **三轨协同工作舱布局**：
+   - 第一轨（顶部）：协同态势条（Attention Banner）动态提炼全局智能体协同状态；
+   - 第二轨（主区）：任务看板支持一键切换「全部 / 待我拍板 / 需关注 / 进行中」，并为每个任务提供「成果会签」、「简报」、「插话」等行动点；
+   - 第三轨（底部）：折叠抽屉支持 Live TTY、Controller Log、Raw Telemetry 三视图无刷新切换。
+2. **会签室原子操作 API**：
+   - 暴露 `POST /api/task/signoff`：支持 `action='approve'`（触发 `force_pass_gate`）与 `action='reject'`（触发 `rollback_workflow` 与 `queue_steer`）；
+   - 前端无阻塞原生弹窗完成批注意见输入与确认。
+3. **语法与无障碍安全防护**：
+   - 所有新增前端代码均通过 `node -c` 脚本语法严格编译断言与 WCAG AA ARIA 无障碍属性检测。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 运行阶段五新增测试（Signoff API + 前端语法与交互契约）
+pytest tests/test_console_signoff_api.py tests/test_console_frontend_syntax.py -v
+
+# 2. 全仓 317 项自动化回归测试 100% 通过
+pytest
+
+# 3. 前端部署与同步验证
+./scripts/install-herdr-console.sh
+```
+
+
 

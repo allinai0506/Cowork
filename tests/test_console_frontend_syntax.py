@@ -137,7 +137,35 @@ class TestConsoleFrontendSyntaxAndContracts(unittest.TestCase):
         self.assertNotIn(".btn.primary{background:var(--accent);color:#06111f;", self.html)
         self.assertIn(".btn.primary{background:#2563eb;color:#ffffff;", self.html)
 
+    def test_universal_studio_ui_elements(self):
+        """Verify Universal Studio Phase 5 contracts: Attention Hub, Filter tabs, Deep Drawer, and Signoff Chamber."""
+        # Attention Hub
+        self.assertIn('id="attentionBanner"', self.html)
+        self.assertIn('class="attention-banner"', self.html)
+        self.assertIn("人机协同态势", self.html)
+        self.assertIn("updateAttentionHub()", self.html)
+
+        # Attention Filters
+        self.assertIn('id="fDecision"', self.html)
+        self.assertIn('id="fAttention"', self.html)
+        self.assertIn('id="fActive"', self.html)
+        self.assertIn("setTaskFilter", self.html)
+
+        # Deep Physical Drawer
+        self.assertIn('id="deepDrawer"', self.html)
+        self.assertIn('class="deep-drawer collapsed"', self.html)
+        self.assertIn("底层物理现场", self.html)
+        self.assertIn("toggleDeepDrawer()", self.html)
+        self.assertIn("refreshDeepDrawer()", self.html)
+
+        # Artifact Signoff Chamber
+        self.assertIn("成果交付会签室", self.html)
+        self.assertIn("openSignoffChamber", self.html)
+        self.assertIn("submitSignoffDecision", self.html)
+        self.assertIn("成果会签", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

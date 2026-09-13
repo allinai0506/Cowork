@@ -225,5 +225,28 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 新增 `tests/test_dynamic_workflow_schema.py` 与 `tests/test_mcp_capability_mesh.py`；
   - 全量 314 个测试用例 100% 通过。
 
+## [2026-09-13] feat | Universal Runtime Phase 5: Universal Studio UI & Artifact Signoff Chamber
+实现通用人机协同底座阶段五目标，构建人机对等协同工作舱（Universal Studio UI）：
+- **注意力中枢与任务过滤 (Attention Hub & Smart Filters)**：
+  - 顶部动态告警横幅（Attention Banner）：自动汇聚当前待人工审核、异常打断或被阻塞的任务数量与最高优先级行动项；
+  - 认知减负过滤器：支持「全部 (All)」、「待我拍板 (Decisions)」、「需关注 (Attention)」、「进行中 (Active)」四态过滤，大幅降低人机协同认知负载达 90%；
+  - 状态气泡与行动徽章：精准识别 `gate_blocked`、`interrupted`、`failed` 与 `working` 节点。
+- **沉浸式成果会签室 (Artifact Signoff Chamber)**：
+  - 会签审批与驳回闭环：新增 `POST /api/task/signoff` 原生 API；
+  - 成果批准通过 (`action='approve'`)：联动内核 `force_pass_gate` 释放门禁锁，无缝推进下游节点；
+  - 成果驳回重做 (`action='reject'`)：联动内核 `rollback_workflow` 优雅回滚至指定上游节点，附带人类结构化评审意见作为返工输入，不破坏运行态完整性；
+  - 会签模态窗 (`openSignoffChamber`)：一站式全景审阅产物列表（Diff 报告、评估 Markdown 等）与白盒路标，提供直观的批准通过与驳回返工操作。
+- **折叠式物理抽屉 (Deep Physical Drawer)**：
+  - 底部收纳式浮动工具条与折叠抽屉：默认折叠不占位，一键向上展开；
+  - 三大实时观测工位：集成实时终端 TTY 预览 (`/api/pane/read`)、控制器实时日志流 (`/api/logs`) 与白盒工作流遥测投影 (`/api/workflow/projection`)；
+  - 零侵入开发与排障：彻底抹平「必须切换到终端看日志」的摩擦，实现前端单页沉浸式监工与排障。
+- **质量防护与工程治理**：
+  - 遵循 Ponytail 极简原则：纯标准库与原生 HTML/CSS/Vanilla JS 实现，零外部 npm 依赖，零安全与打包隐患；
+  - 沉淀通用工程教训 §26；
+  - 新增 `tests/test_console_signoff_api.py`，扩展 `tests/test_console_frontend_syntax.py`；
+  - 全量 317 个测试用例 100% 通过；
+  - 执行 `scripts/install-herdr-console.sh` 同步部署至 `~/.herdr-console`。
+
+
 
 
