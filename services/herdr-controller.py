@@ -16,7 +16,7 @@ if str(HERDR_ROOT) not in sys.path:
     sys.path.insert(0, str(HERDR_ROOT))
 
 SOCKET_PATH = os.path.expanduser("~/.config/herdr/herdr.sock")
-TASKS_FILE = os.path.expanduser("~/.herdr-controller/tasks.json")
+TASKS_FILE = os.environ.get("TASKS_FILE") or os.path.expanduser("~/.herdr-controller/tasks.json")
 _task_bin = HERDR_ROOT / "bin" / "herdr-task"
 TASK_MANAGER = str(_task_bin) if _task_bin.exists() else os.path.expanduser("~/herdr/bin/herdr-task")
 try:
@@ -32,7 +32,7 @@ except ImportError:
     )
     from herdr_workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
 
-STAGE_STATE_FILE = os.path.expanduser(
+STAGE_STATE_FILE = os.environ.get("STAGE_STATE_FILE") or os.path.expanduser(
     "~/.herdr-controller/stage-state.json"
 )
 
@@ -42,7 +42,7 @@ STAGE_POLICIES_FILE = os.path.expanduser(
 
 COORDINATOR_PANE = "w6:p1H"
 
-WORKFLOWS_FILE = os.path.expanduser("~/.herdr-controller/workflows.json")
+WORKFLOWS_FILE = os.environ.get("WORKFLOWS_FILE") or os.path.expanduser("~/.herdr-controller/workflows.json")
 
 # 已触发过 close-workflow 的 workflow,防止轮询期间重复派发。
 _workflow_close_inflight = set()
@@ -51,7 +51,14 @@ _workflow_close_inflight = set()
 def _workflow_entry(workflow_id):
     try:
         with open(WORKFLOWS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f).get("workflows", {}).get(workflow_id) or {}
+            raw = json.load(f).get("workflows", {})
+            if isinstance(raw, dict):
+                return raw.get(workflow_id) or {}
+            elif isinstance(raw, list):
+                for w in raw:
+                    if isinstance(w, dict) and w.get("workflow_id") == workflow_id:
+                        return w
+            return {}
     except (OSError, json.JSONDecodeError):
         return {}
 
@@ -748,7 +755,8 @@ def check_workflow_stage_advance(workflow_id):
 
     # 已关闭(含 abandoned)的 workflow 不再参与任何推进/回流判定;
     # 否则 abandoned 残留的 blocked verdict 会被 sweep 反复回流。
-    if _workflow_entry(workflow_id).get("status") == "completed":
+    wf_st = _workflow_entry(workflow_id).get("status")
+    if wf_st in ("completed", "paused"):
         return
 
     if workflow_cfg.get("nodes"):
@@ -1381,6 +1389,130 @@ def _process_coordinator_item(item, wf_lock):
         _handle_coordinator_item(item)
 
 
+def build_fix_loop_message(item, project_name="unknown"):
+    """fix_loop 事件消息;派发命令是建议骨架,裁量在总指挥。"""
+    workflow_id = item["workflow_id"]
+    gate_stage = item["gate_stage"]
+    retry_node = item["retry_node"]
+    loop_count = item["loop_count"]
+    max_loops = item["max_loops"]
+    invalidated = item.get("invalidated") or []
+    suggested_branch = item.get("suggested_branch")
+
+    blockers_text = "\n".join(
+        f"- {b.get('task_id')}: {b.get('note') or '(未记录说明)'}"
+        for b in item.get("blockers") or []
+    ) or "- (未记录 blocker 说明,请读取 gate 阶段任务输出)"
+
+    escalation = ""
+    if loop_count >= max_loops:
+        escalation = (
+            f"\n注意:已达 fix-loop 上限({loop_count}/{max_loops})。"
+            "先向用户请示(继续修 / 换方案 / 放弃),"
+            "未经用户确认不得派发。\n"
+        )
+
+    if suggested_branch:
+        onto_flag = f"--onto {suggested_branch} "
+        branch_line = suggested_branch
+    else:
+        onto_flag = ""
+        branch_line = "(未找到,请自行确认 retry_node 最近 committed 任务的分支)"
+
+    return f"""
+HERDR_CONTROLLER_FIX_LOOP_EVENT
+
+workflow_id: {workflow_id}
+project_name: {project_name}
+gate_stage: {gate_stage} — 验收结论 blocked
+retry_node: {retry_node}
+suggested_branch: {branch_line}
+loop_count: {loop_count}/{max_loops}
+{escalation}
+Controller 已自动作废受影响的 gate 与下游 Task(共 {len(invalidated)} 个,见 Task Registry);
+fix 完成后 DAG 将自动按 test → review → wrapup 顺序重新推进,旧 verdict 一并作废。
+
+Blocker 清单(blocked 结论与修复指引):
+{blockers_text}
+
+你现在只需派发修复 Task(禁止新建 workflow、禁止放弃本 workflow):
+
+~/herdr/bin/herdr-task launch --workflow-id {workflow_id} --stage {retry_node} \\
+  {onto_flag}--agent auto --task-type fix \\
+  --goal "修复 gate {gate_stage} 的阻断项" \\
+  --acceptance "<逐条对应 Blocker 清单>" \\
+  --prompt "<blocker 详情、修复范围与验证方式>"
+
+如需再次修复,对旧 fix task 使用 --supersedes。
+派发完成后结束当前回合,后续推进交给 Controller。
+""".strip()
+
+
+def _handle_fix_loop_item(item):
+    """门禁 blocked 的回流通知:作废已由 handle_fix_loop 原子完成,
+    这里只负责把 blocker 清单与修复派发指引送到总指挥。"""
+    workflow_id = item["workflow_id"]
+    coord_pane = coordinator_pane_for_workflow(workflow_id)
+
+    if not coord_pane:
+        print(
+            f"[FIX LOOP SKIP] "
+            f"no coordinator pane for workflow={workflow_id}"
+        )
+        return
+
+    gate_stage = item["gate_stage"]
+    retry_node = item["retry_node"]
+    project_ctx = project_for_workflow(workflow_id) or {}
+
+    message = build_fix_loop_message(
+        item,
+        project_ctx.get("project_name", "unknown"),
+    )
+
+    waited = 0
+
+    while coordinator_status(workflow_id) not in ("idle", "done"):
+        if waited >= 120:
+            print(
+                f"[FIX LOOP WAIT TIMEOUT] "
+                f"workflow={workflow_id}"
+            )
+            return
+
+        time.sleep(2)
+        waited += 2
+
+    result = subprocess.run(
+        [
+            "herdr",
+            "agent",
+            "prompt",
+            coord_pane,
+            message,
+            "--wait",
+            "--timeout",
+            "600000"
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    if result.returncode == 0:
+        print(
+            f"[FIX LOOP NOTIFIED] "
+            f"workflow={workflow_id} "
+            f"gate={gate_stage} "
+            f"retry={retry_node}"
+        )
+    else:
+        print(
+            f"[FIX LOOP ERROR] "
+            f"workflow={workflow_id}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+
+
 def _handle_coordinator_item(item):
     """Actual item handling logic (stage_advance or normal task event)."""
     # ==============================================
@@ -1665,136 +1797,9 @@ task_type:
 
         return
 
-# ==============================================
-# Fix Loop Event
-# ==============================================
-
-def build_fix_loop_message(item, project_name="unknown"):
-    """fix_loop 事件消息;派发命令是建议骨架,裁量在总指挥。"""
-    workflow_id = item["workflow_id"]
-    gate_stage = item["gate_stage"]
-    retry_node = item["retry_node"]
-    loop_count = item["loop_count"]
-    max_loops = item["max_loops"]
-    invalidated = item.get("invalidated") or []
-    suggested_branch = item.get("suggested_branch")
-
-    blockers_text = "\n".join(
-        f"- {b.get('task_id')}: {b.get('note') or '(未记录说明)'}"
-        for b in item.get("blockers") or []
-    ) or "- (未记录 blocker 说明,请读取 gate 阶段任务输出)"
-
-    escalation = ""
-    if loop_count >= max_loops:
-        escalation = (
-            f"\n注意:已达 fix-loop 上限({loop_count}/{max_loops})。"
-            "先向用户请示(继续修 / 换方案 / 放弃),"
-            "未经用户确认不得派发。\n"
-        )
-
-    if suggested_branch:
-        onto_flag = f"--onto {suggested_branch} "
-        branch_line = suggested_branch
-    else:
-        onto_flag = ""
-        branch_line = "(未找到,请自行确认 retry_node 最近 committed 任务的分支)"
-
-    return f"""
-HERDR_CONTROLLER_FIX_LOOP_EVENT
-
-workflow_id: {workflow_id}
-project_name: {project_name}
-gate_stage: {gate_stage} — 验收结论 blocked
-retry_node: {retry_node}
-suggested_branch: {branch_line}
-loop_count: {loop_count}/{max_loops}
-{escalation}
-Controller 已自动作废受影响的 gate 与下游 Task(共 {len(invalidated)} 个,见 Task Registry);
-fix 完成后 DAG 将自动按 test → review → wrapup 顺序重新推进,旧 verdict 一并作废。
-
-Blocker 清单(blocked 结论与修复指引):
-{blockers_text}
-
-你现在只需派发修复 Task(禁止新建 workflow、禁止放弃本 workflow):
-
-~/herdr/bin/herdr-task launch --workflow-id {workflow_id} --stage {retry_node} \\
-  {onto_flag}--agent auto --task-type fix \\
-  --goal "修复 gate {gate_stage} 的阻断项" \\
-  --acceptance "<逐条对应 Blocker 清单>" \\
-  --prompt "<blocker 详情、修复范围与验证方式>"
-
-如需再次修复,对旧 fix task 使用 --supersedes。
-派发完成后结束当前回合,后续推进交给 Controller。
-""".strip()
-
-
-def _handle_fix_loop_item(item):
-    """门禁 blocked 的回流通知:作废已由 handle_fix_loop 原子完成,
-    这里只负责把 blocker 清单与修复派发指引送到总指挥。"""
-    workflow_id = item["workflow_id"]
-    coord_pane = coordinator_pane_for_workflow(workflow_id)
-
-    if not coord_pane:
-        print(
-            f"[FIX LOOP SKIP] "
-            f"no coordinator pane for workflow={workflow_id}"
-        )
-        return
-
-    gate_stage = item["gate_stage"]
-    retry_node = item["retry_node"]
-    project_ctx = project_for_workflow(workflow_id) or {}
-
-    message = build_fix_loop_message(
-        item,
-        project_ctx.get("project_name", "unknown"),
-    )
-
-    waited = 0
-
-    while coordinator_status(workflow_id) not in ("idle", "done"):
-        if waited >= 120:
-            print(
-                f"[FIX LOOP WAIT TIMEOUT] "
-                f"workflow={workflow_id}"
-            )
-            return
-
-        time.sleep(2)
-        waited += 2
-
-    result = subprocess.run(
-        [
-            "herdr",
-            "agent",
-            "prompt",
-            coord_pane,
-            message,
-            "--wait",
-            "--timeout",
-            "600000"
-        ],
-        text=True,
-        capture_output=True
-    )
-
-    if result.returncode == 0:
-        print(
-            f"[FIX LOOP NOTIFIED] "
-            f"workflow={workflow_id} "
-            f"gate={gate_stage} "
-            f"retry={retry_node}"
-        )
-    else:
-        print(
-            f"[FIX LOOP ERROR] "
-            f"workflow={workflow_id}: "
-            f"{result.stderr.strip() or result.stdout.strip()}"
-        )
-
-# ==============================================
-# Normal Task Event
-# ==============================================
+    # ==============================================
+    # Normal Task Event
+    # ==============================================
 
     task_id = item["task_id"]
     event_type = item["event_type"]
@@ -1972,6 +1977,34 @@ def handle_event(task_id, agent_status):
         # 等价于本轮交互结束。
         # dispatched -> idle 不算完成，避免尚未执行就误判。
         if current_status == "working":
+            pane_id = task.get("pane_id")
+            has_done_marker = False
+            if pane_id:
+                try:
+                    res = subprocess.run(
+                        ["herdr", "pane", "read", pane_id, "--source", "visible"],
+                        text=True,
+                        capture_output=True,
+                        timeout=3
+                    )
+                    screen = (res.stdout or "") + (res.stderr or "")
+                    if f"HERDR_TASK_DONE:{task_id}" in screen:
+                        has_done_marker = True
+                except Exception:
+                    pass
+
+            if not has_done_marker and not os.environ.get("HERDR_CONTROLLER_TEST"):
+                # 屏幕上无明确完成标记，进行短暂防抖二次确认，防止推理/长命令间歇抖动
+                time.sleep(2)
+                runtime_check = get_agent_runtime_status(pane_id) if pane_id else None
+                if runtime_check == "working":
+                    print(
+                        f"[AGENT JITTER FILTERED] "
+                        f"task={task_id} "
+                        f"recovered to working from idle"
+                    )
+                    return
+
             if set_task_status(
                 task_id,
                 "agent_done"
@@ -2389,8 +2422,9 @@ def registry_watcher():
 
                 if status in (
                     "completed",
-                    "failed"
-                ):
+                    "failed",
+                    "superseded"
+                ) or workflow_closed(task.get("workflow_id")):
                     with lock:
                         running = (
                             task_id
@@ -2414,6 +2448,21 @@ def registry_watcher():
                     if not already:
                         start_task_listener(
                             task_id
+                        )
+
+                if status == "agent_done" and not workflow_closed(task.get("workflow_id")):
+                    key = f"{task_id}:done"
+                    with lock:
+                        already_queued = key in queued_events
+                    if not already_queued:
+                        print(
+                            f"[REGISTRY WATCHER] "
+                            f"task={task_id} "
+                            f"status=agent_done -> enqueue done event"
+                        )
+                        enqueue_coordinator_event(
+                            task,
+                            "done"
                         )
 
         except Exception as e:

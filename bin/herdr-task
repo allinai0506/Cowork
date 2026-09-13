@@ -58,11 +58,12 @@ KNOWN_AGENTS = [a for a in DEFAULT_ALLOWED if a]
 
 TRANSITIONS = {
     "pending": {"dispatched", "failed"},
-    "dispatched": {"working", "blocked", "failed", "superseded"},
-    "working": {"blocked", "agent_done", "failed", "superseded"},
-    "blocked": {"working", "failed", "superseded"},
+    "dispatched": {"working", "blocked", "agent_done", "paused", "failed", "superseded"},
+    "working": {"blocked", "agent_done", "rework", "paused", "failed", "superseded"},
+    "blocked": {"working", "agent_done", "paused", "failed", "superseded"},
+    "paused": {"working", "rework", "agent_done", "failed", "superseded"},
     "agent_done": {"completed", "rework", "failed", "superseded"},
-    "rework": {"working", "blocked", "failed", "superseded"},
+    "rework": {"working", "blocked", "agent_done", "paused", "failed", "superseded"},
     "completed": {"committed", "cleanup_ready"},
     "committed": {"integrated"},
     "integrated": {"cleanup_ready"},
@@ -78,6 +79,7 @@ ACTIVE_TASK_STATUSES = {
     "blocked",
     "agent_done",
     "rework",
+    "paused",
 }
 
 COMPLETED_TASK_STATUSES = {
@@ -3067,6 +3069,38 @@ def supersede_task(task_id, new_task_id=None, reason=None):
     print(msg)
 
 
+def pause_task(task_id, reason=None):
+    """Pause an in-flight task (dispatched/working/rework)."""
+    if reason:
+        data = load_tasks()
+        task = find_task(data, task_id)
+        if not task:
+            print(f"Task not found: {task_id}")
+            sys.exit(1)
+        task["pause_reason"] = reason
+        save_tasks(data)
+    set_status(task_id, "paused")
+
+
+def resume_task(task_id):
+    """Resume a paused task back to working or rework based on history."""
+    data = load_tasks()
+    task = find_task(data, task_id)
+    if not task:
+        print(f"Task not found: {task_id}")
+        sys.exit(1)
+    if task.get("status") != "paused":
+        print(f"Task {task_id} is not paused (currently: {task.get('status')})")
+        sys.exit(2)
+    target = "working"
+    history = task.get("status_history", [])
+    for h in reversed(history):
+        if h.get("to") == "paused" and h.get("from") in ("working", "rework", "dispatched", "blocked"):
+            target = h.get("from")
+            break
+    set_status(task_id, target)
+
+
 def _clear_suppress_auto_close(workflow_id):
     """Fix-loop reopen 闩:该 workflow 任一任务进入 ACTIVE 时清除。
 
@@ -3448,6 +3482,13 @@ def main():
     advance_cmd.add_argument("workflow_id")
     advance_cmd.add_argument("stage", nargs="?", default=None)
 
+    pause_cmd = sub.add_parser("pause")
+    pause_cmd.add_argument("task_id")
+    pause_cmd.add_argument("--reason", default=None)
+
+    resume_cmd = sub.add_parser("resume")
+    resume_cmd.add_argument("task_id")
+
     args = parser.parse_args()
 
     if args.command == "add":
@@ -3559,6 +3600,12 @@ def main():
 
     elif args.command == "advance":
         force_advance(args.workflow_id, args.stage)
+
+    elif args.command == "pause":
+        pause_task(args.task_id, reason=args.reason)
+
+    elif args.command == "resume":
+        resume_task(args.task_id)
 
 
 if __name__ == "__main__":

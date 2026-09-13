@@ -199,8 +199,8 @@ def main():
 
         if update_statuses(changes):
             save_json_atomic(STATE_FILE, state)
-            restart_controller()
-            time.sleep(5)
+            print("[SENTINEL] State updated, controller will auto-sync via registry watcher", flush=True)
+            time.sleep(1)
         else:
             save_json_atomic(STATE_FILE, state)
             time.sleep(POLL_SECONDS)

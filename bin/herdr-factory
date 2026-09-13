@@ -448,6 +448,70 @@ def status(workflow_id):
     return 0
 
 
+def pause_workflow(workflow_id):
+    wf_file = os.environ.get("WORKFLOWS_FILE") or os.path.expanduser("~/.herdr-controller/workflows.json")
+    try:
+        with open(wf_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        print("Failed to load workflows.json")
+        return 1
+    wfs = data.get("workflows", {})
+    if isinstance(wfs, dict):
+        if workflow_id not in wfs:
+            print(f"Workflow {workflow_id} not found")
+            return 1
+        wfs[workflow_id]["status"] = "paused"
+    elif isinstance(wfs, list):
+        found = False
+        for wf in wfs:
+            if wf.get("workflow_id") == workflow_id:
+                wf["status"] = "paused"
+                found = True
+                break
+        if not found:
+            print(f"Workflow {workflow_id} not found")
+            return 1
+    tmp = wf_file + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, wf_file)
+    print(f"Workflow {workflow_id} paused")
+    return 0
+
+
+def resume_workflow(workflow_id):
+    wf_file = os.environ.get("WORKFLOWS_FILE") or os.path.expanduser("~/.herdr-controller/workflows.json")
+    try:
+        with open(wf_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        print("Failed to load workflows.json")
+        return 1
+    wfs = data.get("workflows", {})
+    if isinstance(wfs, dict):
+        if workflow_id not in wfs:
+            print(f"Workflow {workflow_id} not found")
+            return 1
+        wfs[workflow_id]["status"] = "running"
+    elif isinstance(wfs, list):
+        found = False
+        for wf in wfs:
+            if wf.get("workflow_id") == workflow_id:
+                wf["status"] = "running"
+                found = True
+                break
+        if not found:
+            print(f"Workflow {workflow_id} not found")
+            return 1
+    tmp = wf_file + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, wf_file)
+    print(f"Workflow {workflow_id} resumed")
+    return 0
+
+
 def e2e(project_path=None):
     workflow_id = start_workflow(
         "验证当前项目的 Herdr Factory 六阶段可以全自动推进。"
@@ -598,6 +662,12 @@ def main():
     status_cmd = sub.add_parser("status")
     status_cmd.add_argument("workflow_id")
 
+    pause_cmd = sub.add_parser("pause", help="暂停工作流自动调度推进")
+    pause_cmd.add_argument("workflow_id")
+
+    resume_cmd = sub.add_parser("resume", help="恢复工作流自动调度推进")
+    resume_cmd.add_argument("workflow_id")
+
     e2e_cmd = sub.add_parser("e2e")
     e2e_cmd.add_argument("--project")
 
@@ -645,6 +715,12 @@ def main():
 
     if args.command == "status":
         sys.exit(status(args.workflow_id))
+
+    if args.command == "pause":
+        sys.exit(pause_workflow(args.workflow_id))
+
+    if args.command == "resume":
+        sys.exit(resume_workflow(args.workflow_id))
 
     if args.command == "e2e":
         sys.exit(e2e(args.project))
