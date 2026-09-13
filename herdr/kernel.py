@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from . import workflow
+from . import state_db
 
 
 HOME = Path.home()
@@ -381,8 +382,12 @@ def step_workflow(workflow_id: str) -> Dict[str, Any]:
 # 5. Checkpoint Snapshot Primitives
 # ============================================================
 
-def create_checkpoint(workflow_id: str, tag: Optional[str] = None) -> Dict[str, Any]:
-    """Capture a durable point-in-time snapshot of the workflow and its tasks."""
+def create_checkpoint(
+    workflow_id: str,
+    tag: Optional[str] = None,
+    parent_checkpoint_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Capture a durable point-in-time snapshot of the workflow and its tasks across JSON & SQLite."""
     wf_data = load_workflows_data()
     wf_entry = wf_data.get("workflows", {}).get(workflow_id)
     if not wf_entry:
@@ -400,21 +405,39 @@ def create_checkpoint(workflow_id: str, tag: Optional[str] = None) -> Dict[str, 
         "checkpoint_id": cp_id,
         "workflow_id": workflow_id,
         "tag": tag or "",
+        "parent_checkpoint_id": parent_checkpoint_id,
         "created_at": now,
         "workflow": wf_entry,
         "tasks": wf_tasks,
     }
 
+    # 1. Write V1 JSON file for backward compatibility
     cp_dir = get_checkpoints_dir() / workflow_id
     cp_dir.mkdir(parents=True, exist_ok=True)
     cp_file = cp_dir / f"{cp_id}.json"
     _atomic_write_json(cp_file, snapshot)
+
+    # 2. Write to V2 SQLite state_db
+    try:
+        state_db.init_db()
+        state_db.save_workflow(wf_entry)
+        for t in wf_tasks:
+            state_db.save_task(t)
+        state_db.create_checkpoint(
+            workflow_id=workflow_id,
+            checkpoint_id=cp_id,
+            tag=tag,
+            parent_checkpoint_id=parent_checkpoint_id,
+        )
+    except Exception:
+        pass
 
     return {
         "ok": True,
         "workflow_id": workflow_id,
         "checkpoint_id": cp_id,
         "tag": tag or "",
+        "parent_checkpoint_id": parent_checkpoint_id,
         "created_at": now,
         "task_count": len(wf_tasks),
         "path": str(cp_file),
@@ -422,42 +445,69 @@ def create_checkpoint(workflow_id: str, tag: Optional[str] = None) -> Dict[str, 
 
 
 def list_checkpoints(workflow_id: str) -> List[Dict[str, Any]]:
-    """List all available checkpoints for workflow_id sorted newest first."""
+    """List all available checkpoints for workflow_id, unifying SQLite & JSON files."""
+    by_id: Dict[str, Dict[str, Any]] = {}
+
+    # 1. Fetch from SQLite V2 store
+    try:
+        state_db.init_db()
+        db_cps = state_db.list_checkpoints(workflow_id)
+        for c in db_cps:
+            by_id[c["checkpoint_id"]] = c
+    except Exception:
+        pass
+
+    # 2. Fetch from V1 JSON directory
     cp_dir = get_checkpoints_dir() / workflow_id
-    if not cp_dir.exists():
-        return []
+    if cp_dir.exists():
+        for f in cp_dir.glob("cp_*.json"):
+            try:
+                with open(f, "r", encoding="utf-8") as fp:
+                    snap = json.load(fp)
+                    cpid = snap.get("checkpoint_id")
+                    if cpid and cpid not in by_id:
+                        by_id[cpid] = {
+                            "checkpoint_id": cpid,
+                            "workflow_id": snap.get("workflow_id"),
+                            "tag": snap.get("tag", ""),
+                            "parent_checkpoint_id": snap.get("parent_checkpoint_id"),
+                            "created_at": snap.get("created_at", 0),
+                            "task_count": len(snap.get("tasks", [])),
+                            "workflow_status": snap.get("workflow", {}).get("status"),
+                        }
+            except Exception:
+                continue
 
-    checkpoints = []
-    for f in cp_dir.glob("cp_*.json"):
-        try:
-            with open(f, "r", encoding="utf-8") as fp:
-                snap = json.load(fp)
-                checkpoints.append({
-                    "checkpoint_id": snap.get("checkpoint_id"),
-                    "workflow_id": snap.get("workflow_id"),
-                    "tag": snap.get("tag", ""),
-                    "created_at": snap.get("created_at", 0),
-                    "task_count": len(snap.get("tasks", [])),
-                    "workflow_status": snap.get("workflow", {}).get("status"),
-                })
-        except Exception:
-            continue
-
-    checkpoints.sort(key=lambda x: x.get("created_at", 0), reverse=True)
-    return checkpoints
+    results = list(by_id.values())
+    results.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+    return results
 
 
 def get_checkpoint(workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
-    """Retrieve full snapshot payload for a checkpoint."""
+    """Retrieve full snapshot payload for a checkpoint from SQLite or JSON."""
+    # Try SQLite first
+    try:
+        state_db.init_db()
+        return state_db.get_checkpoint(workflow_id, checkpoint_id)
+    except Exception:
+        pass
+
+    # Fallback to JSON file
     cp_file = get_checkpoints_dir() / workflow_id / f"{checkpoint_id}.json"
     if not cp_file.exists():
-        raise FileNotFoundError(f"Checkpoint '{checkpoint_id}' not found for workflow '{workflow_id}'")
+        # Search all workflow subdirectories if workflow_id was omitted or uncertain
+        matches = list(get_checkpoints_dir().glob(f"*/{checkpoint_id}.json"))
+        if matches:
+            cp_file = matches[0]
+        else:
+            raise FileNotFoundError(f"Checkpoint '{checkpoint_id}' not found for workflow '{workflow_id}'")
+
     with open(cp_file, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def restore_checkpoint(workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
-    """Restore workflow state and tasks from a checkpoint snapshot."""
+    """Restore workflow state and tasks from a checkpoint snapshot in both JSON and SQLite."""
     snapshot = get_checkpoint(workflow_id, checkpoint_id)
     restored_wf = snapshot.get("workflow")
     restored_tasks = snapshot.get("tasks", [])
@@ -477,7 +527,14 @@ def restore_checkpoint(workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
     tasks_data["tasks"] = existing_tasks
     save_tasks_data(tasks_data)
 
-    # 3. Clean up any transient stage advance locks in stage-state.json
+    # 3. Restore in SQLite state_db
+    try:
+        state_db.init_db()
+        state_db.restore_checkpoint(workflow_id, checkpoint_id)
+    except Exception:
+        pass
+
+    # 4. Clean up any transient stage advance locks in stage-state.json
     s_file = get_stage_state_file()
     if s_file.exists():
         try:
@@ -499,3 +556,87 @@ def restore_checkpoint(workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
         "restored_tasks": len(restored_tasks),
         "status": restored_wf.get("status"),
     }
+
+
+def fork_workflow_from_checkpoint(
+    checkpoint_id: str,
+    new_workflow_id: str,
+    new_title: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Time-travel branching: Fork a new workflow instance from a historical checkpoint across JSON & SQLite."""
+    # 1. Locate checkpoint snapshot
+    snapshot = None
+    try:
+        state_db.init_db()
+        # Find workflow_id for this checkpoint from DB
+        conn = state_db.get_db_connection()
+        try:
+            cur = conn.execute("SELECT workflow_id FROM checkpoints WHERE checkpoint_id = ?", (checkpoint_id,))
+            row = cur.fetchone()
+            if row:
+                snapshot = state_db.get_checkpoint(row["workflow_id"], checkpoint_id)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    if not snapshot:
+        # Search JSON directory
+        matches = list(get_checkpoints_dir().glob(f"*/{checkpoint_id}.json"))
+        if not matches:
+            raise FileNotFoundError(f"Source checkpoint '{checkpoint_id}' not found")
+        with open(matches[0], "r", encoding="utf-8") as f:
+            snapshot = json.load(f)
+
+    source_wf = snapshot.get("workflow", {})
+    source_tasks = snapshot.get("tasks", [])
+    now = time.time()
+
+    forked_wf = dict(source_wf)
+    forked_wf["workflow_id"] = new_workflow_id
+    forked_wf["title"] = new_title or f"{source_wf.get('title', 'Workflow')} (Forked from {checkpoint_id[:12]})"
+    forked_wf["created_at"] = now
+    forked_wf["updated_at"] = now
+    forked_wf["forked_from"] = {
+        "source_workflow_id": snapshot.get("workflow_id"),
+        "source_checkpoint_id": checkpoint_id,
+        "forked_at": now,
+    }
+
+    # Clone tasks
+    forked_tasks = []
+    for t in source_tasks:
+        t_clone = dict(t)
+        orig_tid = t.get("task_id", "")
+        t_clone["task_id"] = f"{orig_tid}-fork-{uuid.uuid4().hex[:6]}"
+        t_clone["workflow_id"] = new_workflow_id
+        t_clone["created_at"] = now
+        forked_tasks.append(t_clone)
+
+    # 2. Persist to workflows.json & tasks.json
+    wf_data = load_workflows_data()
+    wf_data.setdefault("workflows", {})[new_workflow_id] = forked_wf
+    save_workflows_data(wf_data)
+
+    tasks_data = load_tasks_data()
+    tasks_data.setdefault("tasks", []).extend(forked_tasks)
+    save_tasks_data(tasks_data)
+
+    # 3. Persist to SQLite state_db
+    try:
+        state_db.init_db()
+        state_db.save_workflow(forked_wf)
+        for t in forked_tasks:
+            state_db.save_task(t)
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "new_workflow_id": new_workflow_id,
+        "new_title": forked_wf["title"],
+        "source_checkpoint_id": checkpoint_id,
+        "source_workflow_id": snapshot.get("workflow_id"),
+        "cloned_tasks": len(forked_tasks),
+    }
+

@@ -3550,6 +3550,24 @@ def main():
     artifacts_cmd.add_argument("task_id")
     artifacts_cmd.add_argument("--json", action="store_true", help="输出完整 JSON 数据")
 
+    cp_create_cmd = sub.add_parser("checkpoint-create")
+    cp_create_cmd.add_argument("workflow_id")
+    cp_create_cmd.add_argument("--tag", default="", help="快照人类可读标签")
+    cp_create_cmd.add_argument("--parent", default=None, help="父检查点 ID")
+
+    cp_list_cmd = sub.add_parser("checkpoint-list")
+    cp_list_cmd.add_argument("workflow_id")
+    cp_list_cmd.add_argument("--json", action="store_true", help="输出完整 JSON 列表")
+
+    cp_restore_cmd = sub.add_parser("checkpoint-restore")
+    cp_restore_cmd.add_argument("workflow_id")
+    cp_restore_cmd.add_argument("checkpoint_id")
+
+    cp_fork_cmd = sub.add_parser("checkpoint-fork")
+    cp_fork_cmd.add_argument("checkpoint_id")
+    cp_fork_cmd.add_argument("new_workflow_id")
+    cp_fork_cmd.add_argument("--title", default=None, help="新工作流标题")
+
     args = parser.parse_args()
 
     if args.command == "add":
@@ -3749,6 +3767,58 @@ def main():
                         print(f"  路径: {a.get('path')}")
         except Exception as e:
             print(f"Error collecting artifacts: {e}")
+            sys.exit(1)
+
+    elif args.command == "checkpoint-create":
+        import herdr.kernel as herdr_kernel
+        try:
+            res = herdr_kernel.create_checkpoint(
+                args.workflow_id,
+                tag=args.tag,
+                parent_checkpoint_id=args.parent,
+            )
+            print(f"[CHECKPOINT_CREATED] {res['checkpoint_id']} (tag={res['tag']}, tasks={res['task_count']})")
+        except Exception as e:
+            print(f"Error creating checkpoint: {e}")
+            sys.exit(1)
+
+    elif args.command == "checkpoint-list":
+        import herdr.kernel as herdr_kernel
+        try:
+            cps = herdr_kernel.list_checkpoints(args.workflow_id)
+            if getattr(args, "json", False):
+                print(json.dumps(cps, ensure_ascii=False, indent=2))
+            else:
+                print(f"=== 工作流检查点列表 [{args.workflow_id}] ===")
+                if not cps:
+                    print("暂无快照记录")
+                for cp in cps:
+                    parent_str = f" (parent={cp.get('parent_checkpoint_id')})" if cp.get("parent_checkpoint_id") else ""
+                    print(f"- {cp['checkpoint_id']} [tag={cp.get('tag') or '-'}] tasks={cp['task_count']} status={cp.get('workflow_status')}{parent_str}")
+        except Exception as e:
+            print(f"Error listing checkpoints: {e}")
+            sys.exit(1)
+
+    elif args.command == "checkpoint-restore":
+        import herdr.kernel as herdr_kernel
+        try:
+            res = herdr_kernel.restore_checkpoint(args.workflow_id, args.checkpoint_id)
+            print(f"[CHECKPOINT_RESTORED] {res['checkpoint_id']} -> workflow={res['workflow_id']}, tasks={res['restored_tasks']}, status={res['status']}")
+        except Exception as e:
+            print(f"Error restoring checkpoint: {e}")
+            sys.exit(1)
+
+    elif args.command == "checkpoint-fork":
+        import herdr.kernel as herdr_kernel
+        try:
+            res = herdr_kernel.fork_workflow_from_checkpoint(
+                args.checkpoint_id,
+                args.new_workflow_id,
+                new_title=args.title,
+            )
+            print(f"[WORKFLOW_FORKED] {res['new_workflow_id']} from {res['source_checkpoint_id']} (tasks={res['cloned_tasks']})")
+        except Exception as e:
+            print(f"Error forking workflow: {e}")
             sys.exit(1)
 
 

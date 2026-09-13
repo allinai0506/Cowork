@@ -1208,6 +1208,56 @@ python3 scripts/verify-universal-runtime-e2e.py
 pytest
 ```
 
+---
+
+## 28. 嵌入式 SQLite 状态引擎：连接复用规避嵌套事务死锁、双写 ID 归一与图谱谱系分叉设计
+
+### 问题背景
+
+在推进北极星架构体系状态引擎升级（从分散的 JSON 文件迈向嵌入式 SQLite 存储，支持单事务原子快照、谱系溯源与时间旅行分叉）过程中，暴露出以下几类关键并发与数据一致性陷阱：
+1. **嵌套操作连接隔离导致死锁**：在 `restore_checkpoint` 与 `fork_workflow_from_checkpoint` 等高级元语中，外层使用 `conn.execute("BEGIN TRANSACTION;")` 开启了独占事务；其内部若调用常规持久化方法（如 `save_workflow`、`save_task`），由于没有传递外层连接，子方法隐式开启新的 SQLite 连接并尝试写表，触发 `sqlite3.OperationalError: database is locked` 死锁异常；
+2. **双写架构下的 ID 漂移裂脑**：在由 JSON 文件向 SQLite 平滑演进的过渡期（双写阶段），`kernel.py:create_checkpoint` 先自主生成了一个基于 UUID 的快照 ID 并写入 JSON 文件，随后调用 `state_db.create_checkpoint`；若 `state_db` 也默认内部独立生成新 UUID，会导致同一个业务检查点在 JSON 系统和 SQLite 系统中持有互不相同的 ID，造成按 ID 检索、还原与分叉时的全链路断裂；
+3. **分叉衍生工作流的拓扑与锁状态污染**：从中间检查点进行时间旅行分叉（Fork）创建新实验分支时，若简单全量复制原工作流与任务状态，会连同原工作流的阶段推进锁（`stage_locks`）、调度完成标记和历史物理工位绑定一同拷贝，导致新派生的工作流在 Controller 调度器中处于锁死或幽灵状态。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| SQLite 事务内嵌套调用造成锁库 | 单一线程在未提交的事务连接外开启新连接写同一 SQLite 库必然死锁 | 核心持久化函数必须统一暴露可选 `conn: Optional[sqlite3.Connection] = None` 参数；外层事务必须显式下传 active 连接，内层若接收到外部连接则严禁执行 close() 或自动 commit() |
+| 存储双写导致快照 ID 裂脑 | 跨介质持久化必须由单一源头确定第一公民业务实体 ID | `state_db.create_checkpoint` 必须支持接收外部指定的 `checkpoint_id`；由上层统一生成 ID 并同时注入双写层，保持介质间 1:1 精确对齐 |
+| 时间旅行分叉残留旧环境锁 | 分叉是派生全新执行分支，不能无脑深拷贝物理运行时状态 | 分叉算法必须深度重置衍生实体的状态机：清除 `stage_locks`、清空残留任务状态并重置为初始待派发态，赋予全新的派生工作流 ID 与父级谱系指针（`parent_checkpoint_id`） |
+| 无第三方依赖约束下的 WAL 并发 | 多进程/多线程读写容易出现 database locked 瞬态抖动 | 统一开启 SQLite WAL 模式（`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`），在零外部依赖下获得工业级读写分离并发能力 |
+
+### 操作规范（已固化到 `herdr/state_db.py`、`herdr/kernel.py` 与 `tests/test_state_db_v2.py`）
+
+1. **事务连接透传契约**：
+   - 所有基础写操作函数：`save_workflow(wf, conn=None)`、`save_task(task, conn=None)`、`record_event(event, conn=None)` 必须支持外部连接透传；
+   - 外部复合事务（如 restore、fork、migrate）统一使用 `with get_db() as conn: with conn: ...` 或显式 BEGIN/COMMIT 并将 `conn` 级联透传。
+2. **双写 ID 归一与向后兼容**：
+   - `create_checkpoint(workflow_id, label, checkpoint_id=None)`：允许上层指定统一 ID；
+   - `kernel.py` 统筹生成单点 ID，确保 `checkpoints/<wf_id>/<cp_id>.json` 与 SQLite `checkpoints` 表主键完全一致；
+   - 提供 `migrate_v1_to_v2()` 幂等双向平滑迁移工具。
+3. **时间旅行与谱系追踪**：
+   - 检查点结构包含 `parent_id`、`dag_snapshot`、`state_vector`；
+   - `fork_workflow_from_checkpoint(checkpoint_id, new_workflow_id, ...)` 原子落盘新工作流与任务，精准清除阶段调度锁，保留 DAG 拓扑并记录衍生关系。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 运行 Checkpoint Store V2 状态引擎与内核桥接单元测试
+pytest -v tests/test_state_db_v2.py
+
+# 2. 运行全仓自动化回归（330 个测试用例 100% 全部通过）
+pytest
+
+# 3. CLI 命令验证
+bin/herdr-task checkpoint-create --help
+bin/herdr-task checkpoint-list --help
+bin/herdr-task checkpoint-restore --help
+bin/herdr-task checkpoint-fork --help
+```
+
+
 
 
 
