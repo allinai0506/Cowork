@@ -1166,5 +1166,48 @@ pytest
 ./scripts/install-herdr-console.sh
 ```
 
+---
+
+## 27. 跨阶段全链路集成测试的持久化沙盒隔离陷阱
+
+### 问题背景
+
+在开展通用人机协同底座跨阶段全链路端到端演练（E2E Dogfooding）时，编写检查点快照（Checkpoint）测试用例 `test_e2e_checkpoint_lifecycle_and_restoration`，在多次运行后发现断言快照列表长度偶发失败（预期只有当前测试创建的 1 个快照，实际却查出 2 个或多个）。
+排查发现：底座各阶段模块分别引入了各自独立的持久化环境变量（如 `WORKFLOWS_FILE`、`TASKS_FILE`、`STEERING_FILE`、`HERDR_MCP_REGISTRY` 与 `CHECKPOINTS_DIR`）。在编写跨阶段集成测试的 fixture 时，开发者往往只 mock 了常见的工作流与任务文件，遗漏了检查点持久化目录 `CHECKPOINTS_DIR`，导致快照文件隐式落到了宿主用户真实目录（`~/.herdr-controller/checkpoints`），引发不同测试轮次之间的脏数据污染。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 集成测试快照列表计数膨胀 | 底座不同模块引入了各自独立的持久化环境变量 | 集成测试 fixture 必须梳理全量持久化重定向清单，杜绝漏网环境变量 |
+| 快照写穿到宿主目录 | 模块默认 fallback 路径指向用户真实目录 | 在测试沙盒中，所有带 fallback 机制的路径变量必须强制全量 mock 到 `tmp_path` |
+| 跨用例状态隐式污染 | 本地测试通过但多用例连续执行偶发失败 | 测试套件内严禁产生宿主用户目录的副作用文件 |
+
+### 操作规范（已固化到 `tests/test_universal_substrate_e2e.py` 与 `scripts/verify-universal-runtime-e2e.py`）
+
+1. **底座全景持久化变量重定向规范**：
+   凡涉及工作流全链路集成测试的环境，必须全量重定向以下 5 个关键持久化路径：
+   - `WORKFLOWS_FILE`: 工作流实体 JSON；
+   - `TASKS_FILE`: 工位任务实体 JSON；
+   - `STEERING_FILE`: 插话与干预队列 JSON；
+   - `HERDR_MCP_REGISTRY`: MCP 插件注册表 JSON；
+   - `CHECKPOINTS_DIR`: 检查点快照专用目录。
+2. **测试前后环境自清洁**：
+   - fixture 统一基于 `tmp_path` 构建独立目录树，测试结束后自动随临时目录销毁，彻底消除跨进程与跨测试的潜在污染。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 运行端到端全链路集成测试
+pytest -v tests/test_universal_substrate_e2e.py
+
+# 2. 运行独立端到端演练脚本
+python3 scripts/verify-universal-runtime-e2e.py
+
+# 3. 全仓全量回归测试 (321 项测试用例 100% 通过)
+pytest
+```
+
+
 
 
