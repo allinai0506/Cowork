@@ -145,29 +145,52 @@ def _get_store():
         from herdr.state_store import get_state_store
     if os.environ.get("HERDR_STATE_DB"):
         return get_state_store(Path(os.environ["HERDR_STATE_DB"]))
-    wf_file = os.environ.get("WORKFLOWS_FILE") or globals().get("WORKFLOWS_FILE")
-    if wf_file:
+    wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE")
+    if wf_file and Path(wf_file) != (ROOT / "workflows.json"):
         p = Path(wf_file)
         db_path = p.parent / "state.db" if p.name == "workflows.json" else p.with_suffix(".db")
         if db_path.parent.exists():
             return get_state_store(db_path=db_path)
-    t_file = os.environ.get("TASKS_FILE")
-    if t_file:
+    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+    if t_file and Path(t_file) != (ROOT / "tasks.json"):
         p = Path(t_file)
+        db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    if os.environ.get("WORKFLOWS_FILE"):
+        p = Path(os.environ["WORKFLOWS_FILE"])
+        db_path = p.parent / "state.db" if p.name == "workflows.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    if os.environ.get("TASKS_FILE"):
+        p = Path(os.environ["TASKS_FILE"])
         db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
         if db_path.parent.exists():
             return get_state_store(db_path=db_path)
     return get_state_store()
 
 
+def _sync_missing_workflows_into_store(store):
+    try:
+        wf_file = Path(globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE)
+        if wf_file.exists():
+            disk_data = _load(wf_file, {})
+            if isinstance(disk_data, dict):
+                for wid, wf in disk_data.get("workflows", {}).items():
+                    if isinstance(wf, dict):
+                        wf.setdefault("workflow_id", wid)
+                        existing = store.get_workflow(wid)
+                        is_placeholder = bool(existing and existing.get("status") == "unknown" and not existing.get("project_id"))
+                        if not existing or is_placeholder:
+                            store.save_workflow(wf)
+    except Exception:
+        pass
+
+
 def load_workflows():
     try:
         store = _get_store()
-        try:
-            from .kernel import _import_missing_workflows_from_disk
-            _import_missing_workflows_from_disk(store)
-        except Exception:
-            pass
+        _sync_missing_workflows_into_store(store)
         return store.export_workflows_json()
     except Exception:
         return _load(WORKFLOWS_FILE, {"version": 1, "workflows": {}})
@@ -191,6 +214,7 @@ def active_workflows_for_project(project_id):
     """Registry entries of project_id that have not reached a terminal status."""
     try:
         store = _get_store()
+        _sync_missing_workflows_into_store(store)
         return [
             entry
             for entry in store.list_workflows()
@@ -209,6 +233,7 @@ def active_workflows_for_project(project_id):
 def non_terminal_workflow_ids():
     try:
         store = _get_store()
+        _sync_missing_workflows_into_store(store)
         return {
             entry["workflow_id"]
             for entry in store.list_workflows()
