@@ -163,6 +163,7 @@ def normalize_workflow(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "agent_policy": dict(node.get("agent_policy") or {}),
                 "required_outputs": list(node.get("required_outputs") or []),
                 "rules": list(node.get("rules") or []),
+                "gate": dict(node.get("gate") or {}),
             }
             if "tab_id" in node:
                 norm_node["tab_id"] = node["tab_id"]
@@ -233,6 +234,7 @@ def normalize_workflow(workflow: Dict[str, Any]) -> Dict[str, Any]:
                 "agent_policy": dict(policy.get("agent_policy") or {}),
                 "required_outputs": list(policy.get("required_outputs") or []),
                 "rules": list(policy.get("rules") or []),
+                "gate": dict(policy.get("gate") or {}),
             }
             if tab_id:
                 norm_node["tab_id"] = tab_id

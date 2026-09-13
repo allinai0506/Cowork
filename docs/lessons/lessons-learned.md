@@ -501,3 +501,88 @@ grep "herdr-agent-state" ~/.qoder-cn/logs/runs/<run>/qodercli.log  # hook.starte
 ```
 
 决策全记录：`docs/walkthroughs/20260913-qodercn-agent-identity-fix.md`。
+
+## 12. 流程完成 ≠ 交付完成:质量门的"不通过"必须驱动结构回流,而非归档
+
+### 问题背景
+
+wf-nexusarchive-…-084418 全流程走完:评审产出 B1(P0)阻断结论,但结论只存在
+于自然语言报告——引擎 `is_node_complete` 只看任务状态,照常推进 wrapup 并将
+交付被阻断(PR 禁合)的 workflow 归档 `completed`。修复只能在新的孤立
+workflow 里另起炉灶,丢失 PR 关联与阶段历史。审查轮 1(对抗性)进一步发现
+初版设计三处结构漏洞:verdict 死循环(作废范围漏 gate 自身)、重测缺失
+(下游闭包不完整)、reopen 自消除(sweep 会把重开的 workflow 秒回 closed)。
+
+### 经验教训
+
+| 教训 | 说明 |
+|------|------|
+| 完成态判定与结论语义是两层 | 任务"完成"只证明交付物存在;pass/blocked 是另一维状态。质量门的结论必须有机器可读载体并被推进逻辑消费,否则最强质量信号被浪费 |
+| 回流的正确粒度是"retry_node 全部下游" | 只回炉 gate 自身会死循环(旧 verdict 残留),只回炉 gate 不回炉下游会跳过重测。作废闭包必须覆盖 gate+全部下游 |
+| 结构性消除竞态优于防线叠加 | "节点未完成"本身就是闩(作废后周期 sweep 打不穿),不需要额外锁位;给 gate 打 notified 反而会被 reconcile 的前置依赖判定卡成永久停摆 |
+| reopen 类"复活"操作自带自消除竞态 | 旧状态仍满足终态判定时,下一个周期事件就会把它再次终结。需要显式闩 + 明确的摘除时机(首个活跃任务) |
+| 独立审查要给对抗性清单,并复核其建议 | 审查抓到 3 个设计级漏洞,但也给出 1 个会造成永久停摆的修法(用回归测试证伪后拒绝) |
+
+### 操作规范
+
+1. 门禁阶段验收必须落 verdict:`herdr-task set <t> completed --verdict
+   pass|blocked --note`(blocked 必填 note);
+2. blocked 的恢复路径:Controller 自动作废 gate+下游 → 总指挥按 fix_loop
+   事件派发 fix task(`--onto` 落 PR 分支)→ DAG 自动重流;禁止新建
+   workflow、禁止放弃;
+3. 放弃交付必须显式:`close-workflow --abandon`(outcome=abandoned),
+   console 的候选分支合并/手工推进遇 blocked verdict 一律拒绝;
+4. 复用已关闭 workflow:`reopen-workflow`,首个任务派发前闩保护。
+
+### 验证命令 / 证据
+
+- `/opt/homebrew/bin/pytest tests/`(183 passed,含 fix-loop 33 用例);
+- 设计与审查记录:`docs/walkthroughs/20260913-fix-loop-design.md`(§8 审查修订);
+- 知识同步:`wiki/task-lifecycle.md` §1.1、`wiki/dag-workflow-engine.md` §10。
+
+## 13. 幽灵推进：close-workflow 关不掉 controller 的推进循环（终态必须在循环处执法）
+
+### 问题背景
+
+用户重复提交同一需求产生两个工作流，关闭重复项 wf-…-111426（零任务）后，
+controller 继续对其逐阶段"真空推进"：零任务工作流对 `is_node_complete` 真空
+成立，legacy stages 分支又没有整体完成检查，于是 requirements→plan→
+implementation 无限排队；stage_advance 消费线程在协调者 idle 时把幽灵提示
+`herdr agent prompt` 直注**共享协调者 Pane**，协调者照办派发了 3 个真实任务
+（含一个与活跃工作流 111049 正式实现任务完全重复的 codex 实现任务）。
+根因链：`active_registered_workflows()` 名为 active 实则返回全部注册表条目；
+`check_workflow_stage_advance` 只查 `startup_ready` 不查终态；全系统唯一的
+status 检查只用于防"重复关闭"。
+
+### 经验教训
+
+| 教训 | 说明 |
+|---|---|
+| 终态必须在消费循环处执法 | 注册表写终态 ≠ 引擎停手；凡按 id 扫描/派发的循环都要自查终态，且消费线程 fire 前要**逐迭代**再校验（事件可在队列里存活分钟级，入队时合法 ≠ fire 时合法） |
+| 零任务工作流是推进引擎的退化用例 | `is_node_complete` 对空集真空成立；任何"全部完成则推进"的逻辑都必须先回答"空集算完成吗" |
+| 名实不符的函数是事故温床 | `active_registered_workflows()` 返回的是**全部**条目；名字承诺与实现不符时，要么改实现要么改名，留着眼就是给下一个读者埋雷 |
+| 双保险要落在不同层 | 扫描侧过滤（不产新事件）+ 消费侧再校验（丢已入队事件）缺一不可；只堵源头堵不住已上膛的子弹 |
+
+### 操作规范
+
+1. 终态判据语义（`status=="completed"` 即终态、缺 status 视为活跃）在
+   `herdr/projects.py` 共享谓词（factory 侧消费）与 controller 内联实现
+   （本地 `workflow_closed` + sweep 过滤）各有一份——修改口径必须两处同步，
+   并补 `tests/test_workflow_registry_guards.py` 用例；
+2. 关闭无任务工作流后，若 controller 仍打印其 `STAGE ADVANCE` 行，说明终态
+   闸门失效，按 `docs/walkthroughs/20260913-controller-ghost-advance-and-create-guard.md`
+   §3 配方处置（移除注册表条目 → pending 事件经 no-coordinator-pane 自毁）；
+3. 同项目默认串行：`herdr-factory run` 遇活跃工作流直接拒绝（exit 2），
+   `--force` 是唯一逃生口且不暴露给 Console。
+
+### 验证命令 / 证据
+
+```bash
+# 闸门拒绝（111049 活跃时）
+herdr-factory run --project /Users/user/nexusarchive "guard test"; echo $?  # 期望 exit 2 + 拒绝消息
+# 幽灵消除：零任务工作流被干净自动关闭而非循环推进
+grep -c "STAGE ADVANCE.*125332" ~/.herdr-controller/logs/controller.out.log  # 期望 0
+pytest tests/test_workflow_registry_guards.py  # 6 passed
+```
+
+决策与会话碰撞全记录：`docs/walkthroughs/20260913-controller-ghost-advance-and-create-guard.md`。

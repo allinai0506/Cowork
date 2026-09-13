@@ -1,9 +1,11 @@
 #!/opt/homebrew/bin/python3
+import fcntl
 import hashlib
 import json
 import os
 import re
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 
 HOME = Path.home()
@@ -141,6 +143,54 @@ def load_workflows():
 
 def save_workflows(data):
     _save(WORKFLOWS_FILE, data)
+
+
+TERMINAL_WORKFLOW_STATUSES = {"completed"}
+
+
+def active_workflows_for_project(project_id):
+    """Registry entries of project_id that have not reached a terminal status."""
+    return [
+        entry
+        for entry in load_workflows().get("workflows", {}).values()
+        if entry.get("project_id") == project_id
+        and entry.get("status") not in TERMINAL_WORKFLOW_STATUSES
+    ]
+
+
+def non_terminal_workflow_ids():
+    return {
+        workflow_id
+        for workflow_id, entry in load_workflows().get("workflows", {}).items()
+        if entry.get("status") not in TERMINAL_WORKFLOW_STATUSES
+    }
+
+
+def workflow_closed(workflow_id):
+    entry = project_for_workflow(workflow_id)
+    return bool(entry) and entry.get("status") in TERMINAL_WORKFLOW_STATUSES
+
+
+def workflow_registered(workflow_id):
+    return bool(project_for_workflow(workflow_id))
+
+
+@contextmanager
+def workflow_creation_lock(project_id):
+    """Serialize same-project workflow creation.
+
+    The active-workflow check and register_workflow must be atomic, or two
+    concurrent creates can both observe "no active workflow" and register.
+    """
+    lock_dir = ROOT / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_dir / f"{project_id}.workflow-create.lock", os.O_RDWR | os.O_CREAT)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield fd
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def project_by_root(root):

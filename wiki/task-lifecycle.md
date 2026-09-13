@@ -49,6 +49,47 @@ Evidence:
 - `bin/herdr-task:TRANSITIONS`
 - `bin/herdr-task#set_status`
 
+### 1.1 门禁结论 (Gate Verdict) 与 fix-loop
+
+`FACT` 门禁阶段（test/review/wrapup，`GATE_DEFAULTS`；节点/全局 stage-policy
+的 `gate` 配置可覆盖）验收落盘时携带机器可读结论：
+`herdr-task set <task> completed --verdict pass|blocked --note "<blocker 清单>"`
+（blocked 必填 note），持久化为任务的 `stage_verdict` / `stage_verdict_note`。
+
+`FACT` Controller 在两处消费 verdict（fail-safe 语义：节点内任一未 superseded
+任务的 blocked 即 blocked；无 verdict 时 lenient 放行，存量 workflow 行为不变）：
+
+1. **阶段推进门禁**（`blocked_gate_dependency`）：ready_node 的依赖中存在
+   blocked 门禁 → 不推进，执行**原子作废**——gate 节点及其全部下游节点的
+   非 superseded 任务被 supersede（completed/cleanup_ready 先 finalize 规范化，
+   规避 `completed→superseded` 非法转移窗口；pending/committed 跳过），随后
+   投递一次 `fix_loop` 事件（含 blocker 清单、建议 `--onto` 分支、launch 骨架、
+   循环计数）。作废使相关节点回归未完成——节点未完成本身就是闩，周期 sweep
+   不会重发；fix 完成后 DAG 自动按 test→review→wrapup 顺序重流。
+2. **交付终态门禁**：全部节点完成后，任一门禁节点 verdict=blocked → 不打
+   `[WORKFLOW COMPLETE]`、不触发 auto-close，走同样的回流。
+
+`FACT` 循环计数记录于 stage-state（`<wf>|fixloop|<retry_node>`，持锁写入），
+超过 `HERDR_FIX_LOOP_MAX`（默认 3）后 fix_loop 事件切换为"必须请示用户"的
+升级文案——上限是纪律+通知，非引擎硬闸。
+
+`FACT` `close-workflow` 遇未作废的 blocked verdict 拒绝执行（exit 2）；显式
+`--abandon` 可放弃交付（记录 workflow `outcome: abandoned`，正常关闭记录
+`delivered`）。console 的 `create_candidate`（真实 git merge）与
+`manual_advance` 对 blocked verdict 一律拒绝——三处旁路封堵。
+
+`FACT` `reopen-workflow` 重开已关闭 workflow：`suppress_auto_close` 闩封住
+reopen 后旧任务仍全为完成系导致的 sweep 自消除窗口，任一任务进入 ACTIVE
+时摘除（`bin/herdr-task set_status`）。
+
+Evidence:
+- `services/herdr-controller.py` #resolve_gate_config / #gate_verdict /
+  #invalidate_for_fix_loop / #handle_fix_loop / #build_fix_loop_message
+- `bin/herdr-task` #set_status（verdict 落盘）/ #close_workflow（--abandon、
+  outcome）/ #reopen_workflow / #_clear_suppress_auto_close
+- `console/herdr_factory_console.py` #create_candidate / #manual_advance
+- `tests/test_fix_loop_pr1.py`、`tests/test_fix_loop_gates.py`
+
 ---
 
 ## 2. CoW (Copy-on-Write) 沙盒隔离机制

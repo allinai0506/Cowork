@@ -130,6 +130,90 @@ def create_task_branch(clone, task_id, agent, task_type, base_branch):
     return branch
 
 
+def checkout_onto_branch(clone, onto_branch):
+    """检出既有分支(fix-loop 续接:commit 直落开放中的 PR 分支)。
+
+    基线指纹在调用方紧随其后执行,因此本函数必须完成 origin 同步,
+    保证 PR 分支的既有提交不属于本任务基线。
+    """
+    fetch = subprocess.run(
+        [
+            "git", "-C", str(clone),
+            "fetch", "origin", onto_branch
+        ],
+        text=True,
+        capture_output=True
+    )
+
+    remote_exists = subprocess.run(
+        [
+            "git", "-C", str(clone),
+            "rev-parse", "--verify", "--quiet",
+            f"refs/remotes/origin/{onto_branch}"
+        ]
+    ).returncode == 0
+
+    if fetch.returncode != 0 or not remote_exists:
+        detail = fetch.stderr.strip() or fetch.stdout.strip()
+        raise RuntimeError(
+            f"Onto branch not found on origin: {onto_branch}"
+            + (f"\n{detail}" if detail else "")
+        )
+
+    local_exists = subprocess.run(
+        [
+            "git", "-C", str(clone),
+            "show-ref", "--verify", "--quiet",
+            f"refs/heads/{onto_branch}"
+        ]
+    ).returncode == 0
+
+    if local_exists:
+        # 本地分支仅允许"领先"origin(未推送的续接提交);
+        # 与 origin 分叉的陈旧本地分支会让任务落在错误基线上,fail-fast。
+        ancestor = subprocess.run(
+            [
+                "git", "-C", str(clone),
+                "merge-base", "--is-ancestor",
+                f"origin/{onto_branch}", onto_branch,
+            ]
+        ).returncode == 0
+
+        if not ancestor:
+            raise RuntimeError(
+                f"Local branch {onto_branch} diverged from "
+                f"origin/{onto_branch}; delete or reset the local branch "
+                "before launching onto it"
+            )
+
+        result = subprocess.run(
+            [
+                "git", "-C", str(clone),
+                "switch", onto_branch
+            ],
+            text=True,
+            capture_output=True
+        )
+    else:
+        result = subprocess.run(
+            [
+                "git", "-C", str(clone),
+                "switch", "-c", onto_branch,
+                f"origin/{onto_branch}"
+            ],
+            text=True,
+            capture_output=True
+        )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip()
+            or result.stdout.strip()
+        )
+
+    return onto_branch
+
+
 def measure_complexity_baseline(clone):
     # HERDR_OPTIONAL_COMPLEXITY_GATE
     # Complexity gate is a per-repository capability, not a Herdr requirement.
@@ -477,6 +561,12 @@ def main():
         required=True
     )
 
+    parser.add_argument(
+        "--onto",
+        default=None,
+        help="Checkout this existing branch instead of creating a task branch."
+    )
+
     args = parser.parse_args()
 
     clone = create_clone(
@@ -486,13 +576,18 @@ def main():
 
     print(f"[CLONE] {clone}")
 
-    branch = create_task_branch(
-        clone,
-        args.task_id,
-        args.agent,
-        args.task_type,
-        args.base_branch
-    )
+    if args.onto:
+        # 必须先于 build_baseline_fingerprint:
+        # PR 分支的既有提交不能被记入本任务的基线变更。
+        branch = checkout_onto_branch(clone, args.onto)
+    else:
+        branch = create_task_branch(
+            clone,
+            args.task_id,
+            args.agent,
+            args.task_type,
+            args.base_branch
+        )
 
     print(f"[BRANCH] {branch}")
 

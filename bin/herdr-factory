@@ -26,6 +26,8 @@ try:
         register_workflow,
         mark_workflow_startup_ready,
         workflow_config_for,
+        active_workflows_for_project,
+        workflow_creation_lock,
     )
     from herdr.workflow import list_templates, load_template, get_ready_nodes
 except ImportError:
@@ -41,6 +43,8 @@ except ImportError:
         register_workflow,
         mark_workflow_startup_ready,
         workflow_config_for,
+        active_workflows_for_project,
+        workflow_creation_lock,
     )
     from herdr_workflow import list_templates, load_template, get_ready_nodes
 
@@ -258,6 +262,24 @@ def run_workflow_preflight(project, workflow_id):
 
 
 
+def _reject_if_active_workflow(project, force=False):
+    """同一项目工作流共享协调者 Pane 与阶段拓扑，并行注册只会产生幽灵竞争。"""
+    active = active_workflows_for_project(project["project_id"])
+    if not active or force:
+        return
+    lines = [f"项目 {project['project_name']} 已有活跃 Workflow，拒绝重复创建："]
+    for entry in active:
+        subject = entry.get("requirement_subject") or "（无主题）"
+        lines.append(f"  - {entry['workflow_id']}  主题: {subject}")
+    lines.append(
+        "同一项目共享协调者 Pane，不支持并行工作流。"
+        "请在控制台查看进度，或运行 herdr-task close-workflow <workflow_id> 清理后重试；"
+        "确需排队创建请加 --force。"
+    )
+    print("\n".join(lines), file=sys.stderr)
+    raise SystemExit(2)
+
+
 def start_workflow(
     requirement,
     workflow_id=None,
@@ -265,6 +287,7 @@ def start_workflow(
     project_path=None,
     agent_override="auto",
     template="software-development-v1",
+    force=False,
 ):
     project = resolve_project(project_path, create=True, template_name=template)
 
@@ -275,7 +298,10 @@ def start_workflow(
             f"{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         )
 
-    register_workflow(workflow_id, project, requirement=requirement)
+    # 检查与注册必须持同一把进程锁，否则两个并发创建都能通过活跃检查。
+    with workflow_creation_lock(project["project_id"]):
+        _reject_if_active_workflow(project, force=force or e2e)
+        register_workflow(workflow_id, project, requirement=requirement)
 
     ensure_pool_for_project(project["project_id"])
     healthy_agents, unhealthy_agents = run_workflow_preflight(
@@ -536,6 +562,7 @@ def main():
     run_cmd.add_argument("--project")
     run_cmd.add_argument("--agent", default="auto")
     run_cmd.add_argument("--template", default="software-development-v1", help="Workflow template to use")
+    run_cmd.add_argument("--force", action="store_true", help="项目已有活跃 Workflow 时仍强制创建（排队）")
 
     status_cmd = sub.add_parser("status")
     status_cmd.add_argument("workflow_id")
@@ -577,6 +604,7 @@ def main():
             project_path=args.project,
             agent_override=args.agent,
             template=args.template,
+            force=args.force,
         )
         sys.exit(0 if workflow_id else 1)
 

@@ -55,6 +55,11 @@ herdr-task launch \
   [--source <project_root>]
 ```
 > 注：`--stage` 可作为 `--node` 的兼容别名。
+>
+> Fix-loop 续接参数：`--onto <branch>` 让 Task 的 CoW Clone 直接检出现有分支
+> （如开放中的 PR 分支），commit 落在该分支上直接更新 PR；origin 拉取后分支
+> 不存在即 fail-fast，本地分支与 origin 分叉同样拒绝（仅允许本地领先）。
+> `--supersedes <task_id>` 派发同时原子作废旧 Task（`failed→superseded` 合法）。
 
 ### 2.2 `herdr-task node-status`
 查询 Workflow 指定节点的任务状态与 DAG 依赖摘要。
@@ -110,6 +115,26 @@ herdr-task close-workflow <workflow_id> [--include-coordinator] [--purge-clones]
 - 零任务的已登记 workflow 视为平凡完成,直接标记。
 
 ---
+
+### 2.8 `herdr-task reopen-workflow`
+重开已关闭（completed）的 workflow，续用原有 workflow/PR 上下文做 fix-loop。
+```bash
+herdr-task reopen-workflow <workflow_id>
+```
+- 前置：registry 状态必须为 `completed`，且总指挥 pane 存活；
+- 动作：状态翻转为 `in_progress`、重置阶段锁、置 `suppress_auto_close` 闩
+  （防止周期 sweep 在首个 fix task 派发前将 workflow 自消除回 completed；
+  闩在任一任务进入 ACTIVE 状态时自动摘除）；
+- 已拆除的 clone/pane 不恢复，由后续 `launch` 的 `ensure_node_runtime` 按需重建。
+
+### 2.9 `herdr-task set`（门禁 verdict 扩展）
+```bash
+herdr-task set <task_id> completed --verdict pass|blocked [--note "<blocker 清单>"]
+```
+- `--verdict` 仅在目标状态为 `completed` 时合法；`blocked` 必须带 `--note`；
+- 落盘为任务的 `stage_verdict` / `stage_verdict_note` 字段，Controller 的
+  阶段推进门禁与 workflow 完成门禁据此判定；
+- 对已 `completed` 的任务补落 verdict 同样生效。
 
 ## 3. `herdr-preflight` 命令
 

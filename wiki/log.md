@@ -99,3 +99,35 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   `docs/walkthroughs/20260913-workflow-finalize.md`;教训沉淀 §9。
 - 验证:134 tests passed;真实端到端——wf-…-232500 手动收尾 + 历史 workflow
   自动收尾,9/9 workflows completed,pane 24→1。
+
+## [2026-09-13] feat | Fix-loop: gate verdicts, atomic invalidation, delivery-outcome gates
+评审"不通过"原先只活在自然语言里,交付被阻断的 workflow 仍被归档 completed
+(wf-nexusarchive-…-084418 复盘)。本次落地 fix-loop 设计 v2(经对抗性思维链
+审查修订,见 docs/walkthroughs/20260913-fix-loop-design.md §8):
+- Added [[task-lifecycle]] §1.1 + [[dag-workflow-engine]] §10:门禁阶段
+  (test/review/wrapup)落盘 `stage_verdict`,`blocked` 触发 controller 原子
+  作废(gate+下游,finalize-first 规避非法转移窗口)并派发 fix_loop 事件,
+  fix 完成后 DAG 自动重流;交付终态门禁阻止 blocked workflow 被关闭。
+- `launch --onto`(commit 直落 PR 分支)、`reopen-workflow`(suppress_auto_close
+  闩防 sweep 自消除)、`close-workflow --abandon`(outcome 语义)、console
+  create_candidate/manual_advance 门禁封堵一键合并旁路。
+- 教训 §12:流程完成≠交付完成;审查轮 1 抓到 verdict 死循环/重测缺失/
+  reopen 自消除三处设计级漏洞后修复。
+- 验证:183 tests passed;独立审查两轮。
+
+## [2026-09-13] fix | Terminal-state gates: ghost-advance elimination + duplicate-creation guard
+已关闭/零任务工作流被 controller 逐阶段"真空推进"并向共享协调者 Pane 注入幽灵
+提示，协调者照办派发了 3 个真实任务（wf-…-111426 幽灵事故）；同项目重复创建
+无任何防护。三层落地：
+- [[architecture]] §2.1 增补终态闸门与创建闸门两条 FACT：推进扫描只遍历
+  非终态条目 + 消费线程 fire 前再校验；herdr-factory 注册前 flock 内原子
+  执行「同项目活跃检查 + 注册」，`--force` 为唯一逃生口。
+- 共享谓词收敛到 `herdr/projects.py`（`workflow_closed` 等 5 个），factory
+  消费；controller 内联同语义实现；单测 `tests/test_workflow_registry_guards.py`。
+- Console 创建反馈闭环：成功后解析 `WORKFLOW_ID=` 自动切换到新工作流视图，
+  等待期显示耗时与"请勿重复创建"提示。
+- 运维卫生：legacy 顶层 workflow.json（09-11 e2e 残留，registry-less fallback
+  复燃路径）已归档；24 个 e2e/测试 stage-state 僵尸键清除。
+- 活体验证：创建闸门 exit 2 拒绝 + 注册表零新增；测试工作流 125332 被新版
+  controller 判定完成并干净自动关闭（无幽灵推进）。教训沉淀 §13；决策与
+  会话碰撞记录见 `docs/walkthroughs/20260913-controller-ghost-advance-and-create-guard.md`。

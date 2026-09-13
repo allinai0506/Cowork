@@ -98,3 +98,15 @@ Evidence:
 - `herdr/workflow.py#get_ready_nodes`
 - `herdr/workflow.py#is_workflow_completed`
 - `tests/test_workflow_engine.py#test_join_waits_for_all_dependencies`
+
+## 10. 门禁 verdict 与 fix-loop 回路
+
+`FACT` 阶段结论（pass/blocked）是 DAG 推进的一等输入，与任务完成态正交：
+`is_node_complete` 只看任务状态，门禁判定在 `check_workflow_stage_advance`
+的 ready-node 循环与 workflow 完成分支两处读取 verdict（详见
+[[task-lifecycle]] §1.1）。blocked 的处理不是报错而是**结构回流**：原子作废
+gate+下游任务 → 节点回归未完成 → 既有 `reconcile_stage_advance_states` +
+`get_ready_nodes` 机制驱动 DAG 在 fix 完成后自动重流，无需新状态机状态。
+
+Evidence: `services/herdr-controller.py` #check_workflow_stage_advance /
+#blocked_gate_dependency；`docs/walkthroughs/20260913-fix-loop-design.md`

@@ -406,8 +406,14 @@ def ask_coordinator(tid):
     if r.returncode!=0:raise RuntimeError(r.stderr.strip() or r.stdout.strip())
     return {'ok':True}
 
+def _blocked_verdict_tasks(wid):
+    return [t for t in tasks_for_workflow(wid)
+            if t.get('status')!='superseded' and t.get('stage_verdict')=='blocked']
+
 def manual_advance(wid):
     d=workflow_detail(wid); done=None; nxt=None
+    bl=_blocked_verdict_tasks(wid)
+    if bl:raise RuntimeError('存在 blocked 验收结论('+', '.join(t['task_id'] for t in bl)+'),禁止手工推进;请先走 fix-loop(修复→重测→复审)或作废过期结论')
     for i,s in enumerate(d['stages']):
         if s['status'] in {'cleaned','finalizing'}:
             done=s['key']; nxt=d['stages'][i+1]['key'] if i+1<len(d['stages']) else None
@@ -422,6 +428,8 @@ def manual_advance(wid):
 def create_candidate(wid):
     allw=load_json(WORKFLOWS_FILE,{'workflows':{}}); w=allw.get('workflows',{}).get(wid)
     if not w:raise RuntimeError('Workflow 不存在')
+    bl=_blocked_verdict_tasks(wid)
+    if bl:raise RuntimeError('存在 blocked 验收结论('+', '.join(t['task_id'] for t in bl)+'),拒绝创建候选分支;请先完成 fix-loop 闭环或显式处理阻断,避免把未修复的交付合入候选分支')
     p=project_for_workflow(wid); repo=p.get('project_root'); base=w.get('original_base_branch') or p.get('base_branch'); cand=w.get('candidate_branch') or f'herdr/workflow-{wid}'
     tracked=run(['git','-C',repo,'status','--porcelain','--untracked-files=no'],check=True).stdout.strip()
     if tracked:raise RuntimeError('主仓库存在 tracked 修改，拒绝创建候选分支:\n'+tracked)
@@ -451,13 +459,20 @@ const VIEW_KEY='herdrConsoleView';
 function saveViewState(){try{localStorage.setItem(VIEW_KEY,JSON.stringify({opsMode:state.opsMode,spaceId:state.spaceId,workflowId:state.workflowId}))}catch(e){}}
 function loadViewState(){try{return JSON.parse(localStorage.getItem(VIEW_KEY)||'null')}catch(e){return null}}
 async function waitForWorkflowJob(jobId){
-  for(let i=0;i<180;i++){
-    const job=await api('/api/run/status?id='+encodeURIComponent(jobId));
-    if(job.status==='succeeded')return job;
-    if(job.status==='failed')throw new Error(job.error||'Workflow 启动失败');
-    await new Promise(resolve=>setTimeout(resolve,1000));
+  try{
+    for(let i=1;i<=180;i++){
+      const job=await api('/api/run/status?id='+encodeURIComponent(jobId));
+      if(job.status==='succeeded')return job;
+      if(job.status==='failed')throw new Error(job.error||'Workflow 启动失败');
+      const wait=document.getElementById('runWaitStatus');
+      if(wait)wait.textContent='深度体检与启动中… '+i+'s（深度体检约 1–2 分钟，请勿重复创建）';
+      await new Promise(resolve=>setTimeout(resolve,1000));
+    }
+    throw new Error('Workflow 启动超时，请到运维驾驶舱查看状态');
+  }finally{
+    const wait=document.getElementById('runWaitStatus');
+    if(wait)wait.textContent='';
   }
-  throw new Error('Workflow 启动超时，请到运维驾驶舱查看状态');
 }
 async function submitNewWorkflowAsync(){
   const button=[...document.querySelectorAll('#modal button')].find(x=>x.textContent.includes('启动 Workflow'));
@@ -470,7 +485,10 @@ async function submitNewWorkflowAsync(){
     toast('正在创建 Workflow…');
     const job=await api('/api/run',{method:'POST',body:JSON.stringify({project_root:state.project.project.project_root,requirement:q,agent:a,template:t})});
     const result=await waitForWorkflowJob(job.job_id);
-    closeModal();await refreshAll();toast('Workflow 已启动：'+(result.output||'已提交'));
+    const m=/(?:^|\n)WORKFLOW_ID=(\S+)/.exec(result.output||'');
+    if(m){state.workflowId=m[1];saveViewState()}
+    closeModal();await refreshAll();
+    toast('Workflow 已启动：'+(m?m[1]:(result.output||'已提交')));
   }catch(e){
     if(button){button.disabled=false;button.textContent='重试启动 Workflow'}
     const body=document.getElementById('modalBody');
@@ -870,7 +888,7 @@ function renderTasks(){
     </div>`).join('')
 }
 function renderAgents(){const rs=state.project.agents||[];document.getElementById('agents').innerHTML=rs.length?rs.map(a=>`<div class="agent-row"><span><i class="dot ${esc(a.status)}"></i>${esc(a.agent)}</span><span class="muted">${esc(agentStatusLabel(a.status))} · 负载 ${a.load} · 认证 ${esc(authHintLabel(a.auth_hint))}</span></div>`).join(''):'<div class="empty">暂无执行者信息</div>'}function renderSlots(){const rs=state.project.slots||[];document.getElementById('slots').innerHTML=rs.length?rs.map(s=>`<div class="slot-row"><div><div>${esc(s.pane_id)} · ${esc(s.stage_label)}</div><div class="task-meta">绑定 ${esc(s.bound_agent)} · 运行时 ${esc(s.live_agent||'空闲')} · ${esc(s.claimed_by?'被任务占用':'未占用')}</div></div><button class="mini" onclick="bindSlotPrompt('${esc(s.pane_id)}')">绑定</button></div>`).join(''):'<div class="empty">暂无用户预建智能体工位</div>'}
-function openModal(t,h){document.getElementById('modalTitle').textContent=t;document.getElementById('modalBody').innerHTML=h;document.getElementById('modal').classList.add('open')}function closeModal(){document.getElementById('modal').classList.remove('open')}function showNewWorkflow(){if(!state.project||!state.space||state.space.relation!=='current_factory')return toast('请先选择当前工厂空间',true);openModal('新建需求',`<div class="form"><label>项目</label><input value="${esc(state.project.project.project_name)}" disabled><label>工作流模板</label><select id="newTemplate"><option value="software-development-v1">software-development-v1（默认软件开发）</option></select><label>执行者策略</label><select id="newAgent"><option value="auto">auto（Router 自动）</option>${['opencode','codex','claude','qodercli','agy','pi'].map(a=>`<option>${a}</option>`).join('')}</select><label>自然语言需求</label><textarea id="newRequirement"></textarea><button class="btn primary" onclick="submitNewWorkflow()">启动 Workflow</button></div>`);populateTemplateSelect()}async function submitNewWorkflow(){const q=document.getElementById('newRequirement').value.trim(),a=document.getElementById('newAgent').value,t=document.getElementById('newTemplate').value;if(!q)return toast('请输入需求',true);try{toast('正在启动 Workflow…');await api('/api/run',{method:'POST',body:JSON.stringify({project_root:state.project.project.project_root,requirement:q,agent:a,template:t})});closeModal();await refreshAll();toast('Workflow 已启动')}catch(e){toast(e.message,true)}}async function runPreflight(){
+function openModal(t,h){document.getElementById('modalTitle').textContent=t;document.getElementById('modalBody').innerHTML=h;document.getElementById('modal').classList.add('open')}function closeModal(){document.getElementById('modal').classList.remove('open')}function showNewWorkflow(){if(!state.project||!state.space||state.space.relation!=='current_factory')return toast('请先选择当前工厂空间',true);openModal('新建需求',`<div class="form"><label>项目</label><input value="${esc(state.project.project.project_name)}" disabled><label>工作流模板</label><select id="newTemplate"><option value="software-development-v1">software-development-v1（默认软件开发）</option></select><label>执行者策略</label><select id="newAgent"><option value="auto">auto（Router 自动）</option>${['opencode','codex','claude','qodercli','agy','pi'].map(a=>`<option>${a}</option>`).join('')}</select><label>自然语言需求</label><textarea id="newRequirement"></textarea><button class="btn primary" onclick="submitNewWorkflow()">启动 Workflow</button><div id="runWaitStatus" class="muted" style="min-height:16px;font-size:12px"></div></div>`);populateTemplateSelect()}async function submitNewWorkflow(){const q=document.getElementById('newRequirement').value.trim(),a=document.getElementById('newAgent').value,t=document.getElementById('newTemplate').value;if(!q)return toast('请输入需求',true);try{toast('正在启动 Workflow…');await api('/api/run',{method:'POST',body:JSON.stringify({project_root:state.project.project.project_root,requirement:q,agent:a,template:t})});closeModal();await refreshAll();toast('Workflow 已启动')}catch(e){toast(e.message,true)}}async function runPreflight(){
   if(!state.projectId)return toast('当前空间不参与工厂调度',true);
   try{
     toast('正在执行深度自检…');
