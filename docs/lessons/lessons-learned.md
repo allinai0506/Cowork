@@ -501,3 +501,42 @@ grep "herdr-agent-state" ~/.qoder-cn/logs/runs/<run>/qodercli.log  # hook.starte
 ```
 
 决策全记录：`docs/walkthroughs/20260913-qodercn-agent-identity-fix.md`。
+
+
+## 12. 流程完成 ≠ 交付完成:质量门的"不通过"必须驱动结构回流,而非归档
+
+### 问题背景
+
+wf-nexusarchive-…-084418 全流程走完:评审产出 B1(P0)阻断结论,但结论只存在
+于自然语言报告——引擎 `is_node_complete` 只看任务状态,照常推进 wrapup 并将
+交付被阻断(PR 禁合)的 workflow 归档 `completed`。修复只能在新的孤立
+workflow 里另起炉灶,丢失 PR 关联与阶段历史。审查轮 1(对抗性)进一步发现
+初版设计三处结构漏洞:verdict 死循环(作废范围漏 gate 自身)、重测缺失
+(下游闭包不完整)、reopen 自消除(sweep 会把重开的 workflow 秒回 closed)。
+
+### 经验教训
+
+| 教训 | 说明 |
+|------|------|
+| 完成态判定与结论语义是两层 | 任务"完成"只证明交付物存在;pass/blocked 是另一维状态。质量门的结论必须有机器可读载体并被推进逻辑消费,否则最强质量信号被浪费 |
+| 回流的正确粒度是"retry_node 全部下游" | 只回炉 gate 自身会死循环(旧 verdict 残留),只回炉 gate 不回炉下游会跳过重测。作废闭包必须覆盖 gate+全部下游 |
+| 结构性消除竞态优于防线叠加 | "节点未完成"本身就是闩(作废后周期 sweep 打不穿),不需要额外锁位;给 gate 打 notified 反而会被 reconcile 的前置依赖判定卡成永久停摆 |
+| reopen 类"复活"操作自带自消除竞态 | 旧状态仍满足终态判定时,下一个周期事件就会把它再次终结。需要显式闩 + 明确的摘除时机(首个活跃任务) |
+| 独立审查要给对抗性清单,并复核其建议 | 审查抓到 3 个设计级漏洞,但也给出 1 个会造成永久停摆的修法(用回归测试证伪后拒绝) |
+
+### 操作规范
+
+1. 门禁阶段验收必须落 verdict:`herdr-task set <t> completed --verdict
+   pass|blocked --note`(blocked 必填 note);
+2. blocked 的恢复路径:Controller 自动作废 gate+下游 → 总指挥按 fix_loop
+   事件派发 fix task(`--onto` 落 PR 分支)→ DAG 自动重流;禁止新建
+   workflow、禁止放弃;
+3. 放弃交付必须显式:`close-workflow --abandon`(outcome=abandoned),
+   console 的候选分支合并/手工推进遇 blocked verdict 一律拒绝;
+4. 复用已关闭 workflow:`reopen-workflow`,首个任务派发前闩保护。
+
+### 验证命令 / 证据
+
+- `/opt/homebrew/bin/pytest tests/`(183 passed,含 fix-loop 33 用例);
+- 设计与审查记录:`docs/walkthroughs/20260913-fix-loop-design.md`(§8 审查修订);
+- 知识同步:`wiki/task-lifecycle.md` §1.1、`wiki/dag-workflow-engine.md` §10。

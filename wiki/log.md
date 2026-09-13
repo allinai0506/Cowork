@@ -99,3 +99,19 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   `docs/walkthroughs/20260913-workflow-finalize.md`;教训沉淀 §9。
 - 验证:134 tests passed;真实端到端——wf-…-232500 手动收尾 + 历史 workflow
   自动收尾,9/9 workflows completed,pane 24→1。
+
+
+## [2026-09-13] feat | Fix-loop: gate verdicts, atomic invalidation, delivery-outcome gates
+评审"不通过"原先只活在自然语言里,交付被阻断的 workflow 仍被归档 completed
+(wf-nexusarchive-…-084418 复盘)。本次落地 fix-loop 设计 v2(经对抗性思维链
+审查修订,见 docs/walkthroughs/20260913-fix-loop-design.md §8):
+- Added [[task-lifecycle]] §1.1 + [[dag-workflow-engine]] §10:门禁阶段
+  (test/review/wrapup)落盘 `stage_verdict`,`blocked` 触发 controller 原子
+  作废(gate+下游,finalize-first 规避非法转移窗口)并派发 fix_loop 事件,
+  fix 完成后 DAG 自动重流;交付终态门禁阻止 blocked workflow 被关闭。
+- `launch --onto`(commit 直落 PR 分支)、`reopen-workflow`(suppress_auto_close
+  闩防 sweep 自消除)、`close-workflow --abandon`(outcome 语义)、console
+  create_candidate/manual_advance 门禁封堵一键合并旁路。
+- 教训 §12:流程完成≠交付完成;审查轮 1 抓到 verdict 死循环/重测缺失/
+  reopen 自消除三处设计级漏洞后修复。
+- 验证:183 tests passed;独立审查两轮。

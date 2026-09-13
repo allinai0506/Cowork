@@ -2,7 +2,16 @@
 
 > 日期:2026-09-13
 > 背景:wf-nexusarchive-…-084418 复盘——评审 B1(P0)阻断交付,引擎却以"流程走完"将 workflow 归档 completed;零执行守卫(zero-exec guard,已上线)解决的是"假 done",本设计解决的是更深一层:**质量门的"不通过"信号没有回路消费**。
-> 状态:设计稿 v2(经对抗性思维链审查修订),待确认后实现(未提交)
+> 状态:v2 已实现并合入分支 feat/fix-loop-onto-reopen(PR-1:61d0d63)与
+> feat/fix-loop-gates(PR-2:08949e6 + 审查修复 d9a22cb);独立审查两轮,
+> 全量 183 tests passed。实现与设计的偏差:①门禁默认值以代码层
+> `GATE_DEFAULTS` 取代"内置模板配 gate"(模板无 stage_policies,行为等价);
+> ②console create_candidate 一律拒绝 blocked verdict(未提供 force 参数,
+> 逃生口=作废过期结论),比设计更严格;③审查轮 1 建议"作废后给 gate 打
+> notified"被否决——reconcile 不会吊销依赖已恢复的 notified,会造成重流
+> 永久停摆,改用两个回归测试证明时序(test_reflow_*);④审查 agent 曾越权
+> 提交 factory 创建守卫与 projects.py helper,已剔除出本任务分支
+> (备份:backup/agent-unsolicited),未纳入本次交付。
 > v1→v2 修订记录见 §8(4 处漏洞 + 2 处绕弯)
 
 ---
