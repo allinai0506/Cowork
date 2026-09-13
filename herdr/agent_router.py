@@ -84,24 +84,67 @@ def _get_store():
         from herdr.state_store import get_state_store
     if os.environ.get("HERDR_STATE_DB"):
         return get_state_store(Path(os.environ["HERDR_STATE_DB"]))
-    wf_file = os.environ.get("WORKFLOWS_FILE") or globals().get("WORKFLOWS_FILE")
-    if wf_file:
+    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+    if t_file and Path(t_file) != (ROOT / "tasks.json"):
+        p = Path(t_file)
+        db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE")
+    if wf_file and Path(wf_file) != (ROOT / "workflows.json"):
         p = Path(wf_file)
         db_path = p.parent / "state.db" if p.name == "workflows.json" else p.with_suffix(".db")
         if db_path.parent.exists():
             return get_state_store(db_path=db_path)
-    t_file = os.environ.get("TASKS_FILE") or globals().get("TASKS_FILE")
-    if t_file:
-        p = Path(t_file)
+    if os.environ.get("TASKS_FILE"):
+        p = Path(os.environ["TASKS_FILE"])
         db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    if os.environ.get("WORKFLOWS_FILE"):
+        p = Path(os.environ["WORKFLOWS_FILE"])
+        db_path = p.parent / "state.db" if p.name == "workflows.json" else p.with_suffix(".db")
         if db_path.parent.exists():
             return get_state_store(db_path=db_path)
     return get_state_store()
 
 
+def _sync_missing_tasks_into_store(store):
+    try:
+        t_file = Path(globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE") or TASKS_FILE)
+        if t_file.exists():
+            disk_data = _load(t_file, {})
+            if isinstance(disk_data, dict):
+                for t in disk_data.get("tasks", []):
+                    if isinstance(t, dict):
+                        tid = t.get("task_id")
+                        if tid and not store.get_task(tid):
+                            store.save_task(t)
+    except Exception:
+        pass
+
+
+def _sync_missing_workflows_into_store(store):
+    try:
+        wf_file = Path(globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE)
+        if wf_file.exists():
+            disk_data = _load(wf_file, {})
+            if isinstance(disk_data, dict):
+                for wid, wf in disk_data.get("workflows", {}).items():
+                    if isinstance(wf, dict):
+                        wf.setdefault("workflow_id", wid)
+                        existing = store.get_workflow(wid)
+                        is_placeholder = bool(existing and existing.get("status") == "unknown" and not existing.get("project_id"))
+                        if not existing or is_placeholder:
+                            store.save_workflow(wf)
+    except Exception:
+        pass
+
+
 def workflow_record(workflow_id):
     try:
         store = _get_store()
+        _sync_missing_workflows_into_store(store)
         wf = store.get_workflow(workflow_id)
         if wf and not (wf.get("status") == "unknown" and not wf.get("project_id")):
             return wf
@@ -115,6 +158,7 @@ def set_workflow_agent_override(workflow_id, agent):
     store = None
     try:
         store = _get_store()
+        _sync_missing_workflows_into_store(store)
     except Exception:
         pass
 
@@ -148,6 +192,7 @@ def _clean_reservations(data, ttl=300):
     now = time.time()
     try:
         store = _get_store()
+        _sync_missing_tasks_into_store(store)
         tasks = store.list_tasks()
     except Exception:
         t_data = _load(TASKS_FILE, {"tasks": []})
@@ -191,6 +236,7 @@ def release_agent_reservation(task_id):
 def _active_agent_loads(project_id):
     try:
         store = _get_store()
+        _sync_missing_tasks_into_store(store)
         tasks = store.list_tasks()
     except Exception:
         t_data = _load(TASKS_FILE, {"tasks": []})

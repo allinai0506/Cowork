@@ -282,6 +282,7 @@ def project_by_root(root):
 def project_for_workflow(workflow_id):
     try:
         store = _get_store()
+        _sync_missing_workflows_into_store(store)
         record = store.get_workflow(workflow_id)
         if record and not (record.get("status") == "unknown" and not record.get("project_id")):
             return record
@@ -365,6 +366,7 @@ def generate_workflow_id(project, prefix="wf", now=None):
     existing_seqs = []
     try:
         store = _get_store()
+        _sync_missing_workflows_into_store(store)
         workflows = {w["workflow_id"]: w for w in store.list_workflows() if w.get("workflow_id")}
     except Exception:
         workflows = load_workflows().get("workflows", {})
