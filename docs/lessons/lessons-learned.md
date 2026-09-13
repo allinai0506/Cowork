@@ -742,3 +742,105 @@ bin/herdr-factory pause <workflow_id>
 bin/herdr-factory resume <workflow_id>
 ```
 
+
+---
+
+## 18. Stale 运行时状态击穿回炉状态陷阱（reconcile 不能用外部瞬态覆盖持久化意图态）
+
+### 问题背景
+
+任务 `111049` 触发 `rework`（总指挥裁决打回重做）后，Controller 的 `reconcile_task_state` 在下一个周期扫到该 Pane 运行时仍报 `done`（上一轮进程残留），立即将任务从 `rework` 提升为 `agent_done`，绕过了总指挥的回炉裁决，导致工作流错误推进到下一阶段。
+
+**关键误解**：`reconcile` 的原始设计意图是"如果运行时已完成而调度状态落后，就同步"。但 `rework` 是持久化的**意图态**（由人/总指挥主动写入），不是可以被运行时快照覆盖的派发态。
+
+### 经验教训
+
+1. **持久化意图态 vs. 运行时快照态必须分层**：`pending / dispatched / working` 等由 Controller 自动推进的态，可以被运行时快照同步；`rework / paused / blocked` 等由人工/总指挥裁决写入的态，属于意图态，**严禁**被来自外部运行时的瞬态信号覆盖。
+2. **Reconcile 的准入白名单原则**：`reconcile_task_state` 只允许在明确的"派发中但运行时已先完成"场景下触发状态提升，任何非 `dispatched/working` 的源态都应直接 skip。
+3. **Stale 进程问题的结构根因**：运行时报告 `done` 不代表当前任务完成——可能是旧进程残留、Pane 复用遗留、或调度竞态。必须结合任务的 `started_at` 时间戳与进程 PID 做二次确认，而非单纯信任 `done` 快照。
+
+### 操作规范（已固化到 `services/herdr-controller.py`）
+
+```python
+# reconcile_task_state 的防御写法（PR #7 修复）
+def reconcile_task_state(task, runtime_status):
+    current = task.get("status")
+    # 意图态白名单：仅允许从派发态提升，回炉/暂停态绝对不允许被运行时覆盖
+    RECONCILE_ALLOWED_SOURCES = {"dispatched", "working"}
+    if current not in RECONCILE_ALLOWED_SOURCES:
+        return  # 意图态，跳过 reconcile
+    if runtime_status == "done":
+        advance_to_agent_done(task)
+```
+
+### 验证命令 / 证据
+
+```bash
+# 精准回归：确认 rework 任务在运行时报 done 时不被翻转
+pytest tests/test_fix_loop_anti_flapping.py::ControllerReconcileReworkTest -v
+
+# Git 证据
+# PR #7 commit c263211
+# services/herdr-controller.py: reconcile_task_state 防御补丁
+```
+
+### 相关文档 / 关联证据
+
+- PR #7: https://github.com/allinai0506/Cowork/pull/7
+- 修复文件: `services/herdr-controller.py`（`reconcile_task_state` 函数）
+- 测试文件: `tests/test_fix_loop_anti_flapping.py`
+
+---
+
+## 19. Fire-and-Forget 工位的系统性质量失控：Agent 必须有 Inner Loop 强制自验才能保证交付质量
+
+### 问题背景
+
+工位 Agent 在没有强制自检约束的情况下，会在完成代码编写后立即输出 `HERDR_TASK_DONE`，跳过测试运行与质量验证。这导致：①总指挥收到"完成"信号后进行宏观验收时发现代码有明显错误；②修复责任回流给总指挥，总指挥被迫盯微观细节（违反双环分工）；③Fix-Loop 频繁触发，系统进入高频返工震荡。
+
+**根本缺陷**：系统缺少"工位不得在自检通过前交卷"的结构性约束。
+
+### 经验教训
+
+1. **Agent 系统的"完成"不等于"质量达标"**：输出完成标记是一个行为，通过自检是一个质量门。没有强制绑定两者的机制，Agent 会自然地走最短路径——直接完成，不验证。
+2. **铁律必须在系统层面注入，不能依赖 Agent 的自觉**：Prompt 里的"建议"没有强制力，必须通过可量化的评估工具（`herdr-loop eval`）+ 明确的行为约束（禁止在得分 < 100.0 时输出完成标记）构成结构性约束。
+3. **熔断路径必须有明确协议**：当工位无法自愈时，必须有标准化的"求助信号"（`HERDR_TASK_BLOCKER`）让调度层感知，而不是静默卡死或直接失败。这条路径的缺失会导致 Agent 要么死循环自愈，要么直接 bail out 交出不完整的产物。
+4. **双环分工的工程保障**：总指挥只做宏观验收的前提是工位已经完成了微观自验。没有 Inner Loop 机制，双环就是空谈。
+
+### 操作规范（已固化到 `bin/herdr-task`、`herdr/evaluator.py`、`services/herdr-sentinel.py`）
+
+1. **启动时装配 `.herdr-loop`**：`auto_init_task_loop()` 在任务 Clone 目录生成 `GOAL.md` + `EVALUATOR.sh` + `STATE.md`；
+2. **Prompt 铁律注入**：`dispatch_task()` 在 `.herdr-loop` 存在时注入三条铁律（禁止未通过自检就交卷、禁止放弃工位、禁止上报局部问题）；
+3. **熔断求助协议**：工位达到 `max_iterations` 时，`herdr-loop eval` 自动生成 `BLOCKER.md`，Agent 输出 `HERDR_TASK_BLOCKER:<task_id>`，Sentinel 检测后将任务转为 `blocked`（reason: `inner_loop_exhausted`），路由给总指挥仲裁；
+4. **Sentinel 感知 BLOCKER 信号**：与感知 `HERDR_TASK_DONE` 平级的信号通道，保证熔断路径有调度层支撑。
+
+### 验证命令 / 证据
+
+```bash
+# Inner Loop 协议回归（15 个用例）
+pytest tests/test_inner_loop_protocol.py -v
+
+# BLOCKER.md 生成验证
+python -c "
+from herdr.evaluator import generate_blocker_report, MetricVector, LOOP_DIR_NAME
+from pathlib import Path
+import tempfile, json
+with tempfile.TemporaryDirectory() as d:
+    loop_dir = Path(d) / LOOP_DIR_NAME
+    loop_dir.mkdir()
+    m = MetricVector(composite_score=55.0, failing_tests=['test_x'], lint_errors=1)
+    f = generate_blocker_report(loop_dir, m, iteration=3, max_iter=3)
+    print(f.read_text())
+"
+
+# Git 证据
+# PR #7 commit c263211
+```
+
+### 相关文档 / 关联证据
+
+- PR #7: https://github.com/allinai0506/Cowork/pull/7
+- 实现文件: `bin/herdr-task`（loop_suffix 铁律注入）、`herdr/evaluator.py`（`generate_blocker_report`）、`services/herdr-sentinel.py`（BLOCKER 信号检测）
+- 测试文件: `tests/test_inner_loop_protocol.py`
+- 设计文档: `docs/walkthroughs/北极星架构体系：通用人机协同运行时 (Universal Human-Agent Collaborative Runtime).md`
+

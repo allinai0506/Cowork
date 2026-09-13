@@ -1812,6 +1812,7 @@ task_type:
     )
 
     try:
+        last_busy_log = 0
         while True:
             task = get_task(task_id)
 
@@ -1917,13 +1918,16 @@ task_type:
 
                 break
 
-            print(
-                f"[COORDINATOR BUSY] "
-                f"status={status} "
-                f"task={task_id}"
-            )
+            now = time.time()
+            if now - last_busy_log >= 15:
+                last_busy_log = now
+                print(
+                    f"[COORDINATOR BUSY] "
+                    f"status={status} "
+                    f"task={task_id}"
+                )
 
-            time.sleep(1)
+            time.sleep(2)
 
     finally:
         with lock:
@@ -2189,10 +2193,7 @@ def reconcile_task_state(task_id):
 
             current = "working"
 
-        elif current in (
-            "blocked",
-            "rework"
-        ):
+        elif current == "blocked":
             if not set_task_status(
                 task_id,
                 "working"
@@ -2200,6 +2201,11 @@ def reconcile_task_state(task_id):
                 return
 
             current = "working"
+
+        elif current == "rework":
+            # rework 状态下的 runtime=done 必然是上一轮已退出进程的陈旧残留，
+            # 绝不能直接作为本轮完成，必须等待新派发启动后实际进入 working。
+            return
 
         if current == "working":
             if not set_task_status(
