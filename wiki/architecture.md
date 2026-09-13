@@ -73,7 +73,7 @@ Evidence:
 - `FACT` **核心职能**:
   1. 异步轮询 `tasks.json`。
   2. 触发条件：当任务进入关注状态（`blocked`, `failed`, `human_review`, `needs_action`）或整个 Workflow 全部完成时。
-  3. 通过 macOS 原生 `osascript -e 'display notification ... with sound "Glass"'` 弹出系统通知。
+  3. 通过 macOS 原生系统通知派发：优先使用 `terminal-notifier` 附带 `-open` 直达控制台 Deep-Link URL（`http://127.0.0.1:8765/?workflow_id=...&task_id=...`），未安装时安全降级为 `osascript`。
 
 Evidence:
 - `services/herdr-controller.py#main`
