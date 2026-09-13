@@ -261,6 +261,38 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 沉淀通用工程教训 §27（跨阶段全链路集成测试的持久化沙盒隔离陷阱）；
   - 全仓自动化回归测试达 321 项用例，100% 通过。
 
+## [2026-09-13] feat | Checkpoint Store V2: SQLite Embedded State Engine, Graph Lineage & Time-Travel Forking
+实现北极星架构体系状态引擎升级，基于纯 Python 标准库 `sqlite3` 构建嵌入式检查点与状态存储引擎：
+- **嵌入式 SQLite 状态底座 (`herdr/state_db.py`)**：
+  - 表结构模型：`workflows`、`tasks`、`checkpoints`、`events`，并设置索引加速检索；
+  - 并发与可靠性治理：开启 WAL 模式（`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`），支撑多进程安全并发读写；
+  - 单事务原子快照与回滚：`create_checkpoint`、`restore_checkpoint`，保障工作流元数据、节点 DAG、任务状态原子更新；
+  - 图谱谱系追踪与时间旅行分叉：检查点记录 `parent_id` 形成有向无环谱系图；`fork_workflow_from_checkpoint` 支持从历史任意快照分叉派生独立工作流，深置状态并清除调度锁；
+  - 零停机无损迁移：`migrate_v1_to_v2` 支持从历史 JSON 文件双向平滑导入 SQLite。
+- **内核控制透明桥接 (`herdr/kernel.py`)**：
+  - 桥接 `state_db`，实现 JSON 与 SQLite 双写归一，保证快照 ID 1:1 精确对齐；
+  - 优先通过 SQLite 加速快照检索与还原，平滑回退 JSON 存储保证 100% 向后兼容；
+  - 新增 `fork_workflow_from_checkpoint` 控制原语。
+- **CLI 命令行扩展 (`bin/herdr-task`)**：
+  - 新增 `checkpoint-create <workflow_id> [--label ...] [--parent ...]`；
+  - 新增 `checkpoint-list <workflow_id> [--json]`；
+  - 新增 `checkpoint-restore <checkpoint_id>`；
+  - 新增 `checkpoint-fork <checkpoint_id> [--new-workflow-id ...] [--title ...] [--json]`。
+- **质量防护与工程治理**：
+  - 遵循 Ponytail 极简原则：零外部三方依赖，纯标准库 `sqlite3`；
+  - 沉淀通用工程教训 §28（嵌套事务连接复用、双写 ID 归一与分叉锁清理）；
+  - 新增 `tests/test_state_db_v2.py`（9 项单元与集成测试全部通过）；
+  - 全仓 330 项自动化回归测试 100% 通过。
+
+## [2026-09-13] docs | Codified Functional Core, Pythonic Cohesion & Gradient Split Rules into RULES.md
+- **固化架构与分层红线 (`RULES.md`)**：
+  - **纯核心与装配解耦 (Functional Core, Imperative Shell)**：强制要求业务决策纯函数化（收敛于 `herdr/`），CLI (`bin/`) 与常驻守护进程 (`services/`) 仅作指令式外壳处理 I/O 与物理系统副作用；
+  - **模块内聚与反过度抽象**：坚决抵制 Java 式 DTO/DAO/Service 空壳分层与类爆炸，以高内聚模块与显式纯函数组织逻辑；
+  - **文件健康度与梯度拆分阈值**：废除机械行数硬限，确立 `herdr/` 300~500 行、CLI/Daemon 500~800 行的业务内聚梯度拆分准则。
+- **同步验收门禁 (`CLAUDE.md`)**：在严格验收清单中新增分层纯度与文件健康度核对项。
+
+
+
 
 
 
