@@ -457,10 +457,11 @@ def import_legacy_project(root, legacy_workflow=None):
     return record
 
 
-def provision_project(root, template_name="software-development-v1"):
+def provision_project(root, template_name="software-development-v1", project_name=None):
     root = canonical_root(root)
     project_id = project_id_for(root)
-    project_name = Path(root).name
+    if not project_name:
+        project_name = Path(root).name
 
     template = load_template(template_name)
     nodes = template.get("nodes", [])
@@ -566,6 +567,209 @@ def provision_project(root, template_name="software-development-v1"):
     data.setdefault("projects", {})[root] = record
     save_projects(data)
     return record
+
+
+def create_project(root, project_name=None, template_name="software-development-v1"):
+    root = canonical_root(root)
+    git_root = detect_git_root(root)
+    root = canonical_root(git_root)
+
+    record = project_by_root(root)
+    if record and _workspace_alive(record.get("workspace_id", "")):
+        return dict(record, already_registered=True)
+
+    return provision_project(root, template_name=template_name, project_name=project_name)
+
+
+def adopt_workspace_as_project(
+    workspace_id,
+    root=None,
+    template_name="software-development-v1",
+    project_name=None,
+):
+    if not _workspace_alive(workspace_id):
+        raise RuntimeError(f"Herdr 空间不存在或已关闭: {workspace_id}")
+
+    if not root:
+        pane_list_res = _run_json(["herdr", "pane", "list", "--workspace", workspace_id])
+        panes = pane_list_res.get("result", {}).get("panes", [])
+        for p in panes:
+            cwd = p.get("cwd") or p.get("foreground_cwd")
+            if cwd:
+                root = cwd
+                break
+
+    if not root:
+        raise ValueError(f"无法推断空间 {workspace_id} 的工作目录，请指定项目根路径")
+
+    root = canonical_root(root)
+    git_root = detect_git_root(root)
+    root = canonical_root(git_root)
+    project_id = project_id_for(root)
+    if not project_name:
+        project_name = Path(root).name
+
+    template = load_template(template_name)
+    nodes = template.get("nodes", [])
+
+    tab_list_res = _run_json(["herdr", "tab", "list", "--workspace", workspace_id])
+    tabs = tab_list_res.get("result", {}).get("tabs", [])
+    pane_list_res = _run_json(["herdr", "pane", "list", "--workspace", workspace_id])
+    panes = pane_list_res.get("result", {}).get("panes", [])
+
+    if not tabs:
+        raise RuntimeError(f"Herdr 空间 {workspace_id} 没有任何可用 Tab")
+
+    # 1. Coordinator Tab & Pane
+    coord_tab = next((t for t in tabs if "总指挥" in t.get("label", "")), None)
+    if not coord_tab:
+        coord_tab = tabs[0]
+        _run(["herdr", "tab", "rename", coord_tab["tab_id"], "1总指挥"], check=False)
+        coord_tab["label"] = "1总指挥"
+
+    coord_panes = [p for p in panes if p.get("tab_id") == coord_tab["tab_id"]]
+    coord_pane = next((p for p in coord_panes if p.get("label") == "总指挥"), None) or (coord_panes[0] if coord_panes else None)
+    if not coord_pane:
+        split_res = _run_json(["herdr", "pane", "split", coord_tab["tab_id"], "--cwd", root])
+        coord_pane = split_res.get("result", {}).get("pane", {})
+
+    coordinator_pane_id = coord_pane["pane_id"]
+    _run(["herdr", "pane", "rename", coordinator_pane_id, "总指挥"], check=False)
+    _start_coordinator(project_id, coordinator_pane_id)
+
+    # 2. Stage nodes Tabs & Anchor Panes
+    runtime_nodes = []
+    for node in nodes:
+        node_label = node["label"]
+        matched_tab = next(
+            (t for t in tabs if t["tab_id"] != coord_tab["tab_id"] and (t.get("label") == node_label or node_label in t.get("label", ""))),
+            None,
+        )
+        if matched_tab:
+            tab_id = matched_tab["tab_id"]
+            tab_panes = [p for p in panes if p.get("tab_id") == tab_id]
+            anchor_pane = next((p for p in tab_panes if p.get("label") == "Anchor"), None) or (tab_panes[0] if tab_panes else None)
+            if not anchor_pane:
+                split_res = _run_json(["herdr", "pane", "split", tab_id, "--cwd", root])
+                anchor_pane = split_res.get("result", {}).get("pane", {})
+            anchor_pane_id = anchor_pane["pane_id"]
+            _run(["herdr", "pane", "rename", anchor_pane_id, "Anchor"], check=False)
+        else:
+            created_tab = _run_json([
+                "herdr", "tab", "create",
+                "--workspace", workspace_id,
+                "--cwd", root,
+                "--label", node_label,
+                "--no-focus",
+            ])
+            tab_result = created_tab["result"]
+            tab_id = tab_result["tab"]["tab_id"]
+            anchor_pane_id = tab_result["root_pane"]["pane_id"]
+            _run(["herdr", "pane", "rename", anchor_pane_id, "Anchor"], check=False)
+
+        n = dict(node)
+        n["tab_id"] = tab_id
+        n["anchor_pane_id"] = anchor_pane_id
+        runtime_nodes.append(n)
+
+    workflow = {
+        "project_id": project_id,
+        "project_name": project_name,
+        "project_root": root,
+        "base_branch": detect_base_branch(root),
+        "workspace_id": workspace_id,
+        "workflow_template": template.get("name", template_name),
+        "coordinator": {
+            "tab_id": coord_tab["tab_id"],
+            "label": "1总指挥",
+            "pane_id": coordinator_pane_id,
+        },
+        "nodes": runtime_nodes,
+    }
+    workflow = normalize_workflow(workflow)
+
+    project_dir = ROOT / "projects" / project_id
+    project_dir.mkdir(parents=True, exist_ok=True)
+    workflow_file = project_dir / "workflow.json"
+    workflow_file.write_text(
+        json.dumps(workflow, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    record = {
+        "project_id": project_id,
+        "project_name": project_name,
+        "project_root": root,
+        "base_branch": detect_base_branch(root),
+        "workspace_id": workspace_id,
+        "coordinator_pane_id": coordinator_pane_id,
+        "workflow_file": str(workflow_file),
+    }
+
+    data = load_projects()
+    data.setdefault("projects", {})[root] = record
+    save_projects(data)
+    return record
+
+
+def unregister_project(root_or_id, close_workspace=False, force=False):
+    """Unregister a project from Herdr Factory registry.
+
+    1. Identifies the project by root or project_id.
+    2. Safety check: Verifies that no active workflows exist (unless force=True).
+    3. Optionally closes the Herdr workspace if requested.
+    4. Removes the project entry from projects.json.
+    5. Returns the deregistered project record.
+    """
+    data = load_projects()
+    projects_dict = data.get("projects", {})
+
+    target_key = None
+    target_project = None
+
+    try:
+        resolved_root = canonical_root(root_or_id)
+    except Exception:
+        resolved_root = str(root_or_id)
+
+    for k, v in projects_dict.items():
+        if (
+            k == root_or_id
+            or k == resolved_root
+            or v.get("project_id") == root_or_id
+            or v.get("project_root") == resolved_root
+            or v.get("project_root") == root_or_id
+        ):
+            target_key = k
+            target_project = v
+            break
+
+    if not target_project:
+        raise ValueError(f"未找到注册的项目: {root_or_id}")
+
+    project_id = target_project.get("project_id")
+
+    # Safety check: active workflows
+    if project_id:
+        active = active_workflows_for_project(project_id)
+        if active and not force:
+            raise RuntimeError(
+                f"项目【{target_project.get('project_name', project_id)}】仍有 {len(active)} 个未完成的活跃工作流，禁止注销。"
+                "请先等待工作流完成或使用 force 强制注销。"
+            )
+
+    # Close workspace if requested
+    if close_workspace:
+        wid = target_project.get("workspace_id")
+        if wid and _workspace_alive(wid):
+            _run(["herdr", "workspace", "close", wid], check=False)
+
+    # Remove from registry
+    if target_key in projects_dict:
+        del projects_dict[target_key]
+        save_projects(data)
+
+    return target_project
 
 
 def ensure_project(root, template_name="software-development-v1"):
