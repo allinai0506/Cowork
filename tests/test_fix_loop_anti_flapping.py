@@ -106,6 +106,69 @@ class ControllerReconcileReworkTest(unittest.TestCase):
                     "reconcile_task_state must not promote rework to agent_done when runtime is stale 'done'!"
                 )
 
+    def test_rework_healed_when_deliverables_detected(self):
+        """When task is in rework, but deliverables are verified to exist,
+        handle_event with idle should automatically heal rework -> agent_done!
+        """
+        import importlib
+        controller_mod = importlib.import_module("services.herdr-controller")
+
+        task_id = "test-task-rework-heal"
+        task_data = {
+            "task_id": task_id,
+            "status": "rework",
+            "pane_id": "w1:p3",
+            "workflow_id": "wf-01",
+            "stage": "implementation",
+            "clone_path": "/tmp/test-clone-dummy"
+        }
+
+        with patch.object(controller_mod, "get_task", return_value=task_data), \
+             patch.object(controller_mod, "check_task_deliverables_ready", return_value=True), \
+             patch.object(controller_mod, "set_task_status", return_value=True) as mock_set_status, \
+             patch.object(controller_mod, "enqueue_coordinator_event") as mock_enqueue:
+
+            controller_mod.handle_event(task_id, "idle")
+
+            mock_set_status.assert_called_with(task_id, "agent_done")
+            mock_enqueue.assert_called()
+
+    def test_idle_deferred_when_required_outputs_missing(self):
+        """When task is working, has required_outputs, but file is not yet ready,
+        idle should be treated as transient thinking and not transition to agent_done.
+        """
+        import importlib
+        controller_mod = importlib.import_module("services.herdr-controller")
+
+        task_id = "test-task-defer"
+        task_data = {
+            "task_id": task_id,
+            "status": "working",
+            "pane_id": "w1:p4",
+            "workflow_id": "wf-01",
+            "stage": "implementation",
+            "clone_path": "/tmp/test-clone-dummy"
+        }
+
+        mock_wf_cfg = {
+            "nodes": [
+                {
+                    "id": "implementation",
+                    "required_outputs": ["docs/report.md"]
+                }
+            ]
+        }
+
+        with patch.object(controller_mod, "get_task", return_value=task_data), \
+             patch.object(controller_mod, "workflow_config_for", return_value=mock_wf_cfg), \
+             patch.object(controller_mod, "check_task_deliverables_ready", return_value=False), \
+             patch.object(controller_mod, "set_task_status") as mock_set_status:
+
+            controller_mod.handle_event(task_id, "idle")
+
+            mock_set_status.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
+

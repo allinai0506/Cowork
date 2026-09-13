@@ -2050,9 +2050,9 @@ def handle_event(task_id, agent_status):
         f"[TASK] "
         f"id={task_id} "
         f"workflow={task.get('workflow_id')} "
-        f"stage={task['stage']} "
-        f"pane={task['pane_id']} "
-        f"agent={task['agent']} "
+        f"stage={task.get('stage', 'unknown')} "
+        f"pane={task.get('pane_id', 'unknown')} "
+        f"agent={task.get('agent', 'unknown')} "
         f"status={agent_status} "
         f"task_status={current_status}"
     )
