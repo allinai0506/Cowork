@@ -12,6 +12,7 @@ from . import topology
 from . import preflight
 from . import deep_preflight
 from . import kernel
+from . import steering
 
 __all__ = [
     "workflow",
@@ -22,6 +23,7 @@ __all__ = [
     "preflight",
     "deep_preflight",
     "kernel",
+    "steering",
 ]
 
 # Provide backwards-compatible module aliases so legacy flat-file imports
@@ -37,5 +39,6 @@ for _alias, _module in [
     ("herdr_preflight", preflight),
     ("herdr_deep_preflight", deep_preflight),
     ("herdr_kernel", kernel),
+    ("herdr_steering", steering),
 ]:
     sys.modules.setdefault(_alias, _module)

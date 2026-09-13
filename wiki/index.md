@@ -38,6 +38,7 @@
 | **排查后台服务不推进、状态不同步** | [[architecture]] | `services/herdr-controller.py` |
 | **编写或修改自动化测试** | [[dag-workflow-engine]] | `tests/test_workflow_engine.py` |
 | **工作流外部受控元语与快照回溯** | [[dag-workflow-engine]], [[task-lifecycle]] | `herdr/kernel.py`, `console/herdr_factory_console.py` |
+| **工位实时打断与插话纠偏 (Steering Mesh)** | [[task-lifecycle]] | `herdr/steering.py`, `bin/herdr-task:steer` |
 | **更新或扩展 Wiki 本身** | [[WIKI]] / [[log]] | `wiki/WIKI.md` |
 
 ---
