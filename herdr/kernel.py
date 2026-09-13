@@ -85,7 +85,6 @@ def _sync_tasks_from_disk_if_needed(store: StateStore) -> None:
 def load_workflows_data() -> Dict[str, Any]:
     """Load workflows via StateStore (single source of truth)."""
     store = get_state_store()
-    _sync_workflows_from_disk_if_needed(store)
     return store.export_workflows_json()
 
 
@@ -103,7 +102,6 @@ def save_workflows_data(data: Dict[str, Any]) -> None:
 def load_tasks_data() -> Dict[str, Any]:
     """Load tasks via StateStore (single source of truth)."""
     store = get_state_store()
-    _sync_tasks_from_disk_if_needed(store)
     return store.export_tasks_json()
 
 
@@ -422,8 +420,6 @@ def create_checkpoint(
 ) -> Dict[str, Any]:
     """Capture a durable point-in-time snapshot of the workflow and its tasks via StateStore."""
     store = get_state_store()
-    _sync_workflows_from_disk_if_needed(store)
-    _sync_tasks_from_disk_if_needed(store)
 
     wf_entry = store.get_workflow(workflow_id)
     if not wf_entry:

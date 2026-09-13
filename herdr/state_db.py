@@ -35,6 +35,8 @@ def get_default_db_path() -> Path:
         return Path(os.environ["CHECKPOINTS_DIR"]).parent / "state.db"
     if os.environ.get("WORKFLOWS_FILE"):
         return Path(os.environ["WORKFLOWS_FILE"]).parent / "state.db"
+    if os.environ.get("TASKS_FILE"):
+        return Path(os.environ["TASKS_FILE"]).parent / "state.db"
     return CONTROLLER_DIR / "state.db"
 
 

@@ -25,12 +25,14 @@ try:
         workflow_config_for,
     )
     from herdr.workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
+    from herdr.state_store import get_state_store
 except ImportError:
     from herdr_projects import (
         project_for_workflow,
         workflow_config_for,
     )
     from herdr_workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
+    from herdr_state_store import get_state_store
 
 STAGE_STATE_FILE = os.environ.get("STAGE_STATE_FILE") or os.path.expanduser(
     "~/.herdr-controller/stage-state.json"
@@ -48,19 +50,49 @@ WORKFLOWS_FILE = os.environ.get("WORKFLOWS_FILE") or os.path.expanduser("~/.herd
 _workflow_close_inflight = set()
 
 
+def _get_store():
+    if os.environ.get("HERDR_STATE_DB"):
+        return get_state_store(Path(os.environ["HERDR_STATE_DB"]))
+    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+    if t_file:
+        p = Path(t_file).parent / "state.db"
+        if p.parent.exists():
+            return get_state_store(db_path=p)
+    w_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE")
+    if w_file:
+        p = Path(w_file).parent / "state.db"
+        if p.parent.exists():
+            return get_state_store(db_path=p)
+    return get_state_store()
+
+
 def _workflow_entry(workflow_id):
+    store = _get_store()
     try:
-        with open(WORKFLOWS_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f).get("workflows", {})
-            if isinstance(raw, dict):
-                return raw.get(workflow_id) or {}
-            elif isinstance(raw, list):
-                for w in raw:
-                    if isinstance(w, dict) and w.get("workflow_id") == workflow_id:
-                        return w
-            return {}
+        wf = store.get_workflow(workflow_id)
+        if wf:
+            return wf
+    except Exception:
+        pass
+    try:
+        if os.path.exists(WORKFLOWS_FILE):
+            with open(WORKFLOWS_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f).get("workflows", {})
+                entry = None
+                if isinstance(raw, dict):
+                    entry = raw.get(workflow_id)
+                elif isinstance(raw, list):
+                    for w in raw:
+                        if isinstance(w, dict) and w.get("workflow_id") == workflow_id:
+                            entry = w
+                            break
+                if entry and isinstance(entry, dict):
+                    entry.setdefault("workflow_id", workflow_id)
+                    store.save_workflow(entry)
+                    return entry
     except (OSError, json.JSONDecodeError):
-        return {}
+        pass
+    return {}
 
 
 def workflow_closed(workflow_id):
@@ -436,13 +468,31 @@ def _workflow_dispatch_lock(workflow_id: str) -> threading.Lock:
 # ============================================================
 
 def load_tasks():
-    with open(TASKS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f).get("tasks", [])
+    store = _get_store()
+    if os.path.exists(TASKS_FILE):
+        try:
+            with open(TASKS_FILE, "r", encoding="utf-8") as f:
+                disk_data = json.load(f)
+            if isinstance(disk_data, dict):
+                for t in disk_data.get("tasks", []):
+                    tid = t.get("task_id")
+                    if tid and not store.get_task(tid):
+                        store.save_task(t)
+        except Exception:
+            pass
+    return store.list_tasks()
 
 
 def get_task(task_id):
+    try:
+        store = _get_store()
+        t = store.get_task(task_id)
+        if t:
+            return t
+    except Exception:
+        pass
     for task in load_tasks():
-        if task["task_id"] == task_id:
+        if task.get("task_id") == task_id:
             return task
     return None
 
@@ -881,18 +931,26 @@ def check_workflow_stage_advance(workflow_id):
 
 
 def active_registered_workflows():
+    workflows = set()
     try:
-        with open(WORKFLOWS_FILE, "r", encoding="utf-8") as f:
-            entries = json.load(f).get("workflows", {})
-    except (OSError, json.JSONDecodeError):
-        entries = {}
+        store = get_state_store()
+        for wf in store.list_workflows():
+            wid = wf.get("workflow_id")
+            if wid and wf.get("status") != "completed":
+                workflows.add(wid)
+    except Exception:
+        pass
 
-    # 终态(completed)的 workflow 不再参与周期 sweep。
-    workflows = {
-        workflow_id
-        for workflow_id, entry in entries.items()
-        if entry.get("status") != "completed"
-    }
+    if not workflows:
+        try:
+            if os.path.exists(WORKFLOWS_FILE):
+                with open(WORKFLOWS_FILE, "r", encoding="utf-8") as f:
+                    entries = json.load(f).get("workflows", {})
+                    for wid, entry in entries.items():
+                        if entry.get("status") != "completed":
+                            workflows.add(wid)
+        except (OSError, json.JSONDecodeError):
+            pass
 
     proj_path = Path(os.path.expanduser("~/.herdr-controller/projects.json"))
     if proj_path.exists():

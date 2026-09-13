@@ -60,6 +60,11 @@ def get_workflows_file() -> Path:
 
 
 def load_tasks_data() -> Dict[str, Any]:
+    try:
+        from .state_store import get_state_store
+        return get_state_store().export_tasks_json()
+    except Exception:
+        pass
     f = get_tasks_file()
     if not f.exists():
         return {"tasks": []}
@@ -71,6 +76,11 @@ def load_tasks_data() -> Dict[str, Any]:
 
 
 def load_workflows_data() -> Dict[str, Any]:
+    try:
+        from .state_store import get_state_store
+        return get_state_store().export_workflows_json()
+    except Exception:
+        pass
     f = get_workflows_file()
     if not f.exists():
         return {"workflows": {}}
