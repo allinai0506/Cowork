@@ -111,6 +111,12 @@ herdr-task close-workflow <workflow_id> [--include-coordinator] [--purge-clones]
 - `failed` 任务默认保留现场,报告中列 `retained-failed`。
 - 关阶段 tab 前校验 tab 内无其他 workflow 的外来 pane,否则跳过并写入报告 `tabs_skipped`。
 - 总指挥 pane 默认保留;知识沉淀并合并 PR 后用 `--include-coordinator` 一并关闭。
+- 收尾后六步法：close-workflow 完成后（总指挥 pane 保留期间），用户/总指挥应先运行
+  six-step-finish 技能的破坏性收尾步骤（步骤 3 最终确认 + 步骤 4-6），再运行
+  `--include-coordinator` 关闭总指挥 pane。调用形式：
+  `bash .agents/skills/six-step-finish/scripts/finish-task.sh <任务分支> --base <base_branch> --forge none`
+  （`<任务分支>` 为已合入的任务分支名，多个分支分别执行；绝对兜底
+  `~/.agents/skills/six-step-finish/`）。
 - 自动触发:Controller 在 `[WORKFLOW COMPLETE]` 时自动调用(等价于不带 flags)。
 - 零任务的已登记 workflow 视为平凡完成,直接标记。
 
