@@ -1077,3 +1077,48 @@ pytest
 ./bin/herdr-task artifacts --help
 ```
 
+---
+
+## 25. 通用配置驱动与受控 MCP 生态容器：元模型解耦、沙盒权限隔离与跨领域无环拓扑校验
+
+### 问题背景
+
+早期系统的工作流强绑定在软件研发流程上（需求、计划、代码实现、测试、评审），节点属性与工具调用偏向硬编码，难以支持商业调研、合同会签、财务分析等跨学科复杂协同场景：
+1. **输入与门禁语义僵化**：节点缺少显式的多源输入引用契约（`inputs`），质量门禁（`gate`）无法灵活表达自动准则与人工审批混合（`hybrid`）模式，且缺乏门禁失败时的定向回退目标（`retry_target`）；
+2. **工具挂载缺乏权限沙盒**：工位智能体可以直接调用未受限的本地工具，存在在只读分析阶段意外执行写磁盘或外部提交的高危越权风险；
+3. **拓扑校验不完全**：原有的 DAG 拓扑环路检测仅覆盖 `depends_on`，一旦节点在 `retry_target` 或 `inputs` 引用中隐式引入死循环或未知节点，会导致调度器静默崩溃。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 业务流程强依赖硬编码节点类型 | 真正的通用底座必须领域无关 (Domain-Agnostic) | 扩充通用节点元模型：支持 `inputs` 多源引用、`worker_policy` 能力与权限模型、以及 `gate` 混合门禁与 `retry_target` 回退配置 |
+| 工具越权执行高危操作 | 仅靠提示词软约束无法确保安全合规 | 建立受控 MCP 工具池（`herdr/mcp.py`），依据节点声明的能力（`capabilities`）与权限级别（`read_only` / `read_write` / `require_approval`）做物理挂载与边界拦截 |
+| 扩展属性可能引入断链或死锁 | 拓扑算法不能只看线性依赖 | 增强 Kahn 拓扑校验器 `validate_workflow_dag`，严密校验 `retry_target` 存在性与跨节点输入引用合法性 |
+| 模式升级导致旧模板失效 | 不向后兼容是大型系统升级的灾难 | 保持 100% 向后兼容：旧模板缺省 `inputs`/`gate` 时自动优雅降级补齐默认值，现有全部模板零改动平滑运行 |
+
+### 操作规范（已固化到 `herdr/workflow.py`、`herdr/mcp.py` 与 `workflow_templates/business-research-v1.yaml`）
+
+1. **通用契约与拓扑防御**：
+   - 节点规格：统一支持 `inputs: [{ref: "..."}]`、`worker_policy: {capabilities: [...], permissions: [...]}`、`gate: {type: "auto"|"human"|"hybrid", auto_criteria: "...", requires_human_approval: bool, retry_target: "..."}`。
+   - 拓扑门禁：`validate_workflow_dag` 强制核验 `retry_target` 与 `inputs` 引用节点在拓扑中的合法存在性。
+2. **受控 MCP 工具池治理**：
+   - 内置高可用工具包：`web_search`、`data_extraction`、`file_system`、`git_tools`、`human_signoff`。
+   - 挂载决策：`resolve_node_mcp(node)` 仅挂载能力交集且权限不超标的安全工具，通过 `check_node_permissions` 进行运行时拦截。
+3. **跨领域通用模板示范**：
+   - 落地 `business-research-v1.yaml`（市场界定 ➔ 情报抓取 ➔ 商业洞察 ➔ 高管简报会签），验证纯配置驱动在跨学科协同中的有效性。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 运行阶段四新增测试（动态模式 + MCP 插件池）
+pytest tests/test_dynamic_workflow_schema.py tests/test_mcp_capability_mesh.py -v
+
+# 2. 验证前端控制台模板库与语法契约
+pytest tests/test_console_frontend_syntax.py tests/test_console_templates.py -v
+
+# 3. 全仓 314 项自动化回归测试 100% 通过
+pytest
+```
+
+

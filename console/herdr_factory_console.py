@@ -733,7 +733,7 @@ async function showTemplateDAG(id){
       <div class="agent-row">
         <div>
           <div class="task-name">${esc(n.label||n.id)} <span class="task-id">${esc(n.id)} · ${esc(n.node_type||'agent')}</span></div>
-          <div class="task-meta">${esc(n.purpose||'')}</div>
+          <div class="task-meta">${esc(n.purpose||'')}${(n.gate&&n.gate.type)?' · 门禁: '+esc(n.gate.type):''}${(n.worker_policy&&n.worker_policy.permissions)?' · 权限: '+esc(n.worker_policy.permissions.join('/')):''}</div>
         </div>
         <div class="task-meta">${(n.depends_on||[]).length?'← '+(n.depends_on||[]).map(esc).join('、'):'起始节点'}</div>
       </div>`).join('');

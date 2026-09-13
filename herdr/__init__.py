@@ -14,6 +14,7 @@ from . import deep_preflight
 from . import kernel
 from . import steering
 from . import projection
+from . import mcp
 
 __all__ = [
     "workflow",
@@ -26,6 +27,7 @@ __all__ = [
     "kernel",
     "steering",
     "projection",
+    "mcp",
 ]
 
 # Provide backwards-compatible module aliases so legacy flat-file imports
@@ -43,5 +45,6 @@ for _alias, _module in [
     ("herdr_kernel", kernel),
     ("herdr_steering", steering),
     ("herdr_projection", projection),
+    ("herdr_mcp", mcp),
 ]:
     sys.modules.setdefault(_alias, _module)
