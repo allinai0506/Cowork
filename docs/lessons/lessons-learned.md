@@ -1409,6 +1409,7 @@ pytest -q
 | 未注册工作流静默降级到 opencode | 调度路由查不到工作流时静默 fallback 会绕过项目池黑名单、健康准入与 reservation 并发锁 | 当指定了 `workflow_id` 但在 StateStore 查无记录时，必须直接抛出 `RuntimeError` 拒绝调度，仅限无 workflow_id 的独立任务走默认代理 |
 | projects.json 倒灌幽灵工作流 | 调度器从辅助项目注册表追加未完成 workflow 会导致已结案记录形成幽灵活跃流 | `active_registered_workflows()` 100% 仅源自 `store.list_workflows()`，彻底清理跨表倒灌逻辑 |
 | 启动数据继承过程缺乏原子性与阻断力 | 启动时部分遗留 JSON 格式损坏若吞掉异常静默启动，会导致系统在空库上裸跑且数据永久丢失 | 初始化迁移必须由单次数据库事务（`BEGIN TRANSACTION;` ... `COMMIT;`）保护；任一历史文件损坏立即 `ROLLBACK;`、不标记 `v1_migration_done` 并显式 `raise` 阻断启动，保留外部修复后重试通道 |
+| 旧 SQLite 升级无 marker 误触发 Bootstrap | 若仅判断无 migration marker 就导旧 JSON，升级前已有 SQLite 数据的系统会被落后的 JSON 镜像覆盖（例如 completed 被覆盖为 running） | 在 Bootstrap 前必须先探活核心表业务数据（`has_existing_state`）；若已有数据则说明 SQLite 本身已是权威事实源，直接补 marker 绝不读取旧 JSON；仅当库完全为空且有 legacy JSON 时才允许 Bootstrap |
 
 ### 操作规范（已固化到 `herdr/agent_router.py`、`herdr/projects.py`、`herdr/kernel.py`、`herdr/steering.py`、`bin/herdr-task`、`services/herdr-controller.py`、`herdr/state_db.py` 与 `tests/test_critical_reads_fail_closed.py`）
 
@@ -1424,20 +1425,22 @@ pytest -q
 3. **工作流生命周期与注册表收口**：
    - `projects.load_workflows()`、`active_workflows_for_project()`、`non_terminal_workflow_ids()`、`project_for_workflow()` 与 `generate_workflow_id()` 彻底废除 `_sync_missing_workflows_into_store`，严禁回退或读回写入 SQLite；
    - 调度看门狗 `herdr-controller.py` 的 `_workflow_entry()` 仅纯净查询 StateStore；`active_registered_workflows()` 100% 仅查询 `store.list_workflows()`，清理从 `projects.json` 注入 `wf` 的幽灵链路；
-4. **启动 Bootstrap 原子事务与 Fail-Closed 阻断保障**：
-   - 数据库初始化在 `_ensure_schema` 中通过显式事务包裹 legacy 文件（Workflows、Tasks、Steering、Checkpoints）继承；任一文件损坏立即回滚、绝不置位 `v1_migration_done`、不缓存连接，并显式 `raise` 阻断系统在损坏状态下裸跑，待文件修复后可安全重试导入。
+4. **启动 Bootstrap 原子事务、旧库升级防覆写与 Fail-Closed 阻断保障**：
+   - 数据库初始化在 `_ensure_schema` 中检测到未置位 `v1_migration_done` 时，**首先核查核心表（`workflows`, `tasks`, `checkpoints`, `steering_items`, `events`）是否已有业务数据**；若已有数据（旧版 SQLite 升级场景），说明 SQLite 本身已是权威事实源，直接写入 `v1_migration_done = '1'`，严禁读取任何磁盘 legacy JSON 避免状态被陈旧镜像覆写；
+   - 仅当 SQLite 完全为空且存在 legacy JSON 时，才通过显式事务包裹历史文件继承；任一文件损坏立即回滚、绝不置位 `v1_migration_done`、不缓存连接，并显式 `raise` 阻断系统在损坏状态下裸跑，待文件修复后可安全重试导入。
 
 ### 验证命令 / 证据
 
 ```bash
-# 1. 运行核心控制读取 Fail-Closed 专项测试套件（16 项测试，含 Test A~G 全量对抗场景）
+# 1. 运行核心控制读取 Fail-Closed 专项测试套件（17 项测试，含 Test A~H 全量对抗场景）
 pytest -v tests/test_critical_reads_fail_closed.py
 
 # 2. 运行单事实源防篡改与全流程 E2E
 pytest -v tests/test_state_store.py tests/test_universal_substrate_e2e.py
 
-# 3. 全仓自动化回归（367 项测试 100% 全部通过）
+# 3. 全仓自动化回归（368 项测试 100% 全部通过）
 pytest -q
 ```
+
 
 

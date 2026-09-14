@@ -461,5 +461,118 @@ def test_bootstrap_failure_blocks_startup_fail_closed(tmp_path):
     assert store.get_task("task-boot-fixed-01") is not None
 
 
+def test_existing_sqlite_upgrade_protects_against_stale_json_overwrite(tmp_path, monkeypatch):
+    """Test H: Verify existing SQLite database without migration marker is protected from stale JSON overwrite on upgrade."""
+    from herdr.state_store import get_state_store, reset_state_store
 
+    test_dir = tmp_path / "upgrade_protect"
+    test_dir.mkdir(parents=True, exist_ok=True)
+    test_db = test_dir / "state.db"
+    cp_dir = test_dir / "checkpoints"
+    cp_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CHECKPOINTS_DIR", str(cp_dir))
 
+    # 1. Create an existing SQLite database (simulate PR #21 database with runtime data, but no schema_meta)
+    from herdr import state_db
+    state_db._INITIALIZED_DBS.discard(str(test_db))
+    conn = state_db.get_db_connection(test_db)
+    wid = "wf-upgrade-01"
+    tid = "task-upgrade-01"
+    state_db.save_workflow({
+        "workflow_id": wid,
+        "project_id": "proj-upgrade",
+        "title": "Upgrade Test WF",
+        "status": "completed",
+    }, conn=conn)
+    state_db.save_task({
+        "task_id": tid,
+        "workflow_id": wid,
+        "node": "dev",
+        "status": "completed",
+        "agent": "codex",
+    }, conn=conn)
+
+    # Authentically simulate PR #21 by completely dropping schema_meta table
+    conn.execute("DROP TABLE schema_meta;")
+    conn.commit()
+    conn.close()
+    state_db._INITIALIZED_DBS.discard(str(test_db))
+
+    # 2. Plant stale legacy JSON files in test_dir that conflict with SQLite
+    legacy_wf = test_dir / "workflows.json"
+    legacy_tasks = test_dir / "tasks.json"
+    legacy_st = test_dir / "steering.json"
+    legacy_cp = cp_dir / wid / "cp-stale-01.json"
+    legacy_cp.parent.mkdir(parents=True, exist_ok=True)
+
+    legacy_wf.write_text(json.dumps({
+        "version": 1,
+        "workflows": {
+            wid: {
+                "workflow_id": wid,
+                "project_id": "proj-upgrade",
+                "title": "Stale WF Title",
+                "status": "running"  # Stale state!
+            },
+            "wf-stale-extra": {
+                "workflow_id": "wf-stale-extra",
+                "status": "pending"
+            }
+        }
+    }), encoding="utf-8")
+
+    legacy_tasks.write_text(json.dumps({
+        "tasks": [
+            {
+                "task_id": tid,
+                "workflow_id": wid,
+                "status": "working"  # Stale state!
+            },
+            {
+                "task_id": "task-stale-extra",
+                "workflow_id": wid,
+                "status": "pending"
+            }
+        ]
+    }), encoding="utf-8")
+
+    legacy_st.write_text(json.dumps({
+        "steering_queues": {
+            tid: [{"steer_id": "steer-stale-01", "instruction": "stale instruction"}]
+        }
+    }), encoding="utf-8")
+
+    legacy_cp.write_text(json.dumps({
+        "checkpoint_id": "cp-stale-01",
+        "workflow_id": wid,
+        "tag": "stale_cp"
+    }), encoding="utf-8")
+
+    # 3. Initialize StateStore (upgrading to PR #23)
+    reset_state_store()
+    store = get_state_store(db_path=test_db)
+
+    # 4. Assertions: SQLite authoritative state was 100% PRESERVED
+    wf = store.get_workflow(wid)
+    assert wf is not None
+    assert wf["status"] == "completed"  # NOT overwritten to "running"
+    assert wf["title"] == "Upgrade Test WF"
+
+    task = store.get_task(tid)
+    assert task is not None
+    assert task["status"] == "completed"  # NOT overwritten to "working"
+
+    # Extra entities from stale JSON were NOT imported
+    assert store.get_workflow("wf-stale-extra") is None
+    assert store.get_task("task-stale-extra") is None
+    assert store.list_steers(tid) == []
+    with pytest.raises(FileNotFoundError):
+        store.get_checkpoint(wid, "cp-stale-01")
+
+    # Migration marker was written
+    conn2 = sqlite3.connect(str(test_db))
+    cur = conn2.execute("SELECT value FROM schema_meta WHERE key = 'v1_migration_done';")
+    row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "1"
+    conn2.close()
