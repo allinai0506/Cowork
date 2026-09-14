@@ -108,6 +108,16 @@ def save_steering_data(data: Dict[str, Any]) -> None:
         _atomic_write_json(st_file, store.export_steering_json())
 
 
+def _task_event_context(task: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not task:
+        return {}
+    return {
+        "workflow_id": task.get("workflow_id"),
+        "node_id": task.get("node") or task.get("stage"),
+        "agent_id": task.get("agent"),
+    }
+
+
 def format_steer_prompt(instruction: str, operator: str = "human") -> str:
     """Format structured high-priority intervention prompt for Agent."""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -278,6 +288,7 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
         "action": "steer_dispatched" if delivery_ok else "steer_delivery_failed",
         "steer_id": steer_id,
         "task_id": task_id,
+        **_task_event_context(task),
         "instruction": item["instruction"],
         "operator": item.get("operator"),
         "urgent": item.get("urgent", False),
@@ -395,6 +406,7 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
         "action": "steer_dispatched" if delivery_ok else "steer_delivery_failed",
         "steer_id": target_item["steer_id"],
         "task_id": task_id,
+        **_task_event_context(task),
         "instruction": target_item["instruction"],
         "operator": target_item.get("operator"),
         "urgent": target_item.get("urgent", False),
@@ -485,6 +497,7 @@ def halt_task(
         history_entry = {
             "action": "task_halt_failed",
             "task_id": task_id,
+            **_task_event_context(task),
             "reason": reason,
             "error": error_reason,
             "operator": operator,
@@ -528,6 +541,7 @@ def halt_task(
     history_entry = {
         "action": "task_halted",
         "task_id": task_id,
+        **_task_event_context(task),
         "reason": reason,
         "operator": operator,
         "protocol": adapter.protocol_level,
