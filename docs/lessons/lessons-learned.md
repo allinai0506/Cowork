@@ -1387,3 +1387,44 @@ pytest -v tests/test_projection_engine.py
 # 3. 全仓自动化回归（349 项测试 100% 全部通过）
 pytest -q
 ```
+
+---
+
+## 32. 核心控制读取 Fail-Closed 铁律：彻底关闭关键控制链路的 Read Fallback，杜绝过时 JSON 导致的错误路由与幽灵推进
+
+### 问题背景
+
+在实现“写入型双状态源 Fail-Closed”后，系统在正常路径下已完全以 SQLite (`StateStore`) 为权威。但在边缘故障与异常处理场景中，部分关键控制读取链路（Router 路由决策、Controller 活跃工作流推进扫描、Projects 工作流注册与终态查重）仍残留了静默吞掉数据库异常后回退到磁盘 `workflows.json` 或 `tasks.json` 的 `Read Fail-Open` 代码逻辑：
+1. **过时镜像诱发错误决策**：若 SQLite 发生瞬间并发锁等待或 I/O 故障，而磁盘 JSON 恰好落后一拍（例如 JSON 记录的任务仍为旧状态或旧代理），Router 会基于过时 JSON 做出错误的分发与负载统计；
+2. **终态状态逆转导致幽灵推进**：`projects.non_terminal_workflow_ids()` 与 `active_workflows_for_project()` 若在读取异常时回退到旧 JSON，已在 SQLite 中标记为 `completed` 的工作流可能在 JSON 中仍显示为 `running`，导致 Controller 重新唤醒已结案工作流并诱发幽灵推进事故；
+3. **假阳性与故障掩盖**：吞掉 SQLite 读取异常使得真实的数据库连接泄漏、文件锁超时或表损坏无法在监控中暴露，阻碍可观测性建设。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 读取故障静默降级到陈旧 JSON | 核心控制链路（Routing/Advance/Registration/State Transition）绝不能依据非权威或陈旧的数据做决策 | 核心控制读取必须遵守 Fail-Closed 铁律：底层 StateStore 报错直接向上阻断，严禁静默降级到 JSON |
+| 纯展示层与控制链路混淆 | Dashboard/CLI status 与核心调度器的容错需求截然不同 | 严格区分“只读展现（Read-only Telemetry）”与“核心控制读取（Critical Control Reads）”；仅允许纯展示命令做友好降级 |
+| 异常捕获过宽与吞异常恶习 | `except Exception: pass` 随后读取文件的写法是裂脑的温床 | 严禁在权威读取逻辑中嵌套宽泛异常捕获并回退读取辅助镜像文件 |
+
+### 操作规范（已固化到 `herdr/agent_router.py`、`herdr/projects.py`、`services/herdr-controller.py` 与 `tests/test_critical_reads_fail_closed.py`）
+
+1. **路由与负载计算收口**：
+   - `agent_router.workflow_record()`、`_clean_reservations()` 与 `_active_agent_loads()` 彻底废除 JSON 读取 fallback，StateStore 异常直接抛出；
+2. **工作流生命周期与注册表收口**：
+   - `projects.load_workflows()`、`active_workflows_for_project()`、`non_terminal_workflow_ids()`、`project_for_workflow()` 与 `generate_workflow_id()` 严禁吞异常回退到 `workflows.json`；
+3. **调度看门狗与推进主循环收口**：
+   - `herdr-controller.py` 的 `_workflow_entry()` 与 `active_registered_workflows()` 仅从 StateStore 查询活跃工作流；若数据库故障立即中断并报警，彻底阻断幽灵推进与状态倒流。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 运行核心控制读取 Fail-Closed 专项测试套件（9 项对抗异常测试）
+pytest -v tests/test_critical_reads_fail_closed.py
+
+# 2. 运行单事实源与全流程 E2E
+pytest -v tests/test_state_store.py tests/test_universal_substrate_e2e.py
+
+# 3. 全仓自动化回归（360 项测试 100% 全部通过）
+pytest -q
+```

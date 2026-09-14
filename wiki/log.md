@@ -354,3 +354,12 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - **治理规范与知识归档**：
   - 沉淀并归档通用工程教训 §31（工作流抗停滞自愈、CoW沙盒纯净隔离与总指挥主动干预）；
   - 全仓自动化回归测试通过。
+
+## [2026-09-14] feat | Critical Control Reads Fail Closed & Read Fallback Elimination
+- **核心控制读取链路 Fail-Closed 终极收口**：
+  - **路由决策收口 (`herdr/agent_router.py`)**：`workflow_record()`、`_clean_reservations()` 与 `_active_agent_loads()` 彻底废除对 `workflows.json` 与 `tasks.json` 的异常降级读取，底层 StateStore 异常直接抛出阻断，杜绝陈旧数据导致错误调度；
+  - **项目与生命周期收口 (`herdr/projects.py`)**：`load_workflows()`、`active_workflows_for_project()`、`non_terminal_workflow_ids()`、`project_for_workflow()` 与 `generate_workflow_id()` 严禁吞异常回退到 `workflows.json`，彻底切断已结案工作流在读取故障时被陈旧 JSON 复活的幽灵推进链路；
+  - **调度协调看门狗收口 (`services/herdr-controller.py`)**：`_workflow_entry()` 与 `active_registered_workflows()` 全面基于 StateStore 读取，移除对 `WORKFLOWS_FILE` 的直接 open 回退；
+  - **新增专项对抗测试套件 (`tests/test_critical_reads_fail_closed.py`)**：9 项测试覆盖 StateStore 模拟抛出 `sqlite3.OperationalError` 时所有核心控制读取函数均 Fail Closed 抛出异常；
+  - **沉淀并归档通用工程教训 §32**（核心控制读取 Fail-Closed 铁律）；
+  - 全仓自动化回归测试达 360 项（100% 绿灯全部通过）。

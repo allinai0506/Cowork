@@ -188,12 +188,9 @@ def _sync_missing_workflows_into_store(store):
 
 
 def load_workflows():
-    try:
-        store = _get_store()
-        _sync_missing_workflows_into_store(store)
-        return store.export_workflows_json()
-    except Exception:
-        return _load(WORKFLOWS_FILE, {"version": 1, "workflows": {}})
+    store = _get_store()
+    _sync_missing_workflows_into_store(store)
+    return store.export_workflows_json()
 
 
 def save_workflows(data):
@@ -209,39 +206,24 @@ TERMINAL_WORKFLOW_STATUSES = {"completed"}
 
 def active_workflows_for_project(project_id):
     """Registry entries of project_id that have not reached a terminal status."""
-    try:
-        store = _get_store()
-        _sync_missing_workflows_into_store(store)
-        return [
-            entry
-            for entry in store.list_workflows()
-            if entry.get("project_id") == project_id
-            and entry.get("status") not in TERMINAL_WORKFLOW_STATUSES
-        ]
-    except Exception:
-        return [
-            entry
-            for entry in load_workflows().get("workflows", {}).values()
-            if entry.get("project_id") == project_id
-            and entry.get("status") not in TERMINAL_WORKFLOW_STATUSES
-        ]
+    store = _get_store()
+    _sync_missing_workflows_into_store(store)
+    return [
+        entry
+        for entry in store.list_workflows()
+        if entry.get("project_id") == project_id
+        and entry.get("status") not in TERMINAL_WORKFLOW_STATUSES
+    ]
 
 
 def non_terminal_workflow_ids():
-    try:
-        store = _get_store()
-        _sync_missing_workflows_into_store(store)
-        return {
-            entry["workflow_id"]
-            for entry in store.list_workflows()
-            if entry.get("workflow_id") and entry.get("status") not in TERMINAL_WORKFLOW_STATUSES
-        }
-    except Exception:
-        return {
-            workflow_id
-            for workflow_id, entry in load_workflows().get("workflows", {}).items()
-            if entry.get("status") not in TERMINAL_WORKFLOW_STATUSES
-        }
+    store = _get_store()
+    _sync_missing_workflows_into_store(store)
+    return {
+        entry["workflow_id"]
+        for entry in store.list_workflows()
+        if entry.get("workflow_id") and entry.get("status") not in TERMINAL_WORKFLOW_STATUSES
+    }
 
 
 def workflow_closed(workflow_id):
@@ -277,20 +259,12 @@ def project_by_root(root):
 
 
 def project_for_workflow(workflow_id):
-    try:
-        store = _get_store()
-        _sync_missing_workflows_into_store(store)
-        record = store.get_workflow(workflow_id)
-        if record and not (record.get("status") == "unknown" and not record.get("project_id")):
-            return record
-    except Exception:
-        pass
-    record = (
-        load_workflows()
-        .get("workflows", {})
-        .get(workflow_id)
-    )
-    return record
+    store = _get_store()
+    _sync_missing_workflows_into_store(store)
+    record = store.get_workflow(workflow_id)
+    if record and not (record.get("status") == "unknown" and not record.get("project_id")):
+        return record
+    return None
 
 
 def workflow_config_for(workflow_id):
@@ -361,12 +335,9 @@ def generate_workflow_id(project, prefix="wf", now=None):
 
     # Scan existing workflows in registry to find next sequence number
     existing_seqs = []
-    try:
-        store = _get_store()
-        _sync_missing_workflows_into_store(store)
-        workflows = {w["workflow_id"]: w for w in store.list_workflows() if w.get("workflow_id")}
-    except Exception:
-        workflows = load_workflows().get("workflows", {})
+    store = _get_store()
+    _sync_missing_workflows_into_store(store)
+    workflows = {w["workflow_id"]: w for w in store.list_workflows() if w.get("workflow_id")}
     for wid in workflows:
         if wid.startswith(expected_prefix):
             remainder = wid[len(expected_prefix):]
@@ -414,10 +385,6 @@ def register_workflow(workflow_id, project, requirement="", title=""):
 def mark_workflow_startup_ready(workflow_id, healthy_agents=None, unhealthy_agents=None):
     store = _get_store()
     record = store.get_workflow(workflow_id)
-    if not record:
-        data = load_workflows()
-        record = data.setdefault("workflows", {}).get(workflow_id)
-
     if not record:
         raise RuntimeError(f"Workflow registry missing: {workflow_id}")
 

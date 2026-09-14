@@ -142,26 +142,18 @@ def _sync_missing_workflows_into_store(store):
 
 
 def workflow_record(workflow_id):
-    try:
-        store = _get_store()
-        _sync_missing_workflows_into_store(store)
-        wf = store.get_workflow(workflow_id)
-        if wf and not (wf.get("status") == "unknown" and not wf.get("project_id")):
-            return wf
-    except Exception:
-        pass
-    data = _load(WORKFLOWS_FILE, {"workflows": {}})
-    return data.get("workflows", {}).get(workflow_id, {})
+    store = _get_store()
+    _sync_missing_workflows_into_store(store)
+    wf = store.get_workflow(workflow_id)
+    if wf and not (wf.get("status") == "unknown" and not wf.get("project_id")):
+        return wf
+    return {}
 
 
 def set_workflow_agent_override(workflow_id, agent):
     store = _get_store()
     _sync_missing_workflows_into_store(store)
     record = store.get_workflow(workflow_id)
-    if not record:
-        data = _load(WORKFLOWS_FILE, {"workflows": {}})
-        record = data.setdefault("workflows", {}).get(workflow_id)
-
     if not record:
         return
 
@@ -175,13 +167,9 @@ def set_workflow_agent_override(workflow_id, agent):
 
 def _clean_reservations(data, ttl=300):
     now = time.time()
-    try:
-        store = _get_store()
-        _sync_missing_tasks_into_store(store)
-        tasks = store.list_tasks()
-    except Exception:
-        t_data = _load(TASKS_FILE, {"tasks": []})
-        tasks = t_data.get("tasks", [])
+    store = _get_store()
+    _sync_missing_tasks_into_store(store)
+    tasks = store.list_tasks()
 
     registered = {
         t.get("task_id")
@@ -219,13 +207,9 @@ def release_agent_reservation(task_id):
 
 
 def _active_agent_loads(project_id):
-    try:
-        store = _get_store()
-        _sync_missing_tasks_into_store(store)
-        tasks = store.list_tasks()
-    except Exception:
-        t_data = _load(TASKS_FILE, {"tasks": []})
-        tasks = t_data.get("tasks", [])
+    store = _get_store()
+    _sync_missing_tasks_into_store(store)
+    tasks = store.list_tasks()
 
     active = {
         "pending", "dispatched", "working", "blocked", "agent_done",

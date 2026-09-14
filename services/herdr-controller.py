@@ -66,32 +66,37 @@ def _get_store():
     return get_state_store()
 
 
-def _workflow_entry(workflow_id):
-    store = _get_store()
+def _sync_missing_workflows_into_store(store):
     try:
-        wf = store.get_workflow(workflow_id)
-        if wf:
-            return wf
+        wf_file = Path(globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE)
+        if wf_file.exists():
+            with open(wf_file, "r", encoding="utf-8") as f:
+                disk_data = json.load(f)
+            if isinstance(disk_data, dict):
+                raw = disk_data.get("workflows", {})
+                if isinstance(raw, dict):
+                    items = list(raw.items())
+                elif isinstance(raw, list):
+                    items = [(w.get("workflow_id"), w) for w in raw if isinstance(w, dict) and w.get("workflow_id")]
+                else:
+                    items = []
+                for wid, wf in items:
+                    if isinstance(wf, dict):
+                        wf.setdefault("workflow_id", wid)
+                        existing = store.get_workflow(wid)
+                        is_placeholder = bool(existing and existing.get("status") == "unknown" and not existing.get("project_id"))
+                        if not existing or is_placeholder:
+                            store.save_workflow(wf)
     except Exception:
         pass
-    try:
-        if os.path.exists(WORKFLOWS_FILE):
-            with open(WORKFLOWS_FILE, "r", encoding="utf-8") as f:
-                raw = json.load(f).get("workflows", {})
-                entry = None
-                if isinstance(raw, dict):
-                    entry = raw.get(workflow_id)
-                elif isinstance(raw, list):
-                    for w in raw:
-                        if isinstance(w, dict) and w.get("workflow_id") == workflow_id:
-                            entry = w
-                            break
-                if entry and isinstance(entry, dict):
-                    entry.setdefault("workflow_id", workflow_id)
-                    store.save_workflow(entry)
-                    return entry
-    except (OSError, json.JSONDecodeError):
-        pass
+
+
+def _workflow_entry(workflow_id):
+    store = _get_store()
+    _sync_missing_workflows_into_store(store)
+    wf = store.get_workflow(workflow_id)
+    if wf:
+        return wf
     return {}
 
 
@@ -932,25 +937,12 @@ def check_workflow_stage_advance(workflow_id):
 
 def active_registered_workflows():
     workflows = set()
-    try:
-        store = _get_store()
-        for wf in store.list_workflows():
-            wid = wf.get("workflow_id")
-            if wid and wf.get("status") != "completed":
-                workflows.add(wid)
-    except Exception:
-        pass
-
-    if not workflows:
-        try:
-            if os.path.exists(WORKFLOWS_FILE):
-                with open(WORKFLOWS_FILE, "r", encoding="utf-8") as f:
-                    entries = json.load(f).get("workflows", {})
-                    for wid, entry in entries.items():
-                        if entry.get("status") != "completed":
-                            workflows.add(wid)
-        except (OSError, json.JSONDecodeError):
-            pass
+    store = _get_store()
+    _sync_missing_workflows_into_store(store)
+    for wf in store.list_workflows():
+        wid = wf.get("workflow_id")
+        if wid and wf.get("status") != "completed":
+            workflows.add(wid)
 
     proj_path = Path(os.path.expanduser("~/.herdr-controller/projects.json"))
     if proj_path.exists():
@@ -959,7 +951,9 @@ def active_registered_workflows():
             for p in p_data.get("projects", {}).values():
                 wf = p.get("workflow_id")
                 if wf:
-                    workflows.add(wf)
+                    rec = store.get_workflow(wf)
+                    if not rec or rec.get("status") != "completed":
+                        workflows.add(wf)
         except Exception:
             pass
 
