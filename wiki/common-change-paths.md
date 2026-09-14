@@ -120,7 +120,7 @@ Evidence:
    ```bash
    # 1. 运行全局体检确认系统状态
    ./bin/herdr-factory doctor
-   # 2. 模拟误关某节点 Tab 或 Anchor Pane，运行 ensure-runtime 测试毫秒级自愈
+   # 2. 模拟误关某节点 Tab 或 Anchor Pane，运行 ensure-runtime 测试自动自愈与修复
    ./bin/herdr-task ensure-runtime --node <node_id> --workflow <workflow_id>
    ```
 
