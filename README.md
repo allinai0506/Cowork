@@ -1,6 +1,10 @@
-# Herdr Multi-Agent Workflow Platform
+# HAFlow
 
-> **产品名称：共事工厂**（控制台产品，定义于 `console/herdr_factory_console.py` 的 `PRODUCT_NAME` 常量）  
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
 > **Tab = Workflow Node，Pane = Agent Workspace，Agent = Executor**  
 > 基于空间现场模型的多 Agent 工作流协同平台。
 
@@ -10,7 +14,7 @@
 
 在大语言模型驱动的智能体研发体系中，多 Agent 协同正迅速从早期单线、固定的 6 阶段研发演进为复杂、多变的通用业务流程（如招投标标书生成、多角色客服仲裁、企业级自动化调研等）。
 
-**Herdr Multi-Agent Workflow Platform** 旨在为多 Agent 协同提供一套实用的工作流协同底座：
+**HAFlow (Human + Agent, in Flow)** 旨在为多 Agent 协同提供一套实用的工作流协同底座：
 - **物理现场与逻辑流程统一**：将终端窗口/标签页作为工作流节点（Tab = Workflow Node），将窗格作为独立 Agent 工位（Pane = Agent Workspace）。
 - **流程解耦与自由拓扑**：打破固定流程枷锁，支持任意有向无环图（DAG）工作流模板定义。
 - **自愈与高可用保障**：将易失的运行时现场与不可变的逻辑定义分离，实现误关自动自愈、探针沙盒健康体检与并发防死锁调度。
@@ -43,8 +47,8 @@
 - **核心语言与环境**：Python 3.9+（经过 Python 3.13 严格验证）、PEP 517/621 规范。
 - **配置与编排契约**：PyYAML、JSON Schema 契约、Kahn 算法有向无环图拓扑排序。
 - **常驻后台系统**：macOS LaunchAgent 集群架构（Controller 核心调度、Sentinel 看门狗、Notifier 原生通知、Web Console 控制台）。
-- **Web Console 前端**（共事工厂控制台）：Python 标准库 HTTP 服务 + 内嵌 HTML5/CSS3/原生 JavaScript，无前端框架与 npm 构建链；通过 JSON API 提供 Dashboard 与运维驾驶舱。
-- **底座通信与现场控制**：Herdr 多工位终端管理、Unix Domain Socket (`~/.config/herdr/herdr.sock`) 跨进程 IPC。
+- **Web Console 前端**（HAFlow 控制台）：Python 标准库 HTTP 服务 + 内嵌 HTML5/CSS3/原生 JavaScript，无前端框架与 npm 构建链；通过 JSON API 提供 Dashboard 与运维驾驶舱。
+- **底座通信与现场控制**：终端多工位管理底座、Unix Domain Socket 跨进程 IPC。
 - **版本控制与沙盒隔离**：Git CoW 物理克隆隔离、基于 Git Tree 校验的 Task Baseline 差异比对。
 - **测试框架**：Pytest 自动化回归测试套件。
 
@@ -55,7 +59,7 @@
 仓库按核心库、CLI、后台服务、控制台、测试与文档分层组织：
 
 ```
-herdr/
+HAFlow/
 ├── bin/                          # CLI 可执行命令行工具集 (PATH 入口)
 │   ├── herdr-factory             # 工作流与项目生命周期控制 CLI
 │   ├── herdr-task                # Task 工单调度、现场分配与节点自愈 CLI
@@ -106,13 +110,13 @@ herdr/
 
 ## 📖 核心文档导航
 
-- **AI 导航地图**: [AGENTS.md](file:///Users/user/herdr/AGENTS.md) — 紧凑型上下文指针。
-- **开发作业红线**: [RULES.md](file:///Users/user/herdr/RULES.md) — ECC 4 阶段流程与系统禁忌。
-- **操作入口避坑**: [CLAUDE.md](file:///Users/user/herdr/CLAUDE.md) — 命令字典与常见坑点。
-- **架构设计**: [系统全局架构设计](file:///Users/user/herdr/docs/architecture/architecture-overview.md) 与 [Tab=Workflow Node 架构模型](file:///Users/user/herdr/docs/architecture/tab-node-model.md)。
-- **实操手册**: [通用工作流使用指南](file:///Users/user/herdr/docs/guides/universal-workflow-guide.md) 与 [模板编写实战指南](file:///Users/user/herdr/docs/guides/template-authoring-guide.md)。
-- **运维排障**: [后台服务运维手册](file:///Users/user/herdr/docs/operations/service-management.md) 与 [故障自愈 FAQ](file:///Users/user/herdr/docs/operations/troubleshooting-faq.md)。
-- **交付演进**: [Agent 交付演进 Walkthrough](file:///Users/user/herdr/docs/walkthroughs/README.md) — 各类 Agent 任务交付演进报告与 Walkthrough 归档。
+- **AI 导航地图**: [AGENTS.md](file:///Users/user/HAFlow/AGENTS.md) — 紧凑型上下文指针。
+- **开发作业红线**: [RULES.md](file:///Users/user/HAFlow/RULES.md) — ECC 4 阶段流程与系统禁忌。
+- **操作入口避坑**: [CLAUDE.md](file:///Users/user/HAFlow/CLAUDE.md) — 命令字典与常见坑点。
+- **架构设计**: [系统全局架构设计](file:///Users/user/HAFlow/docs/architecture/architecture-overview.md) 与 [Tab=Workflow Node 架构模型](file:///Users/user/HAFlow/docs/architecture/tab-node-model.md)。
+- **实操手册**: [通用工作流使用指南](file:///Users/user/HAFlow/docs/guides/universal-workflow-guide.md) 与 [模板编写实战指南](file:///Users/user/HAFlow/docs/guides/template-authoring-guide.md)。
+- **运维排障**: [后台服务运维手册](file:///Users/user/HAFlow/docs/operations/service-management.md) 与 [故障自愈 FAQ](file:///Users/user/HAFlow/docs/operations/troubleshooting-faq.md)。
+- **交付演进**: [Agent 交付演进 Walkthrough](file:///Users/user/HAFlow/docs/walkthroughs/README.md) — 各类 Agent 任务交付演进报告与 Walkthrough 归档。
 
 ---
 
@@ -120,7 +124,7 @@ herdr/
 
 ### 1. 配置命令行 PATH（推荐）
 ```bash
-export PATH="$HOME/herdr/bin:$PATH"
+export PATH="$HOME/HAFlow/bin:$PATH"
 ```
 
 ### 2. 全局环境自检

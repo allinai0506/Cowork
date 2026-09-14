@@ -1,5 +1,10 @@
 # 高频开发与代码修改指南 (common-change-paths.md)
 
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
 > **面向 AI Coding Agent 与开发者的常见改动实战路径**  
 > 关联索引: [[index]] | [[task-lifecycle]] | [[dag-workflow-engine]] | [[architecture]]
 

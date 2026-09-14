@@ -1,12 +1,17 @@
-# Herdr 系统全局架构 (Architecture Overview)
+# HAFlow 系统全局架构 (Architecture Overview)
 
-> 本文档描述 Herdr 多 Agent 编排系统的全局架构、分层设计、核心组件职责及数据流转路径。
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
+> 本文档描述 HAFlow 多 Agent 协同流编排系统的全局架构、分层设计、核心组件职责及数据流转路径。
 
 ---
 
 ## 1. 架构定位
 
-Herdr Factory 是基于 Herdr 终端多任务工作区的**本地 Multi-Agent Workflow Runtime / AI 软件工厂控制层**。
+HAFlow 是基于终端多任务工作区的**本地 Multi-Agent Workflow Runtime / AI 软件工厂控制层**。
 
 系统解决的核心问题是：
 > 如何让多种异构的 AI Coding Agent（Claude Code, Codex, OpenCode, QoderCLI, Agy, Pi 等）在本地真实项目中，按照声明式的组织结构与工作流，稳定、可审计、可自愈、可恢复地协同工作。
@@ -17,16 +22,16 @@ Herdr Factory 是基于 Herdr 终端多任务工作区的**本地 Multi-Agent Wo
 
 ```mermaid
 graph TD
-    subgraph UI_Layer [1. 呈现与操作层 (Herdr UI / Terminal / Console)]
-        HerdrWorkspace[Herdr Workspace: 项目工作区]
+    subgraph UI_Layer [1. 呈现与操作层 (终端多工位 / Terminal / Console)]
+        Workspace[项目空间: 工作区现场]
         Tabs[Tabs: 工作流节点现场]
         Panes[Panes: Agent 工位与终端]
-        WebConsole[Herdr Factory Web Console]
+        WebConsole[HAFlow Web Console]
     end
 
-    subgraph Factory_Core [2. Factory 编排与控制层]
+    subgraph Factory_Core [2. HAFlow 编排与控制层]
         WorkflowEngine[Workflow Engine: 模板与 DAG 依赖判定]
-        Controller[Herdr Controller: 异步调度引擎]
+        Controller[HAFlow Controller: 异步调度引擎]
         AgentRouter[Agent Router: 负载均衡与节点策略路由]
         SelfHeal[Self-Healing Runtime: Tab 与 Anchor 自动自愈]
         DeepPreflight[Deep Preflight: Agent 沙盒健康探针]

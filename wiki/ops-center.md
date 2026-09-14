@@ -1,5 +1,10 @@
-# Agent Operations Center
+# Agent Operations Center (ops-center.md)
 
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
 > `herdr-task ops-center` 为多 Agent 并行运行提供分层运维视图。它读取任务注册表并按需探测 Pane 对应 Agent；它是观测聚合层，不负责推进状态机。
 
 ## 1. 四层视图

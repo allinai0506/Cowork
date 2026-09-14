@@ -1,5 +1,10 @@
 # 任务生命周期与基线验收机制 (task-lifecycle.md)
 
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
 > **任务 11 状态机、CoW 克隆隔离与基线快照验收**  
 > 关联索引: [[index]] | [[system-overview]] | [[domain-model]] | [[dag-workflow-engine]]
 
@@ -7,7 +12,7 @@
 
 ## 1. 任务状态机 (Task State Machine)
 
-`FACT` Herdr 任务生命周期严格由 11 个离散状态及其状态转换矩阵（`TRANSITIONS`）定义，任何越权状态变更将被 CLI 直接拦截。
+`FACT` HAFlow 任务生命周期严格由 11 个离散状态及其状态转换矩阵（`TRANSITIONS`）定义，任何越权状态变更将被 CLI 直接拦截。
 
 ```mermaid
 stateDiagram-v2

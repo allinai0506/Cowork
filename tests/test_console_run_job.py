@@ -141,12 +141,12 @@ class TestProductNaming(unittest.TestCase):
         cls.html = cls.module.HTML
 
     def test_product_name_is_a_first_class_constant(self):
-        self.assertEqual(self.module.PRODUCT_NAME, "共事工厂")
-        self.assertEqual(self.module.PRODUCT_TAGLINE, "本地 AI 软件工厂")
+        self.assertEqual(self.module.PRODUCT_NAME, "HAFlow")
+        self.assertEqual(self.module.PRODUCT_TAGLINE, "让人和多个 AI Agent 一起把事情做完")
 
     def test_html_renders_product_name_from_the_constant(self):
-        self.assertIn("<title>共事工厂</title>", self.html)
-        self.assertIn('<div class="brand">共事工厂</div>', self.html)
+        self.assertIn("<title>HAFlow</title>", self.html)
+        self.assertIn('<div class="brand">HAFlow</div>', self.html)
         self.assertNotIn("__PRODUCT_NAME__", self.html)
         self.assertNotIn("__PRODUCT_TAGLINE__", self.html)
 

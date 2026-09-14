@@ -1,6 +1,8 @@
 # Tab = Workflow Node 架构模型与现场机制
 
-> 本文档详细阐述 Herdr “Tab 作为工作流节点、Pane 作为 Agent 工位、Agent 作为执行者”的设计哲学、Anchor Pane 锚点机制与动态现场自愈原理。
+> **上海共事智能科技有限公司 · 共事 · HAFlow**  
+> *让人和多个 AI Agent 一起把事情做完 (Human + Agent, in Flow)*  
+> 本文档详细阐述 HAFlow “Tab 作为工作流节点、Pane 作为 Agent 工位、Agent 作为执行者”的设计哲学、Anchor Pane 锚点机制与动态现场自愈原理。
 
 ---
 
@@ -44,12 +46,12 @@ Workspace (项目空间)
 ## 3. Anchor Pane (母体锚点) 机制
 
 ### 3.1 为什么必须有 Anchor Pane？
-在 Herdr 底层设计中：
+在底层终端多工位设计中：
 - 创建新 Tab 时会附带一个初始 Root Pane。
 - 在已有 Tab 中新增工位，依赖 `herdr pane split <parent_pane>` 指令，必须指定一个既有的父 Pane。
 - 如果一个 Tab 中的任务 Pane 在执行完成后被用户全部关闭，且没有固定的底座，该 Tab 将无法再通过常规方式分裂新的工位。
 
-因此，Herdr 为每个 Node Tab 建立一个只读的 **Anchor Pane**：
+因此，HAFlow 为每个 Node Tab 建立一个只读的 **Anchor Pane**：
 1. 名称固定为 `"Anchor"`；
 2. 不承载具体的 Agent 任务执行，保持干净；
 3. 作为后续该 Node 派发所有 Task 时的 Split 母体。

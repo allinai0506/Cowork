@@ -1,7 +1,12 @@
-# Herdr LLM Wiki: 核心知识索引 (index.md)
+# HAFlow LLM Wiki: 核心知识索引 (index.md)
 
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
 > **AI Coding Agent 与工程师的主入口 (Master Entry Point)**  
-> 欢迎来到 Herdr 代码库知识层。本 Wiki 是一套完全基于仓库真实源码建立的、高保真、可追溯知识图谱。  
+> 欢迎来到 HAFlow 代码库知识层。本 Wiki 是一套完全基于仓库真实源码建立的、高保真、可追溯知识图谱。  
 > **核心原则**：Wiki 是对代码已被理解过的知识沉淀，帮助您免于重新扫描全量代码；但**代码永远是唯一事实来源**。
 
 ---
@@ -10,7 +15,7 @@
 
 如果您是第一次进入本代码库，推荐按照以下顺序建立完整的心理模型：
 
-1. **[[system-overview]] (系统全景)**: 明确系统定位（基于 Herdr 的 Multi-Agent 编排与控制平台）、解决的核心业务痛点与技术边界。
+1. **[[system-overview]] (系统全景)**: 明确系统定位（HAFlow Multi-Agent 编排与控制平台）、解决的核心业务痛点与技术边界。
 2. **[[architecture]] (运行架构与守护进程)**: 掌握常驻 LaunchAgent 守护进程、Unix Domain Socket、调度轮询机制与物理存储路径。
 3. **[[domain-model]] (领域实体与关系模型)**: 掌握 Project、Workflow、Node、Task、Slot、Anchor、Reservation 等核心概念。
 4. **[[tab-node-model]] (Tab=Node 空间现场与自愈模型)**: 理解为什么 Tab 是工作流节点、Anchor Pane 为什么是只读母体，以及系统如何在任务派发前自动检测并自愈现场。

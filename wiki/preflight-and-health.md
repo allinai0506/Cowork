@@ -1,5 +1,10 @@
 # 体检与沙盒健康探针 (preflight-and-health.md)
 
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
 > **轻量探活、Deep Preflight 沙盒深探与 Token/Auth 模式识别**  
 > 关联索引: [[index]] | [[system-overview]] | [[agent-routing-and-pools]] | [[architecture]]
 
@@ -7,7 +12,7 @@
 
 ## 1. 双层体检架构定位
 
-为了避免向无法连通、凭证过期或配额耗尽的 Agent 盲目派发任务造成流水线死锁，Herdr 建立了分层的准入体检机制：
+为了避免向无法连通、凭证过期或配额耗尽的 Agent 盲目派发任务造成流水线死锁，HAFlow 建立了分层的准入体检机制：
 
 ```mermaid
 graph LR

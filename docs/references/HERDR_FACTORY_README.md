@@ -1,7 +1,12 @@
-# Herdr Factory
+# HAFlow (设计档案 / Design Reference)
 
-> 基于 Herdr 的本地多 Agent 编排与自动研发系统  
-> 当前定位：**本地 Multi-Agent Workflow Runtime / AI 软件工厂控制层**
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
+> 本地多 Agent 编排与自动研发系统设计参考文档  
+> 当前定位：**本地 Multi-Agent Workflow Runtime / AI 协同流控制层**
 
 ---
 
