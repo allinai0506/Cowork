@@ -367,8 +367,17 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - **调度协调看门狗与事实源纯化 (`services/herdr-controller.py`)**：
     - `_workflow_entry()` 仅查询 StateStore，移除任何磁盘扫描；
     - `active_registered_workflows()` 100% 仅源自 `store.list_workflows()`，彻底移除从 `~/.herdr-controller/projects.json` 注入 `wf` 的逻辑，杜绝 Ghost Workflow；
+  - **检查点 Checkpoint 读写与分叉彻底收口 Fail-Closed (`herdr/kernel.py`)**：
+    - 彻底移除 `list_checkpoints`、`get_checkpoint` 和 `fork_workflow_from_checkpoint` 扫描磁盘旧 `.json` 并向 SQLite 反向补写 `store.save_workflow` / `store.save_task` / `store.create_checkpoint` 的运行时旁路；
+    - 所有检查点操作 100% 仅依赖 `StateStore`；若底层不存在直接抛出 `FileNotFoundError` 阻断，绝不在运行时从磁盘“起死回生”状态；
+    - 历史遗留检查点文件（`checkpoints/`）统一纳入底层 `state_db.py` 的首次建库原子事务，由 bootstrap 一次性迁移并绑定外键。
+  - **Bootstrap 失败显式抛出异常阻断启动 (`herdr/state_db.py`)**：
+    - 修复迁移失败被静默吞掉的严重隐患：`_ensure_schema` 在显式事务 `BEGIN TRANSACTION;` ... `COMMIT;` 失败并 `ROLLBACK;` 后，**必须显式 `raise` 异常**，严禁 `except: pass` 导致系统在空 SQLite 库上裸跑造成严重数据丢失；
+    - `get_db_connection` 捕获初始化异常后显式 `conn.close()` 释放文件句柄并重新抛出异常；
+    - 兼容遗留 `workflows.json` 既为 dict 亦为 list 的格式形态，增强老旧工作流格式鲁棒性。
   - **新增专项对抗测试套件 (`tests/test_critical_reads_fail_closed.py`)**：
-    - 14 项测试全面覆盖：9 项模拟 `sqlite3.OperationalError` 时的 Fail-Closed 异常阻断，Test A 验证陈旧 JSON 绝不复活已删除/不存在的 Workflow，Test B 验证未注册 Workflow 调用 `choose_agent` 抛出 `RuntimeError`，Test C 验证 `projects.json` 注入的 Ghost 工作流被 100% 过滤，Test D 验证一次性 bootstrap 迁移与后续持久隔离，Test E 验证损坏 JSON 触发原子回滚且不置位迁移标记、修复后重试无缝成功；
-  - **沉淀并归档通用工程教训 §32**（核心控制读取 Fail-Closed 铁律、Task 运行时防复活与原子迁移事务）；
-  - 全仓自动化回归测试达 365 项（100% 绿灯全部通过）。
+    - 16 项测试全面覆盖：9 项模拟 `sqlite3.OperationalError` 时的 Fail-Closed 异常阻断；Test A 验证陈旧 JSON 绝不复活已删除/不存在的 Workflow；Test B 验证未注册 Workflow 调用 `choose_agent` 抛出 `RuntimeError`；Test C 验证 `projects.json` 注入的 Ghost 工作流被 100% 过滤；Test D 验证一次性 bootstrap 迁移与后续持久隔离；Test E/G 验证损坏 JSON 触发原子回滚且显式 raise 阻断启动、修复后重试无缝成功；Test F 验证 Checkpoint 读取与分叉绝不复活状态到 SQLite 且查无记录时严格抛出 `FileNotFoundError`；
+  - **沉淀并归档通用工程教训 §32**（核心控制读取 Fail-Closed 铁律、Task/Checkpoint 运行时防复活与原子迁移显式阻断）；
+  - 全仓自动化回归测试达 367 项（100% 绿灯全部通过）。
+
 

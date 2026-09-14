@@ -163,6 +163,10 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         target_dir = target_path.parent
         wf_file = target_dir / "workflows.json"
         st_file = target_dir / "steering.json"
+        if os.environ.get("CHECKPOINTS_DIR"):
+            cp_dir = Path(os.environ["CHECKPOINTS_DIR"])
+        else:
+            cp_dir = target_dir / "checkpoints"
 
         # If a dedicated companion json exists for this DB file (e.g. /tmp/xyz.db -> /tmp/xyz.json)
         if target_path.name != "state.db" and target_path.with_suffix(".json").exists():
@@ -170,57 +174,102 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         else:
             tasks_file = target_dir / "tasks.json"
 
-        has_legacy = wf_file.exists() or tasks_file.exists() or st_file.exists()
+        has_legacy = (
+            wf_file.exists()
+            or tasks_file.exists()
+            or st_file.exists()
+            or (cp_dir.exists() and any(cp_dir.rglob("*.json")))
+        )
         if not has_legacy:
-            try:
-                conn.execute("""
-                    INSERT INTO schema_meta (key, value) VALUES ('v1_migration_done', '1')
-                    ON CONFLICT(key) DO UPDATE SET value = '1';
-                """)
-            except Exception:
-                pass
+            conn.execute("""
+                INSERT INTO schema_meta (key, value) VALUES ('v1_migration_done', '1')
+                ON CONFLICT(key) DO UPDATE SET value = '1';
+            """)
             _INITIALIZED_DBS.add(path_key)
         else:
-            migration_succeeded = False
             try:
                 conn.execute("BEGIN TRANSACTION;")
 
                 if wf_file.exists():
                     data = json.loads(wf_file.read_text(encoding="utf-8"))
-                    for wid, wf_obj in data.get("workflows", {}).items():
-                        if isinstance(wf_obj, dict):
-                            wf_obj.setdefault("workflow_id", wid)
-                            save_workflow(wf_obj, db_path=None, conn=conn)
+                    wfs_data = data.get("workflows", {})
+                    if isinstance(wfs_data, dict):
+                        for wid, wf_obj in wfs_data.items():
+                            if isinstance(wf_obj, dict):
+                                wf_obj.setdefault("workflow_id", wid)
+                                save_workflow(wf_obj, db_path=None, conn=conn)
+                    elif isinstance(wfs_data, list):
+                        for wf_obj in wfs_data:
+                            if isinstance(wf_obj, dict) and wf_obj.get("workflow_id"):
+                                save_workflow(wf_obj, db_path=None, conn=conn)
 
                 if tasks_file.exists():
                     data = json.loads(tasks_file.read_text(encoding="utf-8"))
-                    for t_obj in data.get("tasks", []):
-                        if isinstance(t_obj, dict) and t_obj.get("task_id"):
-                            save_task(t_obj, db_path=None, conn=conn)
+                    t_list = data.get("tasks", [])
+                    if isinstance(t_list, list):
+                        for t_obj in t_list:
+                            if isinstance(t_obj, dict) and t_obj.get("task_id"):
+                                save_task(t_obj, db_path=None, conn=conn)
 
                 if st_file.exists():
                     s_data = json.loads(st_file.read_text(encoding="utf-8"))
-                    for tid, q in s_data.get("steering_queues", {}).items():
-                        for s_item in q:
-                            s_item.setdefault("task_id", tid)
-                            save_steer(s_item, conn=conn)
-                    for h in s_data.get("history", []):
-                        record_steering_history(h, conn=conn)
+                    q_dict = s_data.get("steering_queues", {})
+                    if isinstance(q_dict, dict):
+                        for tid, q in q_dict.items():
+                            if isinstance(q, list):
+                                for s_item in q:
+                                    s_item.setdefault("task_id", tid)
+                                    save_steer(s_item, conn=conn)
+                    h_list = s_data.get("history", [])
+                    if isinstance(h_list, list):
+                        for h in h_list:
+                            record_steering_history(h, conn=conn)
+
+                if cp_dir.exists():
+                    for f in sorted(cp_dir.rglob("*.json")):
+                        if f.is_file():
+                            snap = json.loads(f.read_text(encoding="utf-8"))
+                            cpid = snap.get("checkpoint_id")
+                            wid = snap.get("workflow_id")
+                            if not cpid or not wid:
+                                continue
+                            cur_wf = conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (wid,))
+                            if not cur_wf.fetchone():
+                                save_workflow(
+                                    snap.get("workflow") or {"workflow_id": wid, "title": wid, "status": "unknown"},
+                                    db_path=None,
+                                    conn=conn,
+                                )
+                            conn.execute("""
+                                INSERT INTO checkpoints (
+                                    checkpoint_id, workflow_id, tag, parent_checkpoint_id,
+                                    created_at, workflow_status, task_count, snapshot_json, metadata_json
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ON CONFLICT(checkpoint_id) DO NOTHING;
+                            """, (
+                                cpid,
+                                wid,
+                                snap.get("tag", ""),
+                                snap.get("parent_checkpoint_id"),
+                                float(snap.get("created_at") or time.time()),
+                                snap.get("workflow", {}).get("status", "unknown"),
+                                len(snap.get("tasks", [])),
+                                json.dumps(snap, ensure_ascii=False),
+                                json.dumps(snap.get("metadata", {}), ensure_ascii=False),
+                            ))
 
                 conn.execute("""
                     INSERT INTO schema_meta (key, value) VALUES ('v1_migration_done', '1')
                     ON CONFLICT(key) DO UPDATE SET value = '1';
                 """)
                 conn.execute("COMMIT;")
-                migration_succeeded = True
+                _INITIALIZED_DBS.add(path_key)
             except Exception:
                 try:
                     conn.execute("ROLLBACK;")
                 except Exception:
                     pass
-
-            if migration_succeeded:
-                _INITIALIZED_DBS.add(path_key)
+                raise
     else:
         _INITIALIZED_DBS.add(path_key)
 
@@ -244,7 +293,15 @@ def get_db_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
 
-    _ensure_schema(conn, str(path.resolve()))
+    path_key = str(path.resolve())
+    try:
+        _ensure_schema(conn, path_key)
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
     return conn
 
 

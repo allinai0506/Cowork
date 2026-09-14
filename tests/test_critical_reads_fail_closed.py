@@ -265,7 +265,7 @@ def test_one_time_bootstrap_migration_then_strict_isolation(tmp_path, monkeypatc
 
 
 def test_atomic_bootstrap_rollback_on_corrupt_legacy_json(tmp_path):
-    """Test E: Verify corrupt legacy JSON prevents v1_migration_done, rolls back data, and retrying after fix succeeds."""
+    """Test E: Verify corrupt legacy JSON prevents v1_migration_done, raises to block startup, rolls back data, and retrying after fix succeeds."""
     from herdr.state_store import get_state_store, reset_state_store
 
     test_db = tmp_path / "atomic_boot_test" / "state.db"
@@ -292,9 +292,10 @@ def test_atomic_bootstrap_rollback_on_corrupt_legacy_json(tmp_path):
     # Intentionally corrupt tasks.json
     legacy_tasks.write_text("{invalid json corrupt content...", encoding="utf-8")
 
-    # First init attempt:
+    # First init attempt: MUST raise and fail closed (cannot start on corrupt data)
     reset_state_store()
-    store = get_state_store(db_path=test_db)
+    with pytest.raises(Exception):
+        get_state_store(db_path=test_db)
 
     # Verify migration failed atomically:
     # 1. v1_migration_done was NOT marked
@@ -305,9 +306,6 @@ def test_atomic_bootstrap_rollback_on_corrupt_legacy_json(tmp_path):
     cur_wf = conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?;", (wid,))
     assert cur_wf.fetchone() is None
     conn.close()
-
-    assert store.get_workflow(wid) is None
-    assert store.get_task(tid) is None
 
     # Now repair tasks.json
     legacy_tasks.write_text(json.dumps({
@@ -337,5 +335,131 @@ def test_atomic_bootstrap_rollback_on_corrupt_legacy_json(tmp_path):
     task = store2.get_task(tid)
     assert task is not None
     assert task["status"] == "pending"
+
+
+def test_checkpoint_read_and_fork_never_resurrects_sqlite(tmp_path, monkeypatch):
+    """Test F: Verify Checkpoint reading, listing, or forking never resurrects deleted state into SQLite."""
+    from herdr import kernel
+    from herdr.state_store import get_state_store, reset_state_store
+
+    db_file = tmp_path / "cp_test" / "state.db"
+    cp_dir = tmp_path / "cp_test" / "checkpoints"
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    cp_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("HERDR_STATE_DB", str(db_file))
+    monkeypatch.setenv("CHECKPOINTS_DIR", str(cp_dir))
+
+    wid = "wf-cp-01"
+    cpid = "cp-snapshot-001"
+    tid = "task-cp-001"
+
+    # Write legacy checkpoint JSON on disk
+    wf_cp_dir = cp_dir / wid
+    wf_cp_dir.mkdir(parents=True, exist_ok=True)
+    cp_file = wf_cp_dir / f"{cpid}.json"
+    cp_file.write_text(json.dumps({
+        "checkpoint_id": cpid,
+        "workflow_id": wid,
+        "tag": "golden_backup",
+        "created_at": 1773480000,
+        "workflow": {
+            "workflow_id": wid,
+            "title": "Legacy Checkpoint WF",
+            "status": "running"
+        },
+        "tasks": [
+            {
+                "task_id": tid,
+                "workflow_id": wid,
+                "node": "dev",
+                "status": "completed"
+            }
+        ]
+    }), encoding="utf-8")
+
+    # Initialize store
+    reset_state_store()
+    store = get_state_store(db_path=db_file)
+
+    # Explicitly ensure SQLite does NOT have this checkpoint, workflow, or task
+    store.delete_workflow(wid)
+    assert store.get_workflow(wid) is None
+    assert store.get_task(tid) is None
+    with pytest.raises(FileNotFoundError):
+        store.get_checkpoint(wid, cpid)
+
+    # 1. kernel.list_checkpoints(wid) must return empty list and NOT resurrect into SQLite
+    cps = kernel.list_checkpoints(wid)
+    assert cps == []
+    assert store.get_workflow(wid) is None
+    assert store.get_task(tid) is None
+
+    # 2. kernel.get_checkpoint(wid, cpid) must fail closed (raise FileNotFoundError) and NOT resurrect
+    with pytest.raises(FileNotFoundError):
+        kernel.get_checkpoint(wid, cpid)
+    assert store.get_workflow(wid) is None
+    assert store.get_task(tid) is None
+
+    # 3. kernel.fork_workflow_from_checkpoint must fail closed (raise FileNotFoundError) and NOT resurrect
+    with pytest.raises(FileNotFoundError):
+        kernel.fork_workflow_from_checkpoint(cpid, "wf-forked-999")
+    assert store.get_workflow(wid) is None
+    assert store.get_workflow("wf-forked-999") is None
+    assert store.get_task(tid) is None
+
+
+def test_bootstrap_failure_blocks_startup_fail_closed(tmp_path):
+    """Test G: Verify bootstrap failure propagates exception to block system startup and leaves no partial state."""
+    from herdr.state_store import get_state_store, reset_state_store
+
+    test_db = tmp_path / "boot_fail_closed" / "state.db"
+    test_dir = test_db.parent
+    test_dir.mkdir(parents=True, exist_ok=True)
+
+    legacy_wf = test_dir / "workflows.json"
+    legacy_tasks = test_dir / "tasks.json"
+
+    wid = "wf-boot-fail-01"
+
+    legacy_wf.write_text(json.dumps({
+        "version": 1,
+        "workflows": {
+            wid: {
+                "workflow_id": wid,
+                "project_id": "proj-fail-closed",
+                "status": "running",
+            }
+        }
+    }), encoding="utf-8")
+
+    # Corrupt tasks.json
+    legacy_tasks.write_text("<<<malformed json content>>>", encoding="utf-8")
+
+    # Attempting to start/open store MUST fail closed by raising an exception
+    reset_state_store()
+    with pytest.raises(Exception):
+        get_state_store(db_path=test_db)
+
+    # Ensure DB is completely clean of partial state
+    conn = sqlite3.connect(str(test_db))
+    cur = conn.execute("SELECT value FROM schema_meta WHERE key = 'v1_migration_done';")
+    assert cur.fetchone() is None
+    cur_wf = conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?;", (wid,))
+    assert cur_wf.fetchone() is None
+    conn.close()
+
+    # Repair legacy_tasks
+    legacy_tasks.write_text(json.dumps({
+        "tasks": [{"task_id": "task-boot-fixed-01", "workflow_id": wid, "status": "pending"}]
+    }), encoding="utf-8")
+
+    # Restarting store now succeeds cleanly
+    reset_state_store()
+    store = get_state_store(db_path=test_db)
+    assert store.get_workflow(wid) is not None
+    assert store.get_task("task-boot-fixed-01") is not None
+
+
 
 
