@@ -20,7 +20,7 @@
 ## 🚀 核心功能与特性 (Core Features)
 
 1. **Tab = Workflow Node（声明式 DAG 工作流）**  
-   任何业务流程（研发、标书、客诉等）均通过声明式 YAML/JSON 模板定义，支持分支并发与条件汇聚。
+   支持通过声明式 YAML/JSON 模板定义研发、标书、客诉等多类业务流程，支持分支并发与条件汇聚。
 2. **Pane = Agent Workspace（工位现场保留与 CoW 隔离）**  
    动态分配独立的 Agent 执行现场，任务执行在独立 Git Copy-on-Write (CoW) 克隆中，自带 Anchor 锚点现场保护。
 3. **运行时自动自愈 (`ensure_node_runtime`)**  
@@ -30,7 +30,7 @@
 5. **Node 级 Agent 策略与负载路由**  
    精准配置节点的 Agent 偏好 (`preferred`)、固定执行者 (`fixed`) 或排除项 (`exclude`)，配合预占锁分摊并发负载。
 6. **深层健康探针 (Deep Preflight)**  
-   为主流 Agent（Claude、Codex、OpenCode、Qoder、Agy、Pi 等）提供无副作用的沙盒实测验证，阻断死锁与无效分发。
+   为主流 Agent（Claude、Codex、OpenCode、Qoder、Agy、Pi 等）提供隔离的沙盒实测验证，降低无效分发和因 Agent 不可用造成的阻塞风险。
 7. **兼容现有 legacy stage-based workflow**  
    双向归一化引擎兼容既有项目、`--stage` 参数与历史工单，降低迁移成本。
 8. **Web Console 与运维驾驶舱**  
@@ -52,7 +52,7 @@
 
 ## 🏗️ 仓库目录架构规范 (Directory Layout)
 
-Herdr 严格遵循现代分布式系统与 Python 开源工程最佳实践，严禁在根目录堆放平铺代码：
+仓库按核心库、CLI、后台服务、控制台、测试与文档分层组织：
 
 ```
 herdr/

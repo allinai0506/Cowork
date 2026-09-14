@@ -419,4 +419,4 @@ herdr-deep-preflight --deep
 
 ### Q3：现有的旧项目（如 `xiyu-bid-poc`、`nexusarchive`）还能正常工作吗？
 **兼容支持。**
-系统内部的 `normalize_workflow` 会在内存和配置文件中自动双向映射 `nodes` 与 `stages`。现有的 `--stage` 参数、旧版脚本以及已派发的历史任务继续获得支持，降低迁移成本。
+系统内部的 `normalize_workflow` 会在加载时统一生成 `nodes` 与 `stages` 的兼容表示。现有的 `--stage` 参数、旧版脚本以及已派发的历史任务继续获得支持，降低迁移成本。

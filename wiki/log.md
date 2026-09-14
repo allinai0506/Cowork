@@ -386,6 +386,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
     - 主文档产品定位收敛：将“通用多 Agent 工作流编排操作系统”收敛为“基于空间现场模型的多 Agent 工作流协同平台”；将“生产级的‘操作系统底座’”调整为“实用的工作流协同底座”，剔除过度包装；
     - 兼容性声明去伪存真：将危险的“100% 向下兼容”严格改为“兼容现有 legacy stage-based workflow”，防范未来 Schema 演进可能带来的绝对承诺反噬；
     - 运行时自愈 SLA 消除：将“毫秒级自动修复/自愈”明确替换为机制事实描述“任务派发前自动检测并修复”，杜绝为系统背负不必要的物理时间 SLA；
+    - 绝对化与过度承诺用语二次清剿：消除“任何业务流程”（收敛为“支持通过声明式 YAML/JSON 模板定义研发、标书、客诉等多类业务流程”）；消除“无副作用沙盒”（改为“隔离的沙盒实测验证”）；消除“阻断死锁”（改为“降低无效分发和因 Agent 不可用造成的阻塞风险”）；
+    - 剔除无意义 AI 宣传套话：仓库目录章节移除“严格遵循现代分布式系统与 Python 开源工程最佳实践”，替换为直接的分层结构陈述；
+    - 纠偏机制描述失真：修正 `universal-workflow-guide.md` 中关于 `normalize_workflow` 的描述，严格与代码纯内存变换对齐（“在加载时统一生成 `nodes` 与 `stages` 的兼容表示”，而非脑补写回配置文件）；
     - 同步对齐 `CLAUDE.md`、`docs/guides/universal-workflow-guide.md`、`docs/architecture/architecture-overview.md`、`docs/operations/troubleshooting-faq.md`、`wiki/index.md`、`wiki/tab-node-model.md`、`wiki/common-change-paths.md` 中的同类措辞；
   - **沉淀通用工程教训 §33**（工程语言收敛与反过度承诺准则：剔除危险绝对化承诺与不可控 SLA，坚持事实驱动与严谨务实的系统定位）；
   - 全仓自动化回归测试 368 项保持 100% 全部通过。
