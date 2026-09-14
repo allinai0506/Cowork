@@ -250,6 +250,7 @@ def test_cross_module_single_source_of_truth_anti_skew(store_env):
         "task_id": tid,
         "workflow_id": wid,
         "node": "dev",
+        "agent": "codex",
         "status": "working",
         "pane_id": "pane-mock-99",
     })

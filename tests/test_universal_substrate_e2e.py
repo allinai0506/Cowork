@@ -46,6 +46,8 @@ def e2e_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(c, "WORKFLOWS_FILE", str(wf_file))
     monkeypatch.setattr(c, "TASKS_FILE", str(tasks_file))
+    from unittest.mock import MagicMock
+    monkeypatch.setattr("subprocess.run", lambda *a, **kw: MagicMock(returncode=0, stdout="", stderr=""))
 
     wf_file.write_text(json.dumps({"workflows": {}}), encoding="utf-8")
     tasks_file.write_text(json.dumps({"tasks": []}), encoding="utf-8")
@@ -130,6 +132,7 @@ class TestUniversalSubstrateEndToEnd:
             "stage": "data_extraction",
             "status": "working",
             "pane_id": "pane-mock-data",
+            "agent": "codex",
             "goal": "抓取公开财务数据与物流附注",
             "started_at": 1773479050,
         }

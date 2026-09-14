@@ -1500,31 +1500,35 @@ pytest -q
 | 陷阱 | 说明 |
 |---|---|
 | **原型冒充通用协议** | 能跑通 ≠ 通用。应在 commit 时即明确标注当前实现的协议等级（`tty_prototype`），不过度标签 |
-| **if-agent 分支蔓延** | 在核心调度层直接散落 `if agent == X` 的代价是：每新增 Agent 必须改调度层，测试矩阵指数增长 |
-| **`ok` 语义混淆** | "dispatch 已被记录"与"TTY 物理发送成功"是两个不同断言。混用会导致无人值守环境 subprocess 失败 → `ok=False` → 误报 dispatch 失败，即使数据已落库 |
-| **副作用与能力声明分离** | Agent 的能力差异（是否支持 interrupt/soft_steer/resume）应通过声明式矩阵（dataclass）表达，而非散落在条件分支里 |
+| **Adapter 绑定 TTY 实现** | 基础 `AgentAdapter` 若直接耦合 `ctrl-c`/`send-text`/`pane_id`，未来 RPC/API Adapter 就会隐式继承 TTY 副作用。必须拆分为纯契约 `AgentAdapter` 与传输实现 `TTYAgentAdapter` |
+| **未知 Agent 乐观假设** | 未知 Agent 绝不能默认假设支持 TTY 信号。未知必须 Fail-Closed（`UnknownAgentAdapter` 所有能力全 `False`，拒绝执行干预） |
+| **能力声明沦为说明书** | `supports_soft_steer=False` 时若仍向 TTY 注入，能力矩阵就只是装饰。声明不支持时必须在 Adapter 层直接阻断并返回 `ok=False`，严禁偷偷 fallback |
+| **物理发送失败掩盖为已分发** | TTY 物理投递失败若将指令标记为 `dispatched`，指令就会永久丢失。投递失败必须保持 `pending` 并记录 `last_delivery_error`；interrupt 失败必须阻止 Task 进入 `interrupted`，防事实漂移 |
 
 ### 操作规范
 
-1. **命名即协议契约**：凡是 TTY 层面的模拟实现，代码注释与返回体必须明确标注 `protocol_level="tty_prototype"`，区别于 `native_rpc`、`api` 等未来更高层协议；
-2. **能力矩阵 > 条件分支**：为每个 Agent 实现 `AgentAdapter` 子类，以 `@dataclass(frozen=True) AgentCapability` 声明四大能力位（`supports_interrupt`、`supports_soft_steer`、`supports_resume`、`supports_prompt_injection`），调度逻辑依能力标志路由，零 `if agent ==` 分支；
-3. **注册中心扩展**：新增 Agent 只需实现 `class XxxAdapter(AgentAdapter)` + `register_agent_adapter(XxxAdapter())`，核心调度层零修改；
-4. **`ok` 与 `pane_delivery_ok` 解耦**：业务层 `ok=True` 表示 steer 已被原子记录 dispatched；TTY 物理发送结果通过 `pane_delivery_ok` 字段单独暴露，防止无人值守环境 subprocess 失败引发误报；
-5. **门禁：dispatch 后必须有协议元信息**：steer 历史、task entity 的 `steering_history` 条目均必须包含 `protocol` 与 `adapter` 字段，确保审计可追溯。
+1. **抽象契约与传输解耦**：基础 `AgentAdapter` 零 TTY/Pane/Subprocess 知识；所有终端按键模拟下沉到 `TTYAgentAdapter`；
+2. **Fail-Closed 默认安全**：`AgentCapability` 默认全部 `False`，未注册 Agent 降级为 `UnknownAgentAdapter`，拒绝一切 Steering；
+3. **能力即门禁**：`supports_soft_steer=False`（如 OpenCode/Qoder）时必须拒绝软插话并阻止物理写入，提示使用带中断的 urgent steer；
+4. **真实交付语义（Anti-Skew）**：
+   - 物理投递失败或无 Pane 时，指令状态严格保持 `pending`，返回 `ok=False`、`pane_delivery_ok=False`；
+   - 中断信号物理发送失败时，`halt_task` 严格拒绝将 Task 状态推进为 `interrupted`，保持原状态并记录 `task_halt_failed`；
+5. **门禁与审计追溯**：每个干预指令在 StateStore 与任务历史中均附带 `protocol` 与 `adapter` 元信息，全量回归验证 384 项全绿。
 
 ### 验证命令 / 证据
 
 ```bash
-# 1. AgentAdapter 能力矩阵与注册中心完整性
+# 1. AgentAdapter 契约纯净度、Fail-Closed 与 Soft-Steer 阻断门禁
 pytest tests/test_agent_adapter.py -v
 
-# 2. Steering Mesh 协议元信息断言（protocol/adapter 字段必须出现在历史记录）
+# 2. Steering Mesh 物理投递失败保持 pending & interrupt 失败防状态漂移
 pytest tests/test_steering_mesh.py -v
 
-# 3. 全量回归（基线 368 → 378 passed）
+# 3. 全量回归（基线 368 → 384 passed）
 pytest -q
 
 # 4. CLI 能力矩阵查询验证
 bin/herdr-task adapters
 ```
+
 

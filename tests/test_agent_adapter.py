@@ -6,7 +6,9 @@ import pytest
 from herdr.agent_adapter import (
     AgentAdapter,
     AgentCapability,
+    TTYAgentAdapter,
     TTYSteeringPrototypeAdapter,
+    UnknownAgentAdapter,
     ClaudeAdapter,
     CodexAdapter,
     OpenCodeAdapter,
@@ -19,29 +21,25 @@ from herdr.agent_adapter import (
 )
 
 
-def test_agent_capability_dataclass():
-    cap = AgentCapability(
-        supports_interrupt=True,
-        supports_soft_steer=False,
-        supports_resume=False,
-        supports_prompt_injection=True,
-        protocol_level="tty_prototype",
-    )
-    assert cap.supports_interrupt is True
+def test_agent_capability_defaults_fail_closed():
+    """AgentCapability defaults must be all False (fail-closed security)."""
+    cap = AgentCapability()
+    assert cap.supports_interrupt is False
     assert cap.supports_soft_steer is False
     assert cap.supports_resume is False
-    assert cap.supports_prompt_injection is True
-    assert cap.protocol_level == "tty_prototype"
+    assert cap.supports_prompt_injection is False
+    assert cap.protocol_level == "unknown"
 
     d = cap.to_dict()
-    assert d["supports_interrupt"] is True
-    assert d["protocol_level"] == "tty_prototype"
+    assert d["supports_interrupt"] is False
+    assert d["protocol_level"] == "unknown"
 
 
 def test_known_agent_adapters_capability_matrix():
     # Claude
     claude = get_agent_adapter("claude")
     assert isinstance(claude, ClaudeAdapter)
+    assert isinstance(claude, TTYAgentAdapter)
     assert claude.name == "claude"
     assert claude.supports_interrupt is True
     assert claude.supports_soft_steer is True
@@ -58,7 +56,7 @@ def test_known_agent_adapters_capability_matrix():
     assert codex.supports_resume is True
     assert codex.supports_prompt_injection is True
 
-    # OpenCode
+    # OpenCode: auto-mode runs tool loops; soft steer without interrupt gets swallowed
     opencode = get_agent_adapter("opencode")
     assert isinstance(opencode, OpenCodeAdapter)
     assert opencode.name == "opencode"
@@ -67,18 +65,20 @@ def test_known_agent_adapters_capability_matrix():
     assert opencode.supports_resume is False
     assert opencode.supports_prompt_injection is True
 
-    # Qoder / qodercli
+    # Qoder / qodercli: soft steer not supported
     qoder = get_agent_adapter("qodercli")
     assert isinstance(qoder, QoderAdapter)
     assert qoder.name == "qodercli"
     assert qoder.supports_interrupt is True
     assert qoder.supports_soft_steer is False
+    assert qoder.supports_resume is False
 
     # Agy
     agy = get_agent_adapter("agy")
     assert isinstance(agy, AgyAdapter)
     assert agy.name == "agy"
     assert agy.supports_interrupt is True
+    assert agy.supports_soft_steer is True
     assert agy.supports_resume is True
 
     # Pi
@@ -86,6 +86,7 @@ def test_known_agent_adapters_capability_matrix():
     assert isinstance(pi, PiAdapter)
     assert pi.name == "pi"
     assert pi.supports_interrupt is True
+    assert pi.supports_soft_steer is True
     assert pi.supports_resume is False
 
 
@@ -96,15 +97,107 @@ def test_adapter_registry_aliases_and_fallback():
     assert isinstance(q1, QoderAdapter)
     assert isinstance(q2, QoderAdapter)
 
-    # Unknown agent falls back to TTYSteeringPrototypeAdapter
+    # Unknown agent falls back to UnknownAgentAdapter (fail closed)
     fallback = get_agent_adapter("unknown-llm-bot")
-    assert isinstance(fallback, TTYSteeringPrototypeAdapter)
-    assert fallback.name == "tty_prototype"
-    assert fallback.protocol_level == "tty_prototype"
+    assert isinstance(fallback, UnknownAgentAdapter)
+    assert fallback.name == "unknown"
+    assert fallback.protocol_level == "unknown"
+    assert fallback.supports_interrupt is False
+    assert fallback.supports_soft_steer is False
 
-    # None falls back to TTYSteeringPrototypeAdapter
+    # None falls back to UnknownAgentAdapter (fail closed)
     none_adapter = get_agent_adapter(None)
-    assert isinstance(none_adapter, TTYSteeringPrototypeAdapter)
+    assert isinstance(none_adapter, UnknownAgentAdapter)
+
+
+def test_unknown_agent_refuses_all_steering():
+    """Test 1: Unknown agent must fail-closed and refuse all steering operations."""
+    adapter = get_agent_adapter("unregistered-agent-xyz")
+    assert isinstance(adapter, UnknownAgentAdapter)
+
+    # Urgent steer refused
+    urgent_res = adapter.steer_urgent("pane-1", "Emergency stop")
+    assert urgent_res["ok"] is False
+    assert urgent_res["reason"] == "unknown_agent_no_adapter_registered"
+    assert urgent_res["interrupted"] is False
+    assert urgent_res["injected"] is False
+
+    # Soft steer refused
+    soft_res = adapter.steer_soft("pane-1", "Gentle correction")
+    assert soft_res["ok"] is False
+    assert soft_res["reason"] == "unknown_agent_no_adapter_registered"
+
+    # Interrupt and resume refused
+    assert adapter.interrupt("pane-1") is False
+    assert adapter.resume("pane-1") is False
+
+
+def test_soft_steer_not_supported_refuses_tty_injection():
+    """Test 2: When supports_soft_steer=False, steer_soft must refuse and NOT inject into TTY."""
+    opencode = get_agent_adapter("opencode")
+    qoder = get_agent_adapter("qodercli")
+
+    assert opencode.supports_soft_steer is False
+    assert qoder.supports_soft_steer is False
+
+    mock_run = MagicMock()
+    with patch("subprocess.run", mock_run):
+        res_opencode = opencode.steer_soft("pane-opencode", "Please adjust algorithm")
+        res_qoder = qoder.steer_soft("pane-qoder", "Please adjust algorithm")
+
+    # Both must refuse execution
+    assert res_opencode["ok"] is False
+    assert res_opencode["reason"] == "soft_steer_not_supported"
+    assert res_qoder["ok"] is False
+    assert res_qoder["reason"] == "soft_steer_not_supported"
+
+    # CRITICAL: zero TTY subprocess calls must have been made!
+    assert mock_run.call_count == 0
+
+
+def test_agent_adapter_contract_independent_of_tty():
+    """Base AgentAdapter has no TTY knowledge; transport-agnostic adapters can be cleanly implemented."""
+    class MockRpcAdapter(AgentAdapter):
+        name = "mock_rpc"
+        capabilities = AgentCapability(
+            supports_interrupt=True,
+            supports_soft_steer=True,
+            supports_resume=True,
+            supports_prompt_injection=True,
+            protocol_level="native_rpc",
+        )
+
+        def __init__(self):
+            self.calls = []
+
+        def interrupt(self, target: str, reason: str = "") -> bool:
+            self.calls.append(("interrupt", target, reason))
+            return True
+
+        def steer_urgent(self, target: str, instruction: str, operator: str = "human", wait_after_interrupt: float = 0.1):
+            self.calls.append(("steer_urgent", target, instruction))
+            return {"ok": True, "interrupted": True, "injected": True, "adapter": self.name, "protocol_level": self.protocol_level}
+
+        def steer_soft(self, target: str, instruction: str, operator: str = "human"):
+            self.calls.append(("steer_soft", target, instruction))
+            return {"ok": True, "interrupted": False, "injected": True, "adapter": self.name, "protocol_level": self.protocol_level}
+
+        def resume(self, target: str, **kwargs) -> bool:
+            self.calls.append(("resume", target))
+            return True
+
+    rpc_adapter = MockRpcAdapter()
+    register_agent_adapter(rpc_adapter)
+
+    retrieved = get_agent_adapter("mock_rpc")
+    assert retrieved.name == "mock_rpc"
+    assert retrieved.protocol_level == "native_rpc"
+    assert retrieved.supports_interrupt is True
+
+    res = retrieved.steer_urgent("node-endpoint-1", "Switch to fallback")
+    assert res["ok"] is True
+    assert res["protocol_level"] == "native_rpc"
+    assert ("steer_urgent", "node-endpoint-1", "Switch to fallback") in rpc_adapter.calls
 
 
 def test_list_agent_adapters():
@@ -122,27 +215,7 @@ def test_list_agent_adapters():
     assert claude_info["protocol_level"] == "tty_prototype"
 
 
-def test_custom_agent_adapter_registration():
-    class CustomMockAdapter(AgentAdapter):
-        name = "custom-mock"
-        capabilities = AgentCapability(
-            supports_interrupt=False,
-            supports_soft_steer=True,
-            supports_resume=False,
-            supports_prompt_injection=True,
-            protocol_level="native_rpc",
-        )
-
-    custom = CustomMockAdapter()
-    register_agent_adapter(custom)
-
-    retrieved = get_agent_adapter("custom-mock")
-    assert retrieved.name == "custom-mock"
-    assert retrieved.supports_interrupt is False
-    assert retrieved.protocol_level == "native_rpc"
-
-
-def test_adapter_steer_urgent():
+def test_adapter_steer_urgent_success():
     adapter = CodexAdapter()
     mock_run = MagicMock()
     mock_run.return_value.returncode = 0
@@ -165,7 +238,21 @@ def test_adapter_steer_urgent():
     assert "enter" in calls[2][0][0]
 
 
-def test_adapter_steer_soft():
+def test_adapter_steer_urgent_interrupt_failure():
+    """If interrupt fails during steer_urgent, the operation must abort with ok=False."""
+    adapter = ClaudeAdapter()
+    mock_run = MagicMock()
+    mock_run.return_value.returncode = 1  # simulate failure
+
+    with patch("subprocess.run", mock_run):
+        res = adapter.steer_urgent("pane-fail", "Stop", operator="tester", wait_after_interrupt=0.0)
+
+    assert res["ok"] is False
+    assert res["interrupted"] is False
+    assert res["reason"] == "interrupt_failed"
+
+
+def test_adapter_steer_soft_success():
     adapter = ClaudeAdapter()
     mock_run = MagicMock()
     mock_run.return_value.returncode = 0
@@ -183,22 +270,6 @@ def test_adapter_steer_soft():
     assert not any("ctrl-c" in c[0][0] for c in calls)
     assert any("send-text" in c[0][0] for c in calls)
     assert any("enter" in c[0][0] for c in calls)
-
-
-def test_adapter_unsupported_interrupt():
-    class NoInterruptAdapter(AgentAdapter):
-        name = "no-interrupt"
-        capabilities = AgentCapability(supports_interrupt=False)
-
-    adapter = NoInterruptAdapter()
-    mock_run = MagicMock()
-    with patch("subprocess.run", mock_run):
-        ok = adapter.interrupt("pane-999", reason="test")
-        res = adapter.steer_urgent("pane-999", "Emergency stop", wait_after_interrupt=0.0)
-
-    assert ok is False
-    assert res["interrupted"] is False
-    assert not any("ctrl-c" in c[0][0] for c in mock_run.call_args_list)
 
 
 def test_adapter_resume():

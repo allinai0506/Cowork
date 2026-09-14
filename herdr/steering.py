@@ -209,7 +209,13 @@ def get_task_adapter(task_id: str) -> AgentAdapter:
 
 
 def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
-    """Immediately dispatch a specific steer item via the task's AgentAdapter (TTY prototype)."""
+    """Immediately dispatch a specific steer item via the task's AgentAdapter (TTY prototype).
+
+    Status semantics:
+      "dispatched" — delivery was attempted AND succeeded (pane_delivery_ok=True).
+      "pending"    — no pane, or delivery failed; item stays pending for retry.
+                     last_delivery_error is recorded for observability.
+    """
     s_data = load_steering_data()
     q = s_data.get("steering_queues", {}).get(task_id, [])
     item = next((x for x in q if x.get("steer_id") == steer_id), None)
@@ -222,8 +228,8 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
     agent_name = task.get("agent") if task else None
     adapter = get_agent_adapter(agent_name)
 
-    # 1. Dispatch urgent intervention via AgentAdapter
-    steer_result = {"ok": True, "interrupted": False, "injected": False}
+    # 1. Attempt physical delivery via AgentAdapter
+    now = time.time()
     if pane_id:
         steer_result = adapter.steer_urgent(
             pane_id,
@@ -231,16 +237,32 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
             operator=item.get("operator", "human"),
             wait_after_interrupt=0.1,
         )
+        delivery_attempted = True
+        delivery_ok = bool(steer_result.get("ok", False))
+    else:
+        steer_result = {"ok": False, "interrupted": False, "injected": False}
+        delivery_attempted = False
+        delivery_ok = False
 
-    # 2. Update steer item status & protocol metadata
-    now = time.time()
-    item["status"] = "dispatched"
-    item["dispatched_at"] = now
+    # 2. Update steer item status based on delivery outcome
     item["protocol"] = adapter.protocol_level
     item["adapter"] = adapter.name
+    item["last_delivery_attempt"] = now
+    item["delivery_attempt_count"] = item.get("delivery_attempt_count", 0) + 1
+
+    if delivery_ok:
+        item["status"] = "dispatched"
+        item["dispatched_at"] = now
+    else:
+        # Keep pending; record failure reason for retry / observability
+        error_reason = (
+            steer_result.get("reason", "delivery_failed") if delivery_attempted
+            else "no_pane_id"
+        )
+        item["last_delivery_error"] = error_reason
 
     s_data.setdefault("history", []).append({
-        "action": "steer_dispatched",
+        "action": "steer_dispatched" if delivery_ok else "steer_delivery_failed",
         "steer_id": steer_id,
         "task_id": task_id,
         "instruction": item["instruction"],
@@ -248,12 +270,14 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
         "urgent": item.get("urgent", False),
         "protocol": adapter.protocol_level,
         "adapter": adapter.name,
+        "delivery_ok": delivery_ok,
+        "delivery_attempted": delivery_attempted,
         "timestamp": now,
     })
     save_steering_data(s_data)
 
-    # 3. Record on task entity in tasks.json
-    if task:
+    # 3. Record on task entity only when successfully delivered
+    if task and delivery_ok:
         task["last_steered_at"] = now
         steering_history = list(task.get("steering_history") or [])
         steering_history.append({
@@ -269,20 +293,27 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
         save_tasks_data(tasks_data)
 
     return {
-        "ok": True,  # "ok" = steer was recorded as dispatched, regardless of TTY delivery
+        "ok": delivery_ok,
         "steer_id": steer_id,
         "task_id": task_id,
         "urgent": item.get("urgent", False),
-        "status": "dispatched",
+        "status": "dispatched" if delivery_ok else "pending",
         "protocol": adapter.protocol_level,
         "adapter": adapter.name,
-        "pane_delivery_ok": steer_result.get("ok", True),  # TTY-level send result for observability
-        "dispatched_at": item["dispatched_at"],
+        "pane_delivery_ok": delivery_ok,
+        "delivery_attempted": delivery_attempted,
+        "dispatched_at": item.get("dispatched_at"),
     }
 
 
 def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Dispatch the next pending steer item via task's AgentAdapter (soft non-interrupting)."""
+    """Dispatch the next pending steer item via task's AgentAdapter (soft non-interrupting).
+
+    Status semantics:
+      "dispatched" — delivery was attempted AND succeeded (pane_delivery_ok=True).
+      "pending"    — no pane, delivery failed, or soft steer not supported;
+                     item stays pending for retry or escalation.
+    """
     s_data = load_steering_data()
     q = s_data.get("steering_queues", {}).get(task_id, [])
     if not q:
@@ -303,23 +334,43 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
     agent_name = task.get("agent") if task else None
     adapter = get_agent_adapter(agent_name)
 
-    # Inject without interrupt for smooth steering
-    steer_result = {"ok": True, "interrupted": False, "injected": False}
+    now = time.time()
     if pane_id:
         steer_result = adapter.steer_soft(
             pane_id,
             instruction=target_item["instruction"],
             operator=target_item.get("operator", "human"),
         )
+        delivery_attempted = True
+        delivery_ok = bool(steer_result.get("ok", False))
+        pane_delivery_ok = delivery_ok
+    else:
+        steer_result = {
+            "ok": False,
+            "interrupted": False,
+            "injected": False,
+            "reason": "no_pane_id",
+            "detail": f"Task '{task_id}' has no assigned pane_id",
+        }
+        delivery_attempted = False
+        delivery_ok = False
+        pane_delivery_ok = False
 
-    now = time.time()
-    target_item["status"] = "dispatched"
-    target_item["dispatched_at"] = now
     target_item["protocol"] = adapter.protocol_level
     target_item["adapter"] = adapter.name
+    target_item["last_delivery_attempt"] = now
+    target_item["delivery_attempt_count"] = target_item.get("delivery_attempt_count", 0) + 1
+
+    if delivery_ok:
+        target_item["status"] = "dispatched"
+        target_item["dispatched_at"] = now
+        target_item.pop("last_delivery_error", None)
+    else:
+        target_item["status"] = "pending"
+        target_item["last_delivery_error"] = steer_result.get("reason", "delivery_failed")
 
     s_data.setdefault("history", []).append({
-        "action": "steer_dispatched",
+        "action": "steer_dispatched" if delivery_ok else "steer_delivery_failed",
         "steer_id": target_item["steer_id"],
         "task_id": task_id,
         "instruction": target_item["instruction"],
@@ -327,11 +378,14 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
         "urgent": target_item.get("urgent", False),
         "protocol": adapter.protocol_level,
         "adapter": adapter.name,
+        "delivery_ok": delivery_ok,
+        "delivery_attempted": delivery_attempted,
+        "error": steer_result.get("reason"),
         "timestamp": now,
     })
     save_steering_data(s_data)
 
-    if task:
+    if task and delivery_ok:
         task["last_steered_at"] = now
         steering_history = list(task.get("steering_history") or [])
         steering_history.append({
@@ -347,14 +401,16 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
         save_tasks_data(tasks_data)
 
     return {
-        "ok": True,  # "ok" = steer was recorded as dispatched, regardless of TTY delivery
+        "ok": delivery_ok,
         "steer_id": target_item["steer_id"],
         "task_id": task_id,
-        "status": "dispatched",
+        "status": "dispatched" if delivery_ok else "pending",
         "protocol": adapter.protocol_level,
         "adapter": adapter.name,
-        "pane_delivery_ok": steer_result.get("ok", True),  # TTY-level send result for observability
-        "dispatched_at": target_item["dispatched_at"],
+        "pane_delivery_ok": pane_delivery_ok,
+        "delivery_attempted": delivery_attempted,
+        "reason": steer_result.get("reason"),
+        "dispatched_at": target_item.get("dispatched_at"),
     }
 
 
@@ -364,7 +420,13 @@ def halt_task(
     operator: str = "human",
     execute_kill: bool = True,
 ) -> Dict[str, Any]:
-    """Perform a graceful soft halt (SIGINT / ctrl-c) on a task via its AgentAdapter."""
+    """Perform a graceful soft halt (SIGINT / ctrl-c) on a task via its AgentAdapter.
+
+    Safety contract:
+      If interrupt fails (pane not found, agent unsupported, or signal failure),
+      the task status MUST NOT transition to "interrupted". Task remains in its
+      current status to prevent runtime fact drift.
+    """
     tasks_data = load_tasks_data()
     task = next((t for t in tasks_data.get("tasks", []) if t.get("task_id") == task_id), None)
     if not task:
@@ -374,11 +436,53 @@ def halt_task(
     agent_name = task.get("agent")
     adapter = get_agent_adapter(agent_name)
 
-    if pane_id and execute_kill:
-        adapter.interrupt(pane_id, reason=reason)
-
-    old_status = task.get("status")
     now = time.time()
+    old_status = task.get("status")
+
+    if execute_kill:
+        if not pane_id:
+            interrupt_ok = False
+            error_reason = "no_pane_id"
+        elif not adapter.supports_interrupt:
+            interrupt_ok = False
+            error_reason = f"agent_{adapter.name}_does_not_support_interrupt"
+        else:
+            interrupt_ok = bool(adapter.interrupt(pane_id, reason=reason))
+            error_reason = None if interrupt_ok else "interrupt_signal_failed"
+    else:
+        # State-only transition without physical kill
+        interrupt_ok = True
+        error_reason = None
+
+    s_data = load_steering_data()
+
+    if not interrupt_ok:
+        # Interrupt FAILED: Task status MUST NOT transition to interrupted!
+        s_data.setdefault("history", []).append({
+            "action": "task_halt_failed",
+            "task_id": task_id,
+            "reason": reason,
+            "error": error_reason,
+            "operator": operator,
+            "protocol": adapter.protocol_level,
+            "adapter": adapter.name,
+            "timestamp": now,
+        })
+        save_steering_data(s_data)
+
+        return {
+            "ok": False,
+            "task_id": task_id,
+            "status": old_status,
+            "error": error_reason,
+            "reason": reason,
+            "operator": operator,
+            "protocol": adapter.protocol_level,
+            "adapter": adapter.name,
+            "timestamp": now,
+        }
+
+    # Interrupt succeeded: proceed to update task status
     task["status"] = "interrupted"
     task["interrupt_reason"] = reason
     task["interrupted_by"] = operator
@@ -396,8 +500,6 @@ def halt_task(
     })
     save_tasks_data(tasks_data)
 
-    # Record in steering history
-    s_data = load_steering_data()
     s_data.setdefault("history", []).append({
         "action": "task_halted",
         "task_id": task_id,
