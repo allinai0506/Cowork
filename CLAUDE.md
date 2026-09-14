@@ -111,7 +111,7 @@ python3 -m compileall herdr/ services/ bin/ tests/
 ### ⚠️ 坑点 3：Tab 与 Anchor Pane 误关与易失性
 - **现象**：在 Herdr UI 中误关了某个阶段的 Tab 或 Anchor 终端，担心任务崩溃或找不到工位。
 - **原因**：Tab ID 和 Pane ID 只是动态的运行时缓存，真正的逻辑身份是 Node ID / Label。
-- **正解**：Herdr 具备毫秒级自动自愈能力。只要触发任务派发或调用 `ensure_node_runtime`，系统会自动发现并重新创建对应 Tab 和 Anchor Pane，无需手动重建。
+- **正解**：Herdr 在任务派发前具备自动检测并自愈能力。只要触发任务派发或调用 `ensure_node_runtime`，系统会自动发现并重新创建对应 Tab 和 Anchor Pane，无需手动重建。
 
 ### ⚠️ 坑点 4：`No READY Agent found` 路由阻断
 - **现象**：启动工作流或派发任务时，提示找不到可用 Agent。

@@ -381,5 +381,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - **沉淀并归档通用工程教训 §32**（核心控制读取 Fail-Closed 铁律、Task/Checkpoint 运行时防复活、原子迁移显式阻断与旧库升级防覆写）；
   - 全仓自动化回归测试达 368 项（100% 绿灯全部通过）。
 
-
-
+- **2026-09-14: 文档与工程承诺语言收敛（反过度承诺与 SLA 去伪存真）**
+  - **核心定位与宣称口径务实收敛 (`README.md`, `CLAUDE.md`, `docs/`, `wiki/`)**：
+    - 主文档产品定位收敛：将“通用多 Agent 工作流编排操作系统”收敛为“基于空间现场模型的多 Agent 工作流协同平台”；将“生产级的‘操作系统底座’”调整为“实用的工作流协同底座”，剔除过度包装；
+    - 兼容性声明去伪存真：将危险的“100% 向下兼容”严格改为“兼容现有 legacy stage-based workflow”，防范未来 Schema 演进可能带来的绝对承诺反噬；
+    - 运行时自愈 SLA 消除：将“毫秒级自动修复/自愈”明确替换为机制事实描述“任务派发前自动检测并修复”，杜绝为系统背负不必要的物理时间 SLA；
+    - 同步对齐 `CLAUDE.md`、`docs/guides/universal-workflow-guide.md`、`docs/architecture/architecture-overview.md`、`docs/operations/troubleshooting-faq.md`、`wiki/index.md`、`wiki/tab-node-model.md`、`wiki/common-change-paths.md` 中的同类措辞；
+  - **沉淀通用工程教训 §33**（工程语言收敛与反过度承诺准则：剔除危险绝对化承诺与不可控 SLA，坚持事实驱动与严谨务实的系统定位）；
+  - 全仓自动化回归测试 368 项保持 100% 全部通过。

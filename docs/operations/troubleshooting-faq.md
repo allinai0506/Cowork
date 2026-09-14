@@ -9,7 +9,7 @@
 ### 1.1 Tab 或 Anchor Pane 被误关闭怎么办？
 - **现象**：在 Herdr 终端中不小心点了关闭 Tab，或者误关闭了名为 `"Anchor"` 的窗格。
 - **排查**：执行 `herdr-task node-status --workflow-id <id>` 查看工位状态。
-- **恢复**：系统已内置毫秒级自动自愈机制，下次派发任务或执行以下命令即可恢复：
+- **恢复**：系统已内置任务派发前的自动检测与修复机制，下次派发任务或执行以下命令即可恢复：
   ```bash
   herdr-task ensure-runtime --workflow-id <workflow_id> --node <node_id>
   ```

@@ -2,7 +2,7 @@
 
 > **产品名称：共事工厂**（控制台产品，定义于 `console/herdr_factory_console.py` 的 `PRODUCT_NAME` 常量）  
 > **Tab = Workflow Node，Pane = Agent Workspace，Agent = Executor**  
-> 基于空间现场模型的通用多 Agent 工作流编排操作系统。
+> 基于空间现场模型的多 Agent 工作流协同平台。
 
 ---
 
@@ -10,7 +10,7 @@
 
 在大语言模型驱动的智能体研发体系中，多 Agent 协同正迅速从早期单线、固定的 6 阶段研发演进为复杂、多变的通用业务流程（如招投标标书生成、多角色客服仲裁、企业级自动化调研等）。
 
-**Herdr Multi-Agent Workflow Platform** 旨在为多 Agent 协同提供一套生产级的“操作系统底座”：
+**Herdr Multi-Agent Workflow Platform** 旨在为多 Agent 协同提供一套实用的工作流协同底座：
 - **物理现场与逻辑流程统一**：将终端窗口/标签页作为工作流节点（Tab = Workflow Node），将窗格作为独立 Agent 工位（Pane = Agent Workspace）。
 - **流程解耦与自由拓扑**：打破固定流程枷锁，支持任意有向无环图（DAG）工作流模板定义。
 - **自愈与高可用保障**：将易失的运行时现场与不可变的逻辑定义分离，实现误关自动自愈、探针沙盒健康体检与并发防死锁调度。
@@ -24,15 +24,15 @@
 2. **Pane = Agent Workspace（工位现场保留与 CoW 隔离）**  
    动态分配独立的 Agent 执行现场，任务执行在独立 Git Copy-on-Write (CoW) 克隆中，自带 Anchor 锚点现场保护。
 3. **运行时自动自愈 (`ensure_node_runtime`)**  
-   彻底解耦逻辑定义与 Tab/Pane ID。Tab 或 Anchor 误关后，任务派发时毫秒级自动修复重建，永不中断流程。
+   解耦逻辑定义与 Tab/Pane ID。Tab 或 Anchor 误关后，在任务派发前自动检测并修复，保障流程稳定推进。
 4. **DAG 依赖自动推进**  
    基于 Kahn 算法拓扑排序与依赖判定，前置任务完成后由 Controller 守护进程自动推进后续就绪节点。
 5. **Node 级 Agent 策略与负载路由**  
    精准配置节点的 Agent 偏好 (`preferred`)、固定执行者 (`fixed`) 或排除项 (`exclude`)，配合预占锁分摊并发负载。
 6. **深层健康探针 (Deep Preflight)**  
    为主流 Agent（Claude、Codex、OpenCode、Qoder、Agy、Pi 等）提供无副作用的沙盒实测验证，阻断死锁与无效分发。
-7. **100% 向下兼容**  
-   双向归一化引擎全面兼容既有项目、`--stage` 参数与历史工单，平滑升级无断层。
+7. **兼容现有 legacy stage-based workflow**  
+   双向归一化引擎兼容既有项目、`--stage` 参数与历史工单，降低迁移成本。
 8. **Web Console 与运维驾驶舱**  
    提供轻量级 Web 控制台（默认 `127.0.0.1:8765`），提供实时 Workflow/Tab 现场视角、Agent Fleet 状态监控、Dashboard V2 运维驾驶舱与异步任务启动。
 

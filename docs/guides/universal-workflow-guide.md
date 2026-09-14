@@ -173,7 +173,7 @@ herdr-task launch \
   --criteria "输出废标条款清单到 docs/bidding/compliance_matrix.md"
 ```
 
-> **系统自愈保障**：派发前系统会自动调用 `ensure_node_runtime`，若该 Node 的 Tab 或 Anchor Pane 不慎被关闭，系统会在毫秒级内自动将其重建，绝不会报 `pane_not_found` 错误。
+> **系统自愈保障**：派发前系统会自动调用 `ensure_node_runtime`，若该 Node 的 Tab 或 Anchor Pane 不慎被关闭，系统会在任务派发前自动检测并修复重建，避免报 `pane_not_found` 错误。
 
 ### 4.2 查看当前 Workflow 各 Node 推进状态
 
@@ -418,5 +418,5 @@ herdr-deep-preflight --deep
 ```
 
 ### Q3：现有的旧项目（如 `xiyu-bid-poc`、`nexusarchive`）还能正常工作吗？
-**100% 兼容。**
-系统内部的 `normalize_workflow` 会在内存和配置文件中自动双向映射 `nodes` 与 `stages`。所有现有的 `--stage` 参数、旧版脚本以及已派发的历史任务均无缝继续运行，无需重置。
+**兼容支持。**
+系统内部的 `normalize_workflow` 会在内存和配置文件中自动双向映射 `nodes` 与 `stages`。现有的 `--stage` 参数、旧版脚本以及已派发的历史任务继续获得支持，降低迁移成本。

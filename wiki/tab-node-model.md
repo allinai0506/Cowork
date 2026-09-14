@@ -1,6 +1,6 @@
 # 空间现场模型与动态自愈机制 (tab-node-model.md)
 
-> **Tab = Node 空间现场、Anchor 母体机制与毫秒级拓扑自愈**  
+> **Tab = Node 空间现场、Anchor 母体机制与任务派发前拓扑自动自愈**  
 > 关联索引: [[index]] | [[system-overview]] | [[domain-model]] | [[task-lifecycle]]
 
 ---
