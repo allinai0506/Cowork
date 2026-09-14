@@ -358,3 +358,72 @@ def test_dispatch_pending_steer_opencode_soft_steer_refused(steering_env):
     assert q[0]["last_delivery_error"] == "soft_steer_not_supported"
 
 
+def test_steer_urgent_interrupt_success_inject_failure_sets_task_interrupted(steering_env):
+    """Blocker 1: When ctrl-c succeeds but prompt injection fails, task must transition to
+    'interrupted' (with requires_attention=True) to prevent runtime fact drift, while steer
+    item remains 'pending' with last_delivery_error='inject_prompt_failed'.
+    """
+    task_id = "task-partial-urgent-fail-01"
+    _seed_task(steering_env, task_id, status="working", pane_id="pane-partial-01", workflow_id="wf-test")
+
+    # Mock subprocess.run:
+    # 1st call (send-keys ctrl-c): returncode = 0 (success)
+    # 2nd call (send-text prompt): returncode = 1 (failure)
+    def side_effect(cmd, *args, **kwargs):
+        mock_res = MagicMock()
+        if "send-keys" in cmd and "ctrl-c" in cmd:
+            mock_res.returncode = 0
+        else:
+            mock_res.returncode = 1
+        return mock_res
+
+    with patch("subprocess.run", side_effect=side_effect):
+        res = steering.queue_steer(task_id, "Directive to inject", urgent=True)
+
+    # 1. Steering item outcome
+    assert res["ok"] is False
+    assert res["status"] == "pending"
+    assert res["interrupted"] is True
+    assert res["injected"] is False
+    assert res["reason"] == "inject_prompt_failed"
+
+    # 2. Queue state in steering: pending with error recorded
+    s_data = steering.load_steering_data()
+    q = s_data["steering_queues"][task_id]
+    assert len(q) == 1
+    assert q[0]["status"] == "pending"
+    assert q[0]["last_delivery_error"] == "inject_prompt_failed"
+
+    # 3. Task state in tasks.json: MUST be interrupted with requires_attention=True!
+    t_data = json.loads(steering_env["tasks_file"].read_text(encoding="utf-8"))
+    t = next(x for x in t_data["tasks"] if x["task_id"] == task_id)
+    assert t["status"] == "interrupted"
+    assert t["interrupt_reason"] == "urgent_steer_injection_failed"
+    assert t.get("requires_attention") is True
+
+
+def test_steering_history_append_only_no_duplicate_inflation(steering_env):
+    """Blocker 3: Multiple steering dispatches must append to history without duplicate inflation."""
+    from herdr.state_store import get_state_store
+    task_id = "task-anti-inflate-01"
+    _seed_task(steering_env, task_id, status="working", pane_id="pane-inflate-01")
+
+    mock_run = MagicMock()
+    mock_run.return_value.returncode = 0
+
+    with patch("subprocess.run", mock_run):
+        # Dispatch 3 distinct steers sequentially
+        steering.queue_steer(task_id, "Instruction 1", urgent=True)
+        steering.queue_steer(task_id, "Instruction 2", urgent=True)
+        steering.queue_steer(task_id, "Instruction 3", urgent=True)
+
+    store = get_state_store(db_path=steering_env["tasks_file"].parent / "state.db")
+    hist = store.list_steering_history(task_id=task_id)
+
+    # Exactly 3 entries, not 1 + 2 + 3 = 6 or more!
+    assert len(hist) == 3
+    instructions = [h.get("instruction") for h in hist]
+    assert instructions == ["Instruction 1", "Instruction 2", "Instruction 3"]
+
+
+

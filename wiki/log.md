@@ -404,7 +404,12 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
       - `halt_task`：物理中断失败时，严格拒绝推进 Task 状态至 `interrupted`，保持原状态并记录 `task_halt_failed`，杜绝后台 Agent 裸跑但状态显示已中断的虚假成功；
   - **测试覆盖**：
     - `tests/test_agent_adapter.py` 增至 11 项（覆盖 Fail-Closed、Soft-Steer 阻断、TTY 独立契约验证、中断失败防御）；
-    - `tests/test_steering_mesh.py` 增至 11 项（覆盖无 Pane 投递拒绝、物理失败保持 Pending、中断失败防状态漂移、OpenCode 软插话阻断）；
-    - 全量回归 **384 / 384 passed**（基线 368，净新增 16 项）。
+    - `tests/test_steering_mesh.py` 增至 13 项（覆盖无 Pane 投递拒绝、物理失败保持 Pending、中断失败防状态漂移、OpenCode 软插话阻断、紧急插话半途失败反向漂移防御、历史事件 Append-Only 防重复膨胀）；
+    - 全量回归 **386 / 386 passed**（基线 368，净新增 18 项）。
+  - **PR #25 Review Blockers 修复**：
+    1. **紧急插话半途失败反向漂移防御**：当 Urgent Steer 中断成功但注入失败时，Task 强制流转至 `interrupted` (`requires_attention=True`)，指令保留 `pending`，杜绝 Agent 进程已停但数据库显示 working 的事实漂移；
+    2. **切断循环依赖与 Steering 纯粹化**：消除 `TTYAgentAdapter` 内部对 `steering._send_keys/_send_text` 的反向依赖与 monkeypatch 钩子；`steering.py` 彻底移除 `import subprocess`，纯粹收敛为编排层；
+    3. **历史记录 Append-Only 防重复膨胀**：修复 `save_steering_data` 遍历旧历史全量二次插入 SQLite 的严重缺陷，确立 audit 事件严格单向 append-only，单次重试零膨胀，为 PR #26 Event Stream 扫清障碍；
   - **Wiki & Lessons**：`wiki/index.md`、`wiki/log.md`、`docs/lessons/lessons-learned.md §34` 全面同步。
+
 

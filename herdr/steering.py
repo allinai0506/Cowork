@@ -9,21 +9,19 @@ OpenCode, Qoder, Agy, Pi) differ substantially in their handling of:
 - Multi-turn session state preservation
 - Contextual session resumption
 
-All agent-specific runtime differences and capabilities are formalized through
-herdr.agent_adapter.AgentAdapter.
+All agent-specific runtime differences, capabilities, and transport mechanisms
+are formalized through herdr.agent_adapter.AgentAdapter.
 """
 
+from datetime import datetime
 import json
 import os
-import subprocess
+from pathlib import Path
 import tempfile
 import time
-import uuid
-from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
+import uuid
 
-from . import state_db
 from .agent_adapter import (
     AgentAdapter,
     AgentCapability,
@@ -95,17 +93,19 @@ def load_steering_data() -> Dict[str, Any]:
 
 
 def save_steering_data(data: Dict[str, Any]) -> None:
+    """Save/upsert steering queue state into StateStore and sync disk.
+
+    History entries are strictly append-only and recorded individually via
+    store.record_steering_history() to prevent duplicate exponential inflation.
+    """
     store = get_state_store()
     for tid, q in data.get("steering_queues", {}).items():
         for item in q:
             item.setdefault("task_id", tid)
             store.save_steer(item)
-    for h in data.get("history", []):
-        store.record_steering_history(h)
     st_file = get_steering_file()
     if st_file.parent.exists():
-        _atomic_write_json(st_file, data)
-
+        _atomic_write_json(st_file, store.export_steering_json())
 
 
 def format_steer_prompt(instruction: str, operator: str = "human") -> str:
@@ -113,41 +113,13 @@ def format_steer_prompt(instruction: str, operator: str = "human") -> str:
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return (
         "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"【总指挥实时插话纠偏指令 - STEERING INSTRUCTION】\n"
+        "【总指挥实时插话纠偏指令 - STEERING INSTRUCTION】\n"
         f"发起人：{operator} | 时间：{now_str}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "总指挥向你发送了高优先级干预指令，请立即优先吸收并按此调整后续动作：\n"
         f"> {instruction}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     )
-
-
-def _send_keys(pane_id: str, key: str) -> bool:
-    """Send keystroke (e.g. enter, ctrl-c) to Herdr pane."""
-    try:
-        r = subprocess.run(
-            ["herdr", "pane", "send-keys", pane_id, key],
-            text=True,
-            capture_output=True,
-            timeout=10,
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
-
-
-def _send_text(pane_id: str, text: str) -> bool:
-    """Send text prompt to Herdr pane."""
-    try:
-        r = subprocess.run(
-            ["herdr", "pane", "send-text", pane_id, text],
-            text=True,
-            capture_output=True,
-            timeout=10,
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
 
 
 def queue_steer(
@@ -201,7 +173,7 @@ def queue_steer(
 
 
 def get_task_adapter(task_id: str) -> AgentAdapter:
-    """Resolve the AgentAdapter for a given task, falling back to tty_prototype."""
+    """Resolve the AgentAdapter for a given task, falling back to unknown (fail-closed)."""
     tasks_data = load_tasks_data()
     task = next((t for t in tasks_data.get("tasks", []) if t.get("task_id") == task_id), None)
     agent_name = task.get("agent") if task else None
@@ -209,12 +181,17 @@ def get_task_adapter(task_id: str) -> AgentAdapter:
 
 
 def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
-    """Immediately dispatch a specific steer item via the task's AgentAdapter (TTY prototype).
+    """Immediately dispatch a specific steer item via the task's AgentAdapter.
 
     Status semantics:
       "dispatched" — delivery was attempted AND succeeded (pane_delivery_ok=True).
       "pending"    — no pane, or delivery failed; item stays pending for retry.
                      last_delivery_error is recorded for observability.
+
+    Anti-drift safety invariant:
+      If urgent steering succeeds in interrupting (Ctrl-C) but fails to inject
+      prompt, the physical Agent is already stopped. The task MUST transition to
+      "interrupted" with requires_attention=True to prevent fact drift against SQLite.
     """
     s_data = load_steering_data()
     q = s_data.get("steering_queues", {}).get(task_id, [])
@@ -228,8 +205,10 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
     agent_name = task.get("agent") if task else None
     adapter = get_agent_adapter(agent_name)
 
-    # 1. Attempt physical delivery via AgentAdapter
     now = time.time()
+    old_status = task.get("status") if task else None
+
+    # 1. Attempt physical delivery via AgentAdapter
     if pane_id:
         steer_result = adapter.steer_urgent(
             pane_id,
@@ -239,10 +218,18 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
         )
         delivery_attempted = True
         delivery_ok = bool(steer_result.get("ok", False))
+        pane_delivery_ok = delivery_ok
     else:
-        steer_result = {"ok": False, "interrupted": False, "injected": False}
+        steer_result = {
+            "ok": False,
+            "interrupted": False,
+            "injected": False,
+            "reason": "no_pane_id",
+            "detail": f"Task '{task_id}' has no assigned pane_id",
+        }
         delivery_attempted = False
         delivery_ok = False
+        pane_delivery_ok = False
 
     # 2. Update steer item status based on delivery outcome
     item["protocol"] = adapter.protocol_level
@@ -253,15 +240,41 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
     if delivery_ok:
         item["status"] = "dispatched"
         item["dispatched_at"] = now
+        item.pop("last_delivery_error", None)
     else:
         # Keep pending; record failure reason for retry / observability
         error_reason = (
             steer_result.get("reason", "delivery_failed") if delivery_attempted
             else "no_pane_id"
         )
+        item["status"] = "pending"
         item["last_delivery_error"] = error_reason
 
-    s_data.setdefault("history", []).append({
+    # 3. Handle partial urgent failure: interrupt succeeded, but prompt injection failed!
+    # Agent was physically halted by Ctrl-C; advance task to interrupted to prevent fact drift.
+    if not delivery_ok and steer_result.get("interrupted"):
+        if task:
+            task["status"] = "interrupted"
+            task["interrupt_reason"] = "urgent_steer_injection_failed"
+            task["interrupted_by"] = item.get("operator", "human")
+            task["interrupted_at"] = now
+            task["requires_attention"] = True
+            task["protocol"] = adapter.protocol_level
+            task["adapter"] = adapter.name
+            task.setdefault("status_history", []).append({
+                "from": old_status,
+                "to": "interrupted",
+                "reason": "urgent_steer_injection_failed",
+                "operator": item.get("operator", "human"),
+                "protocol": adapter.protocol_level,
+                "adapter": adapter.name,
+                "timestamp": now,
+            })
+            save_tasks_data(tasks_data)
+
+    # 4. Append-only record to StateStore audit history (zero duplication)
+    store = get_state_store()
+    history_entry = {
         "action": "steer_dispatched" if delivery_ok else "steer_delivery_failed",
         "steer_id": steer_id,
         "task_id": task_id,
@@ -272,11 +285,15 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
         "adapter": adapter.name,
         "delivery_ok": delivery_ok,
         "delivery_attempted": delivery_attempted,
+        "interrupted": steer_result.get("interrupted", False),
+        "injected": steer_result.get("injected", False),
+        "error": steer_result.get("reason"),
         "timestamp": now,
-    })
+    }
+    store.record_steering_history(history_entry)
     save_steering_data(s_data)
 
-    # 3. Record on task entity only when successfully delivered
+    # 5. Record on task entity steering_history only when successfully delivered
     if task and delivery_ok:
         task["last_steered_at"] = now
         steering_history = list(task.get("steering_history") or [])
@@ -300,8 +317,11 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
         "status": "dispatched" if delivery_ok else "pending",
         "protocol": adapter.protocol_level,
         "adapter": adapter.name,
-        "pane_delivery_ok": delivery_ok,
+        "pane_delivery_ok": pane_delivery_ok,
         "delivery_attempted": delivery_attempted,
+        "interrupted": steer_result.get("interrupted", False),
+        "injected": steer_result.get("injected", False),
+        "reason": steer_result.get("reason"),
         "dispatched_at": item.get("dispatched_at"),
     }
 
@@ -369,7 +389,9 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
         target_item["status"] = "pending"
         target_item["last_delivery_error"] = steer_result.get("reason", "delivery_failed")
 
-    s_data.setdefault("history", []).append({
+    # Append-only record to StateStore audit history (zero duplication)
+    store = get_state_store()
+    history_entry = {
         "action": "steer_dispatched" if delivery_ok else "steer_delivery_failed",
         "steer_id": target_item["steer_id"],
         "task_id": task_id,
@@ -382,7 +404,8 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
         "delivery_attempted": delivery_attempted,
         "error": steer_result.get("reason"),
         "timestamp": now,
-    })
+    }
+    store.record_steering_history(history_entry)
     save_steering_data(s_data)
 
     if task and delivery_ok:
@@ -455,10 +478,11 @@ def halt_task(
         error_reason = None
 
     s_data = load_steering_data()
+    store = get_state_store()
 
     if not interrupt_ok:
         # Interrupt FAILED: Task status MUST NOT transition to interrupted!
-        s_data.setdefault("history", []).append({
+        history_entry = {
             "action": "task_halt_failed",
             "task_id": task_id,
             "reason": reason,
@@ -467,7 +491,8 @@ def halt_task(
             "protocol": adapter.protocol_level,
             "adapter": adapter.name,
             "timestamp": now,
-        })
+        }
+        store.record_steering_history(history_entry)
         save_steering_data(s_data)
 
         return {
@@ -500,7 +525,7 @@ def halt_task(
     })
     save_tasks_data(tasks_data)
 
-    s_data.setdefault("history", []).append({
+    history_entry = {
         "action": "task_halted",
         "task_id": task_id,
         "reason": reason,
@@ -508,7 +533,8 @@ def halt_task(
         "protocol": adapter.protocol_level,
         "adapter": adapter.name,
         "timestamp": now,
-    })
+    }
+    store.record_steering_history(history_entry)
     save_steering_data(s_data)
 
     return {

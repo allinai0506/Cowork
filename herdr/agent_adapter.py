@@ -254,26 +254,14 @@ class TTYAgentAdapter(AgentAdapter):
         protocol_level="tty_prototype",
     )
 
-    # ---- TTY primitives (delegating with test-patch awareness) ---------------
+    # ---- TTY primitives ------------------------------------------------------
 
     def send_keys(self, pane_id: str, key: str) -> bool:
-        """Send keystroke to Herdr pane."""
-        try:
-            from . import steering
-            if hasattr(steering, "_send_keys") and steering._send_keys is not _send_keys:
-                return steering._send_keys(pane_id, key)
-        except Exception:
-            pass
+        """Send keystroke to Herdr pane via _send_keys."""
         return _send_keys(pane_id, key)
 
     def send_text(self, pane_id: str, text: str) -> bool:
-        """Send text prompt to Herdr pane."""
-        try:
-            from . import steering
-            if hasattr(steering, "_send_text") and steering._send_text is not _send_text:
-                return steering._send_text(pane_id, text)
-        except Exception:
-            pass
+        """Send text prompt to Herdr pane via _send_text."""
         return _send_text(pane_id, text)
 
     def inject_prompt(self, pane_id: str, prompt: str) -> bool:
