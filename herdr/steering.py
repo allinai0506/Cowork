@@ -28,7 +28,7 @@ from .agent_adapter import (
     get_agent_adapter,
     list_agent_adapters,
 )
-from .state_store import get_state_store, StateStore
+from .state_store import get_state_store, StateStore, sync_tasks_projection
 
 ACTIVE_STATUSES = {"dispatched", "working", "rework", "blocked", "paused", "interrupted"}
 
@@ -264,23 +264,29 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
     # Agent was physically halted by Ctrl-C; advance task to interrupted to prevent fact drift.
     if not delivery_ok and steer_result.get("interrupted"):
         if task:
-            task["status"] = "interrupted"
-            task["interrupt_reason"] = "urgent_steer_injection_failed"
-            task["interrupted_by"] = item.get("operator", "human")
-            task["interrupted_at"] = now
-            task["requires_attention"] = True
-            task["protocol"] = adapter.protocol_level
-            task["adapter"] = adapter.name
-            task.setdefault("status_history", []).append({
-                "from": old_status,
-                "to": "interrupted",
-                "reason": "urgent_steer_injection_failed",
-                "operator": item.get("operator", "human"),
+            tid = task.get("task_id")
+            meta = {
+                "interrupt_reason": "urgent_steer_injection_failed",
+                "interrupted_by": item.get("operator", "human"),
+                "interrupted_at": now,
+                "requires_attention": True,
                 "protocol": adapter.protocol_level,
                 "adapter": adapter.name,
-                "timestamp": now,
-            })
-            save_tasks_data(tasks_data)
+            }
+            try:
+                from herdr import kernel
+                store = get_state_store()
+                kernel.transition_task(
+                    task_id=tid,
+                    to_status="interrupted",
+                    reason="urgent_steer_injection_failed",
+                    source="steering",
+                    metadata=meta,
+                    store=store,
+                )
+            except Exception as exc:
+                item["transition_error"] = str(exc)
+                # Fail-closed: do NOT directly mutate task status or call save_tasks_data
 
     # 4. Append-only record to StateStore audit history (zero duplication)
     store = get_state_store()
@@ -306,7 +312,6 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
 
     # 5. Record on task entity steering_history only when successfully delivered
     if task and delivery_ok:
-        task["last_steered_at"] = now
         steering_history = list(task.get("steering_history") or [])
         steering_history.append({
             "steer_id": steer_id,
@@ -317,8 +322,13 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
             "adapter": adapter.name,
             "dispatched_at": now,
         })
-        task["steering_history"] = steering_history
-        save_tasks_data(tasks_data)
+        store.update_task_metadata(task_id, {
+            "last_steered_at": now,
+            "steering_history": steering_history,
+        })
+        tasks_file = get_tasks_file()
+        if tasks_file.parent.exists():
+            sync_tasks_projection(store=store, tasks_file=tasks_file)
 
     return {
         "ok": delivery_ok,
@@ -421,7 +431,6 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
     save_steering_data(s_data)
 
     if task and delivery_ok:
-        task["last_steered_at"] = now
         steering_history = list(task.get("steering_history") or [])
         steering_history.append({
             "steer_id": target_item["steer_id"],
@@ -432,8 +441,13 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
             "adapter": adapter.name,
             "dispatched_at": now,
         })
-        task["steering_history"] = steering_history
-        save_tasks_data(tasks_data)
+        store.update_task_metadata(task_id, {
+            "last_steered_at": now,
+            "steering_history": steering_history,
+        })
+        tasks_file = get_tasks_file()
+        if tasks_file.parent.exists():
+            sync_tasks_projection(store=store, tasks_file=tasks_file)
 
     return {
         "ok": delivery_ok,
@@ -521,22 +535,36 @@ def halt_task(
         }
 
     # Interrupt succeeded: proceed to update task status
-    task["status"] = "interrupted"
-    task["interrupt_reason"] = reason
-    task["interrupted_by"] = operator
-    task["interrupted_at"] = now
-    task["protocol"] = adapter.protocol_level
-    task["adapter"] = adapter.name
-    task.setdefault("status_history", []).append({
-        "from": old_status,
-        "to": "interrupted",
-        "reason": reason,
-        "operator": operator,
+    meta = {
+        "interrupt_reason": reason,
+        "interrupted_by": operator,
+        "interrupted_at": now,
         "protocol": adapter.protocol_level,
         "adapter": adapter.name,
-        "timestamp": now,
-    })
-    save_tasks_data(tasks_data)
+    }
+    try:
+        from herdr import kernel
+        store = get_state_store()
+        kernel.transition_task(
+            task_id=task_id,
+            to_status="interrupted",
+            reason=reason,
+            source="steering",
+            metadata=meta,
+            store=store,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "task_id": task_id,
+            "status": old_status,
+            "error": f"transition_task_failed: {exc}",
+            "reason": reason,
+            "operator": operator,
+            "protocol": adapter.protocol_level,
+            "adapter": adapter.name,
+            "timestamp": now,
+        }
 
     history_entry = {
         "action": "task_halted",

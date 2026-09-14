@@ -1580,3 +1580,73 @@ pytest tests/test_state_store.py -q
 # 3. 全仓自动化回归
 pytest -q
 ```
+
+---
+
+## 36. Kernel State Transition Gateway：状态变迁与事件流的单一事务收敛，及单向投影与严格单一事实源原则
+
+### 问题背景
+
+在引入控制原语与 StateStore 统一事实源后，运行时仍有多处组件（`herdr-task` CLI、`herdr-factory`、`services/herdr-sentinel.py`、`herdr/steering.py`）直接修改 `task["status"]` 或 `workflow["status"]`。这种分散的状态突变导致：
+1. 状态跃迁不受约束，非法跃迁（如从 `pending` 跳跃至 `completed`）无法被统一拦截；
+2. 状态变迁与 `WorkflowEvent` 事件流脱节，事件审计流遗漏了最核心的生命周期事件；
+3. 过渡期曾试图在运行时保留 JSON 反向倒灌 SQLite 以适配未初始化 DB 的旧测试，破坏了 SQLite 作为唯一事实源（Single Source of Truth）的原则，引发幽灵任务复活与跨进程写覆盖竞态；
+4. 资源清理中曾出现“先拆解实体（finalize task/close tab/purge clone），最后才做状态转移校验”的顺序倒置，导致非法转移抛错时物理现场已被破坏；
+5. 快照全量写回（Snapshot UPSERT）反向击穿 Gateway：当操作仅需更新元数据（如 `stage_verdict`、`paused_nodes`、`gate_overrides`、`history`、`commit` 等）时，若读取旧内存快照并调用全量 `save_tasks` / `save_workflows`，会倒灌陈旧的 `status` 字段，从而在没有 `WorkflowEvent` 的情况下静默覆盖并发 Gateway 刚刚推进的最新状态。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| **状态修改入口分散且缺乏约束** | 状态机逻辑若散落在各 CLI 与守护进程中，规则修改极易遗漏，非法跳转无法自证 | 建立 Functional Core（`herdr/transitions.py`）集中管理状态矩阵与纯校验逻辑，严禁各模块手写内联 transitions 字典 |
+| **状态落库与事件追加脱节** | 状态写完了但事件写入失败，或者事件写入成功但状态未持久化，导致状态快照与事件重放流不一致 | 在 `state_db.py` 中将状态持久化与 `record_event(..., conn=conn)` 收敛在同一个 SQLite `BEGIN IMMEDIATE` 事务内，强保原子性 |
+| **严格单一事实源与防止测试倒灌生产** | 曾试图在生产读取代码中保留 JSON 倒灌 SQLite 以适应未初始化 DB 的旧测试，导致幽灵任务复活与事实源裂脑 | 绝不因为测试 fixture 遗留而在生产代码中开 JSON 倒灌口；测试必须显式通过 StateStore 预置基准；Sentinel 与 Steering 仅能操作 DB 现有任务，缺失实体一律 skip 绝不 `save_task` 逆向注入；JSON 投影由 `sync_*_projection` 基于 `fcntl.flock` 跨进程锁单向覆写 |
+| **门禁先于物理副作用（Gate before Side Effect）** | `close_workflow` 若先拆解任务、关闭 tab、清理 clone，最后调用 transition 才报错，会导致命令失败但现场已被破坏 | 任何物理 teardown 必须前置纯校验（`validate_workflow_transition(cur_status, "completed", force=force)`），前置门禁通过后才允许执行物理清理与状态提交 |
+| **正常业务逻辑严禁滥用 `force=True`** | 在完成工作流等正常操作中曾盲目使用 `force=True` 绕过状态机，导致 `pending`/`paused` 等非运行态非法跳到 `completed` | 业务流转必须走合法路径（`running`/`in_progress` -> `completed`）；`force=True` 仅保留给管理员显式指定 `--force` 参数以逃生故障 |
+| **异常静默吞没隐藏真实根因** | 在调用 Gateway 时若随意 `except Exception: pass` 吞掉合法性校验错误，会掩盖非法转移并继续执行旧的非法逻辑 | 非法转移（`InvalidTransitionError`）必须坚决抛出或在 CLI 明确打印并以约定退出码（exit 2）退出；严禁捕获异常后继续执行旧有旁路覆写 |
+| **元数据更新禁止覆写状态（Metadata Isolation）** | 仅改 verdict/notes/history/locks 等元数据时若做全量实体覆写，旧快照会静默踩踏并发的新状态 | 建立原子元数据更新网关（`update_task_metadata()` / `update_workflow_metadata()`）：在 `BEGIN IMMEDIATE` 事务内重载实体、校验非保护字段白名单（`PROTECTED_*_FIELDS` 严防篡改 `status`/`task_id`）、应用变更并落库，彻底消除快照覆写隐患 |
+| **Teardown 物理销毁 TOCTOU 竞态** | 若只做只读前置校验就启动不可逆资源销毁（关 Tab/删 Clone），销毁期间并发 pause 成功会导致终态提交失败，陷入资源已毁但状态停留在 paused 的撕裂 | 引入中间态 `closing`（`running`/`in_progress` -> `closing` -> `completed`）；在任何物理清理前先原子将状态推进为 `closing` 预占所有权；`closing` 状态下天然拒绝 `paused`，物理销毁完成后再流转至 `completed`，消除 TOCTOU 竞态 |
+| **投影文件优先级混乱** | 若在同步 JSON 投影时优先取 `db_path.parent`，会覆盖调用方显式配置的 `TASKS_FILE` / `WORKFLOWS_FILE` 独立投影路径 | 统一收口解析优先级（`resolve_*_projection_file`）：`explicit argument -> os.environ -> store.db_path.parent -> default CONTROLLER_DIR` |
+| **事件审计流元数据篡改防伪** | 若将调用方传入的 metadata 直接追加在事件 payload 和状态历史末尾，恶意或失误的元数据（如 `from_status` / `source`）会篡改真实审计字段 | 建立双重防伪机制：1. `RESERVED_EVENT_METADATA_FIELDS` 校验（违规直接抛 `ValueError`）；2. 结构级防御：写入 `status_history` 与 `event_payload` 时规范字段置于末尾覆写，确保核心审计事实不可伪造 |
+| **后台守护服务启动环境依赖脆弱** | 守护进程脚本（如 `services/herdr-sentinel.py`）若直接独立执行，`sys.path[0]` 为 `services/`，未显式注入仓库根目录会导致 `from herdr.state_store...` 报 `ModuleNotFoundError` | 在文件最顶部显式注入 `HERDR_ROOT` 到 `sys.path[0]`，确保后台常驻看门狗在任何工作目录下均可开箱即用 |
+| **同状态更新 verdict/note 伪装跃迁** | 任务已处于 `completed` 等状态时，若仅补录 `verdict`/`note` 仍调用 `transition_task`，会产生伪 `completed -> completed` 审计事件与冗余历史 | 同状态属性变更属于纯元数据操作，严格通过 `update_task_metadata()` 更新，绝不伪装为生命周期状态跃迁 |
+| **自动补全父工作流产生非法 `unknown` 状态** | `save_task` 为防外键约束自动补全父工作流记录时曾赋予 `"unknown"` 状态，而状态机中并无此状态，导致产生 Gateway 无法流转的死锁工作流 | 自动补全的父工作流必须赋予状态机合法初始态 `"pending"`，确保后续可合法跃迁推进 |
+
+### 操作规范
+
+1. **函数式核心与命令式外壳解耦**：
+   - `herdr/transitions.py` 纯逻辑：`TASK_TRANSITIONS`、`WORKFLOW_TRANSITIONS`、`ACTIVE_TASK_STATUSES`、`COMPLETED_TASK_STATUSES`、`TERMINAL_TASK_STATUSES`、`validate_task_transition()`、`validate_workflow_transition()`。零 I/O、零第三方依赖。引入 `closing` 状态（允许流转至 `completed` 或 `failed`）。
+2. **唯一状态变更网关**：
+   - `herdr.kernel.transition_task()` 与 `herdr.kernel.transition_workflow()` 作为全系统状态推进的唯一法定入口；
+   - 统一由 `StateStore.transition_task()` 与 `StateStore.transition_workflow()` 在底层 SQLite 强事务内原子写入数据表与 `WorkflowEvent`（`event_type="task_transition"` / `"workflow_transition"`）。
+3. **全量上游与控制原语改造**：
+   - `kernel.pause_workflow()`、`kernel.resume_workflow()`、`kernel.rollback_workflow()` 统一通过 Gateway 推进状态；
+   - `bin/herdr-task`（`set`、`supersede`、`_mark_workflow_completed`、`reopen_workflow`）、`bin/herdr-factory`（`_update_workflow_status`）、`services/herdr-sentinel.py`（看门狗超时）、`herdr/steering.py`（紧急中断与 halt）全量收敛至 Gateway。
+4. **单向跨进程锁定投影同步与严格解析优先级**：
+   - 所有兼容性 JSON 导出（`tasks.json` / `workflows.json`）通过 `sync_tasks_projection` / `sync_workflows_projection` 统一在 `.{filename}.lock` 排他锁内从 SQLite 最新状态重导出后原子写入，杜绝旧快照覆盖更新；
+   - 投影路径通过 `resolve_tasks_projection_file` 与 `resolve_workflows_projection_file` 解析，严格保证显式参数与环境变量优先。
+5. **门禁前置、Teardown 所有权预占与 CLI 自闭环**：
+   - `herdr-task set <task> <status>` 遇未知任务/状态保持 exit 1，遇非法转移保持 exit 2；同状态仅更新 verdict/note 时走 `update_task_metadata()`，不产生假事件；
+   - `herdr-task close-workflow` 严格执行 **Gate before Side Effect** 与 **Ownership Acquisition**：在任何 finalize/tab close 前先做状态跃迁前置校验，并原子推进为 `closing` 状态；默认只允许 `running`/`in_progress` 正常流转，物理销毁完成后最终落库 `completed`。
+6. **元数据隔离更新与状态保护**：
+   - 严禁通过 `save_tasks` / `save_workflows_data` 全量快照更新部分属性；
+   - 凡涉及 `stage_verdict`、`commit`、`integration_*`、`paused_nodes`、`gate_overrides`、`history` 等元数据变更，必须调用 `update_task_metadata()` / `update_workflow_metadata()`；
+   - 元数据接口对 `status`、`task_id`、`workflow_id` 等核心身份与生命周期字段执行强制保护拦截，违规即报 `ValueError`。
+7. **事件审计流防篡改与实体合法性兜底**：
+   - 定义 `RESERVED_EVENT_METADATA_FIELDS = {"from", "to", "from_status", "to_status", "reason", "source", "timestamp", "forced"}`，双重杜绝审计日志伪造；
+   - `save_task` 自动确保的父工作流初始状态严格置为 `"pending"`，严禁 `"unknown"`；
+   - 独立常驻进程（`herdr-sentinel.py`）启动显式引导根目录 `sys.path`。
+
+### 验证命令 / 证据
+
+```bash
+# 1. Gateway 契约与并发回归测试（32 项：规则、非法拒绝、事务回滚、Admin force、事件流、Fail-Closed、防倒灌、投影锁、Teardown 门禁前置、并发元数据状态防踩踏、closing 状态防 TOCTOU 竞态、投影环境变量优先级、保留事件字段防伪、Sentinel 独立启动 bootstrap、已完成 Task verdict 纯元数据更新防假跃迁、自动补全父工作流 pending 状态）
+pytest tests/test_state_transition_gateway.py -v
+
+# 2. 全仓 422 项自动化测试全量回归
+pytest -q
+
+# 3. 生产服务体检
+./bin/herdr-factory doctor
+```
+

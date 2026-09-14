@@ -21,6 +21,14 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from herdr.transitions import (
+    ACTIVE_TASK_STATUSES,
+    COMPLETED_TASK_STATUSES,
+    InvalidTransitionError,
+    validate_task_transition,
+    validate_workflow_transition,
+)
+
 
 HOME = Path.home()
 CONTROLLER_DIR = HOME / ".herdr-controller"
@@ -267,7 +275,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                                 cur_wf = conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (wid,))
                                 if not cur_wf.fetchone():
                                     save_workflow(
-                                        snap.get("workflow") or {"workflow_id": wid, "title": wid, "status": "unknown"},
+                                        snap.get("workflow") or {"workflow_id": wid, "title": wid, "status": "pending"},
                                         db_path=None,
                                         conn=conn,
                                     )
@@ -283,7 +291,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                                     snap.get("tag", ""),
                                     snap.get("parent_checkpoint_id"),
                                     float(snap.get("created_at") or time.time()),
-                                    snap.get("workflow", {}).get("status", "unknown"),
+                                    snap.get("workflow", {}).get("status", "pending"),
                                     len(snap.get("tasks", [])),
                                     json.dumps(snap, ensure_ascii=False),
                                     json.dumps(snap.get("metadata", {}), ensure_ascii=False),
@@ -497,7 +505,7 @@ def save_task(
     # Auto-ensure parent workflow exists to prevent foreign key violation
     cur_wf = conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (wid,))
     if not cur_wf.fetchone():
-        save_workflow({"workflow_id": wid, "title": wid, "status": "unknown"}, db_path, conn=conn)
+        save_workflow({"workflow_id": wid, "title": wid, "status": "pending"}, db_path, conn=conn)
 
     now = time.time()
     node = task_dict.get("node") or task_dict.get("stage", "")
@@ -975,6 +983,413 @@ def list_events(
         conn.close()
 
 
+PROTECTED_TASK_METADATA_FIELDS = {
+    "task_id",
+    "workflow_id",
+    "node",
+    "stage",
+    "agent",
+    "status",
+    "created_at",
+    "updated_at",
+}
+
+PROTECTED_WORKFLOW_METADATA_FIELDS = {
+    "workflow_id",
+    "status",
+    "created_at",
+    "updated_at",
+}
+
+RESERVED_EVENT_METADATA_FIELDS = {
+    "from",
+    "to",
+    "from_status",
+    "to_status",
+    "reason",
+    "source",
+    "timestamp",
+    "forced",
+}
+
+
+def transition_task(
+    task_id: str,
+    to_status: str,
+    reason: str,
+    source: str = "system",
+    metadata: Optional[Dict[str, Any]] = None,
+    force: bool = False,
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    """Atomically validate and transition a task status, appending a canonical WorkflowEvent."""
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+
+    try:
+        if should_close:
+            conn.execute("BEGIN IMMEDIATE;")
+
+        cur = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Task '{task_id}' not found")
+
+        old_status = row["status"]
+        validate_task_transition(old_status, to_status, force=force)
+
+        meta = dict(metadata or {})
+        forbidden = set(meta.keys()) & PROTECTED_TASK_METADATA_FIELDS
+        if forbidden:
+            raise ValueError(f"Cannot overwrite protected task fields via metadata: {sorted(forbidden)}")
+        forbidden_event = set(meta.keys()) & RESERVED_EVENT_METADATA_FIELDS
+        if forbidden_event:
+            raise ValueError(f"Cannot overwrite reserved event fields via metadata: {sorted(forbidden_event)}")
+
+        now = time.time()
+        payload = json.loads(row["payload_json"] or "{}")
+        task_dict = dict(payload)
+        task_dict.update({
+            "task_id": row["task_id"],
+            "workflow_id": row["workflow_id"],
+            "node": row["node"],
+            "stage": row["stage"],
+            "agent": row["agent"],
+            "status": old_status,
+            "stage_verdict": row["stage_verdict"],
+            "stage_verdict_note": row["stage_verdict_note"],
+            "pane_id": row["pane_id"],
+            "goal": row["goal"],
+            "blocker": row["blocker"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        })
+
+        if force:
+            task_dict["forced"] = True
+        for k, v in meta.items():
+            task_dict[k] = v
+
+        task_dict["status"] = to_status
+        task_dict["updated_at"] = now
+        task_dict["last_activity_at"] = now
+
+        if to_status in ACTIVE_TASK_STATUSES and not task_dict.get("started_at"):
+            task_dict["started_at"] = now
+
+        if to_status in COMPLETED_TASK_STATUSES and not task_dict.get("last_result"):
+            task_dict["last_result"] = to_status
+
+        # Append to status_history in payload (meta unpacked first, canonical fields last)
+        status_history = list(task_dict.get("status_history") or [])
+        status_history_entry = {
+            **meta,
+            "from": old_status,
+            "to": to_status,
+            "reason": reason,
+            "source": source,
+            "timestamp": now,
+        }
+        if force:
+            status_history_entry["forced"] = True
+        status_history.append(status_history_entry)
+        task_dict["status_history"] = status_history
+
+        save_task(task_dict, db_path=None, conn=conn)
+
+        event_payload = {
+            **meta,
+            "from_status": old_status,
+            "to_status": to_status,
+            "reason": reason,
+            "forced": force,
+        }
+        event = record_event(
+            {
+                "workflow_id": task_dict.get("workflow_id"),
+                "node_id": task_dict.get("node") or task_dict.get("stage"),
+                "task_id": task_id,
+                "agent_id": task_dict.get("agent"),
+                "event_type": "task_transition",
+                "payload": event_payload,
+                "source": source,
+                "timestamp": now,
+            },
+            conn=conn,
+        )
+
+        if should_close:
+            conn.execute("COMMIT;")
+
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "workflow_id": task_dict.get("workflow_id"),
+            "old_status": old_status,
+            "new_status": to_status,
+            "reason": reason,
+            "source": source,
+            "event_id": event.get("id"),
+            "task": task_dict,
+        }
+    except Exception:
+        if should_close:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+        raise
+    finally:
+        if should_close:
+            conn.close()
+
+
+def transition_workflow(
+    workflow_id: str,
+    to_status: str,
+    reason: str,
+    source: str = "system",
+    metadata: Optional[Dict[str, Any]] = None,
+    force: bool = False,
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    """Atomically validate and transition a workflow status, appending a canonical WorkflowEvent."""
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+
+    try:
+        if should_close:
+            conn.execute("BEGIN IMMEDIATE;")
+
+        cur = conn.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Workflow '{workflow_id}' not found")
+
+        old_status = row["status"]
+        validate_workflow_transition(old_status, to_status, force=force)
+
+        user_meta = dict(metadata or {})
+        forbidden = set(user_meta.keys()) & PROTECTED_WORKFLOW_METADATA_FIELDS
+        if forbidden:
+            raise ValueError(f"Cannot overwrite protected workflow fields via metadata: {sorted(forbidden)}")
+        forbidden_event = set(user_meta.keys()) & RESERVED_EVENT_METADATA_FIELDS
+        if forbidden_event:
+            raise ValueError(f"Cannot overwrite reserved event fields via metadata: {sorted(forbidden_event)}")
+
+        now = time.time()
+        meta = json.loads(row["metadata_json"] or "{}")
+        cfg = json.loads(row["config_json"] or "{}")
+
+        wf_dict = dict(meta)
+        wf_dict.update({
+            "workflow_id": row["workflow_id"],
+            "title": row["title"],
+            "status": old_status,
+            "template_name": row["template_name"],
+            "current_stage": row["current_stage"],
+            "config": cfg,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        })
+
+        if force:
+            wf_dict["forced"] = True
+        for k, v in user_meta.items():
+            wf_dict[k] = v
+
+        wf_dict["status"] = to_status
+        wf_dict["updated_at"] = now
+
+        if to_status == "completed":
+            wf_dict.setdefault("completed_at", now)
+
+        save_workflow(wf_dict, db_path=None, conn=conn)
+
+        event_payload = {
+            **user_meta,
+            "from_status": old_status,
+            "to_status": to_status,
+            "reason": reason,
+            "forced": force,
+        }
+        event = record_event(
+            {
+                "workflow_id": workflow_id,
+                "node_id": user_meta.get("node_id") or wf_dict.get("current_stage"),
+                "task_id": None,
+                "agent_id": None,
+                "event_type": "workflow_transition",
+                "payload": event_payload,
+                "source": source,
+                "timestamp": now,
+            },
+            conn=conn,
+        )
+
+        if should_close:
+            conn.execute("COMMIT;")
+
+        return {
+            "ok": True,
+            "workflow_id": workflow_id,
+            "old_status": old_status,
+            "new_status": to_status,
+            "reason": reason,
+            "source": source,
+            "event_id": event.get("id"),
+            "workflow": wf_dict,
+        }
+    except Exception:
+        if should_close:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+        raise
+    finally:
+        if should_close:
+            conn.close()
+
+
+def update_task_metadata(
+    task_id: str,
+    updates: Dict[str, Any],
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    """Atomically update non-protected metadata fields of a task without touching status or identity."""
+    forbidden = set(updates.keys()) & PROTECTED_TASK_METADATA_FIELDS
+    if forbidden:
+        raise ValueError(f"Cannot update protected task fields via metadata update: {sorted(forbidden)}")
+
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+
+    try:
+        if should_close:
+            conn.execute("BEGIN IMMEDIATE;")
+
+        cur = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Task '{task_id}' not found")
+
+        now = time.time()
+        payload = json.loads(row["payload_json"] or "{}")
+        t = dict(payload)
+        t.update({
+            "task_id": row["task_id"],
+            "workflow_id": row["workflow_id"],
+            "node": row["node"],
+            "stage": row["stage"],
+            "agent": row["agent"],
+            "status": row["status"],
+            "stage_verdict": row["stage_verdict"],
+            "stage_verdict_note": row["stage_verdict_note"],
+            "pane_id": row["pane_id"],
+            "goal": row["goal"],
+            "blocker": row["blocker"],
+            "created_at": row["created_at"],
+            "updated_at": now,
+        })
+
+        for k, v in updates.items():
+            if v is None:
+                t.pop(k, None)
+            else:
+                t[k] = v
+
+        save_task(t, db_path=None, conn=conn)
+
+        if should_close:
+            conn.execute("COMMIT;")
+
+        return t
+    except Exception:
+        if should_close:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+        raise
+    finally:
+        if should_close:
+            conn.close()
+
+
+def update_workflow_metadata(
+    workflow_id: str,
+    updates: Dict[str, Any],
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    """Atomically update non-protected metadata fields of a workflow without touching status or identity."""
+    forbidden = set(updates.keys()) & PROTECTED_WORKFLOW_METADATA_FIELDS
+    if forbidden:
+        raise ValueError(f"Cannot update protected workflow fields via metadata update: {sorted(forbidden)}")
+
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+
+    try:
+        if should_close:
+            conn.execute("BEGIN IMMEDIATE;")
+
+        cur = conn.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Workflow '{workflow_id}' not found")
+
+        now = time.time()
+        meta = json.loads(row["metadata_json"] or "{}")
+        cfg = json.loads(row["config_json"] or "{}")
+        wf = dict(meta)
+        wf.update({
+            "workflow_id": row["workflow_id"],
+            "title": row["title"],
+            "status": row["status"],
+            "template_name": row["template_name"],
+            "current_stage": row["current_stage"],
+            "config": cfg,
+            "created_at": row["created_at"],
+            "updated_at": now,
+        })
+
+        for k, v in updates.items():
+            if v is None:
+                wf.pop(k, None)
+            else:
+                wf[k] = v
+
+        save_workflow(wf, db_path=None, conn=conn)
+
+        if should_close:
+            conn.execute("COMMIT;")
+
+        return wf
+    except Exception:
+        if should_close:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+        raise
+    finally:
+        if should_close:
+            conn.close()
+
+
 def create_checkpoint(
     workflow_id: str,
     tag: Optional[str] = None,
@@ -1344,7 +1759,7 @@ def migrate_v1_to_v2(
                         snap.get("tag", ""),
                         snap.get("parent_checkpoint_id"),
                         float(snap.get("created_at") or time.time()),
-                        snap.get("workflow", {}).get("status", "unknown"),
+                        snap.get("workflow", {}).get("status", "pending"),
                         len(snap.get("tasks", [])),
                         json.dumps(snap, ensure_ascii=False),
                         json.dumps(snap.get("metadata", {}), ensure_ascii=False),

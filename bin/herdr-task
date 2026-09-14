@@ -27,7 +27,11 @@ try:
     from herdr.workflow import find_node, normalize_workflow
     from herdr.topology import ensure_stage_topology
     from herdr.agent_binary import resolve_binary
-    from herdr.state_store import get_state_store
+    from herdr.state_store import (
+        get_state_store,
+        sync_tasks_projection,
+        sync_workflows_projection,
+    )
 except ImportError:
     from herdr_pane_pool import acquire_pane_for_task
     from herdr_agent_router import choose_agent, release_agent_reservation
@@ -42,7 +46,11 @@ except ImportError:
     from herdr_workflow import find_node, normalize_workflow
     from herdr_topology import ensure_stage_topology
     from herdr_agent_binary import resolve_binary
-    from herdr_state_store import get_state_store
+    from herdr_state_store import (
+        get_state_store,
+        sync_tasks_projection,
+        sync_workflows_projection,
+    )
 
 TASKS_FILE = os.environ.get("TASKS_FILE") or os.path.expanduser("~/.herdr-controller/tasks.json")
 WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE") or os.path.expanduser("~/.herdr-controller/workflow.json")
@@ -58,47 +66,56 @@ except Exception:
 
 KNOWN_AGENTS = [a for a in DEFAULT_ALLOWED if a]
 
-TRANSITIONS = {
-    "pending": {"dispatched", "failed"},
-    "dispatched": {"working", "blocked", "agent_done", "paused", "failed", "superseded", "interrupted"},
-    "working": {"blocked", "agent_done", "rework", "paused", "failed", "superseded", "interrupted"},
-    "blocked": {"working", "agent_done", "paused", "failed", "superseded", "interrupted"},
-    "paused": {"working", "rework", "agent_done", "failed", "superseded", "interrupted"},
-    "agent_done": {"completed", "rework", "failed", "superseded", "interrupted"},
-    "rework": {"working", "blocked", "agent_done", "paused", "failed", "superseded", "interrupted"},
-    "interrupted": {"working", "rework", "paused", "failed", "superseded"},
-    "completed": {"committed", "cleanup_ready"},
-    "committed": {"integrated"},
-    "integrated": {"cleanup_ready"},
-    "cleanup_ready": {"cleaned"},
-    "cleaned": {"superseded"},
-    "failed": {"superseded"},
-    "superseded": set(),
-}
+try:
+    from herdr.transitions import (
+        TASK_TRANSITIONS as TRANSITIONS,
+        ACTIVE_TASK_STATUSES,
+        COMPLETED_TASK_STATUSES,
+        TERMINAL_TASK_STATUSES as TERMINAL_STATUSES,
+        InvalidTransitionError,
+    )
+except ImportError:
+    TRANSITIONS = {
+        "pending": {"dispatched", "failed"},
+        "dispatched": {"working", "blocked", "agent_done", "paused", "failed", "superseded", "interrupted"},
+        "working": {"blocked", "agent_done", "rework", "paused", "failed", "superseded", "interrupted"},
+        "blocked": {"working", "agent_done", "paused", "failed", "superseded", "interrupted"},
+        "paused": {"working", "rework", "agent_done", "failed", "superseded", "interrupted"},
+        "agent_done": {"completed", "rework", "failed", "superseded", "interrupted"},
+        "rework": {"working", "blocked", "agent_done", "paused", "failed", "superseded", "interrupted"},
+        "interrupted": {"working", "rework", "paused", "failed", "superseded"},
+        "completed": {"committed", "cleanup_ready"},
+        "committed": {"integrated"},
+        "integrated": {"cleanup_ready"},
+        "cleanup_ready": {"cleaned"},
+        "cleaned": {"superseded"},
+        "failed": {"superseded"},
+        "superseded": set(),
+    }
 
-ACTIVE_TASK_STATUSES = {
-    "dispatched",
-    "working",
-    "blocked",
-    "agent_done",
-    "rework",
-    "paused",
-    "interrupted",
-}
+    ACTIVE_TASK_STATUSES = {
+        "dispatched",
+        "working",
+        "blocked",
+        "agent_done",
+        "rework",
+        "paused",
+        "interrupted",
+    }
 
-COMPLETED_TASK_STATUSES = {
-    "completed",
-    "committed",
-    "integrated",
-    "cleanup_ready",
-    "cleaned",
-}
+    COMPLETED_TASK_STATUSES = {
+        "completed",
+        "committed",
+        "integrated",
+        "cleanup_ready",
+        "cleaned",
+    }
 
-TERMINAL_STATUSES = {
-    *COMPLETED_TASK_STATUSES,
-    "failed",
-    "superseded",
-}
+    TERMINAL_STATUSES = {
+        *COMPLETED_TASK_STATUSES,
+        "failed",
+        "superseded",
+    }
 
 CONTROLLER_ROOT = os.path.expanduser("~/.herdr-controller")
 WORKFLOWS_FILE = os.path.join(CONTROLLER_ROOT, "workflows.json")
@@ -1053,6 +1070,12 @@ def _get_store():
         db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
         if db_path.parent.exists():
             return get_state_store(db_path=db_path)
+    wf_file = globals().get("WORKFLOW_FILE") or globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOW_FILE") or os.environ.get("WORKFLOWS_FILE")
+    if wf_file:
+        p = Path(wf_file)
+        db_path = p.parent / "state.db" if p.name in ("workflows.json", "workflow.json") else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
     return get_state_store()
 
 
@@ -1068,21 +1091,8 @@ def save_tasks(data):
             store.save_task(t)
 
     # Sync backward-compatible JSON mirror (SQLite -> JSON only)
-    try:
-        tasks_dir = os.path.dirname(TASKS_FILE)
-        if tasks_dir and not os.path.exists(tasks_dir):
-            os.makedirs(tasks_dir, exist_ok=True)
-        tmp = TASKS_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(
-                data,
-                f,
-                ensure_ascii=False,
-                indent=2
-            )
-        os.replace(tmp, TASKS_FILE)
-    except OSError:
-        pass
+    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+    sync_tasks_projection(store=store, tasks_file=Path(t_file) if t_file else None)
 
 
 def find_task(data, task_id):
@@ -1178,8 +1188,24 @@ def set_status(task_id, new_status, verdict=None, note=None):
     old_status = task["status"]
 
     if old_status == new_status:
-        if new_status == "completed" and (verdict or note):
-            save_tasks(data)
+        if verdict or note:
+            updates = {}
+            if verdict:
+                updates["stage_verdict"] = verdict
+            if note:
+                updates["stage_verdict_note"] = note
+            store = _get_store()
+            try:
+                from herdr import kernel
+                kernel.update_task_metadata(
+                    task_id=task_id,
+                    updates=updates,
+                    store=store,
+                )
+            except Exception as exc:
+                print(f"Error updating task {task_id}: {exc}", file=sys.stderr)
+                sys.exit(2)
+
             print(f"{task_id}: already {new_status}; verdict/note updated")
             return
 
@@ -1193,28 +1219,32 @@ def set_status(task_id, new_status, verdict=None, note=None):
         )
         sys.exit(2)
 
-    now = _now()
-    _append_status_history(
-        task,
-        old_status,
-        new_status,
-        now,
-    )
+    metadata = {}
+    if verdict:
+        metadata["stage_verdict"] = verdict
+    if note:
+        metadata["stage_verdict_note"] = note
 
-    task["status"] = new_status
-    task["updated_at"] = now
-    task["last_activity_at"] = now
+    store = _get_store()
+    try:
+        from herdr import kernel
+        res = kernel.transition_task(
+            task_id=task_id,
+            to_status=new_status,
+            reason="cli_set_status",
+            source="herdr-task",
+            metadata=metadata,
+            store=store,
+        )
+    except Exception as exc:
+        print(f"Error transitioning task {task_id}: {exc}", file=sys.stderr)
+        sys.exit(2)
 
-    if new_status in ACTIVE_TASK_STATUSES and not task.get("started_at"):
-        task["started_at"] = now
+    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+    sync_tasks_projection(store=store, tasks_file=Path(t_file) if t_file else None)
 
     if new_status in ACTIVE_TASK_STATUSES:
-        _clear_suppress_auto_close(task.get("workflow_id"))
-
-    if new_status in COMPLETED_TASK_STATUSES and not task.get("last_result"):
-        task["last_result"] = task.get("status")
-
-    save_tasks(data)
+        _clear_suppress_auto_close(task.get("workflow_id") or res.get("workflow_id"))
 
     print(f"{task_id}: {old_status} -> {new_status}")
 
@@ -2070,10 +2100,8 @@ def commit_task(task_id, message=None):
     ).strip()
 
     # 保存 commit hash
-    data = load_tasks()
-    task = find_task(data, task_id)
-    task["commit"] = commit_hash
-    save_tasks(data)
+    from herdr import kernel
+    kernel.update_task_metadata(task_id, {"commit": commit_hash}, store=_get_store())
 
     set_status(
         task_id,
@@ -2384,13 +2412,13 @@ def integrate_task(task_id):
         check=True
     )
 
-    data = load_tasks()
-    task = find_task(data, task_id)
-    task["integration_branch"] = integration_branch
-    task["integration_ref"] = herdr_ref
-    task["base_branch"] = base_branch
-    task["source_repo"] = main_repo
-    save_tasks(data)
+    from herdr import kernel
+    kernel.update_task_metadata(task_id, {
+        "integration_branch": integration_branch,
+        "integration_ref": herdr_ref,
+        "base_branch": base_branch,
+        "source_repo": main_repo,
+    }, store=_get_store())
 
     set_status(
         task_id,
@@ -2421,10 +2449,12 @@ def cleanup_task(task_id):
 
     # Logical cleanup only.
     # Workspace / Stage Tab / Task Pane / Task Clone are retained.
-    task["resource_retention"] = "persistent"
-    task["pane_retained"] = True
-    task["clone_retained"] = True
-    save_tasks(data)
+    from herdr import kernel
+    kernel.update_task_metadata(task_id, {
+        "resource_retention": "persistent",
+        "pane_retained": True,
+        "clone_retained": True,
+    }, store=_get_store())
 
     set_status(
         task_id,
@@ -2477,12 +2507,12 @@ def purge_task(task_id):
             )
             sys.exit(3)
 
-    data = load_tasks()
-    task = find_task(data, task_id)
-    task["pane_retained"] = False
-    task["clone_retained"] = False
-    task["resource_retention"] = "purged"
-    save_tasks(data)
+    from herdr import kernel
+    kernel.update_task_metadata(task_id, {
+        "pane_retained": False,
+        "clone_retained": False,
+        "resource_retention": "purged",
+    }, store=_get_store())
 
     print(f"[PURGED] {task_id}")
 
@@ -2640,14 +2670,17 @@ def _finalize_one(task, purge_clones=False, dry_run=False):
     if status in FINALIZE_ADVANCE:
         row["status"] = _advance_to_cleaned(task_id, status)
 
-    data = load_tasks()
-    record = find_task(data, task_id)
+    store = _get_store()
+    record = store.get_task(task_id)
     if record:
-        record["pane_retained"] = False
-        record["resource_retention"] = "purged"
+        from herdr import kernel
+        meta_updates = {
+            "pane_retained": False,
+            "resource_retention": "purged",
+        }
         if row["evidence"]:
-            record["evidence"] = row["evidence"]
-        save_tasks(data)
+            meta_updates["evidence"] = row["evidence"]
+        kernel.update_task_metadata(task_id, meta_updates, store=store)
     return row
 
 
@@ -2688,35 +2721,36 @@ def finalize_task(task_id, force=False, purge_clones=False):
 
 
 def _load_workflow_entry(workflow_id):
-    if not os.path.exists(WORKFLOWS_FILE):
-        return None, {}
-    try:
-        with open(WORKFLOWS_FILE, "r", encoding="utf-8") as f:
-            entries = json.load(f).get("workflows", {})
-    except (json.JSONDecodeError, OSError):
-        return None, {}
-    return entries.get(workflow_id), entries
+    store = _get_store()
+    wf = store.get_workflow(workflow_id)
+    all_wfs = {w["workflow_id"]: w for w in store.list_workflows() if w.get("workflow_id")}
+    return wf, all_wfs
 
 
-def _mark_workflow_completed(workflow_id, outcome="delivered"):
-    entry, entries = _load_workflow_entry(workflow_id)
+def _mark_workflow_completed(workflow_id, outcome="delivered", force=False):
+    store = _get_store()
+    entry, _ = _load_workflow_entry(workflow_id)
     if entry is None:
         print(f"[WORKFLOW RECORD] no entry for {workflow_id}; skip marking")
         return
-    entry["status"] = "completed"
-    entry["outcome"] = outcome
-    entry["completed_at"] = _now()
-    entry.setdefault("workflow_id", workflow_id)
-    store = _get_store()
-    store.save_workflow(entry)
 
     try:
-        tmp = WORKFLOWS_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, WORKFLOWS_FILE)
-    except Exception:
-        pass
+        from herdr import kernel
+        kernel.transition_workflow(
+            workflow_id=workflow_id,
+            to_status="completed",
+            reason=f"workflow_completed: {outcome}",
+            source="herdr-task",
+            metadata={"outcome": outcome, "completed_at": _now()},
+            force=force,
+            store=store,
+        )
+    except Exception as exc:
+        print(f"Error marking workflow {workflow_id} completed: {exc}", file=sys.stderr)
+        raise
+
+    wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE
+    sync_workflows_projection(store=store, wf_file=Path(wf_file) if wf_file else None)
 
 
 def _workflow_stage_tabs(workflow_id, tasks):
@@ -2849,6 +2883,7 @@ def close_workflow(
     purge_clones=False,
     dry_run=False,
     abandon=False,
+    force=False,
 ):
     data = load_tasks()
     tasks = [
@@ -2860,12 +2895,21 @@ def close_workflow(
         print(f"Unknown workflow (no tasks, no record): {workflow_id}")
         sys.exit(1)
 
+    # 1. Preflight Gate: Validate workflow transition to 'closing' BEFORE any teardown side effects
+    if entry:
+        from herdr.transitions import validate_workflow_transition
+        validate_workflow_transition(
+            entry.get("status", "pending"),
+            "closing",
+            force=force,
+        )
+
     if not tasks:
         # 中止在注册任何 Task 之前的运行:没有可销毁的资源,
         # 视为平凡完成,仅做登记与状态清理。
         print(f"[CLOSE REPORT] workflow={workflow_id} (no tasks)")
         if not dry_run:
-            _mark_workflow_completed(workflow_id)
+            _mark_workflow_completed(workflow_id, force=force)
             stage_reset(workflow_id)
             print(f"[WORKFLOW CLOSED] {workflow_id}")
         else:
@@ -2909,6 +2953,19 @@ def close_workflow(
             + ", ".join(blocking)
         )
         sys.exit(2)
+
+    # 2. Acquire exclusive closing ownership via State Transition Gateway to block concurrent transitions
+    if not dry_run and entry:
+        from herdr import kernel
+        store = _get_store()
+        kernel.transition_workflow(
+            workflow_id=workflow_id,
+            to_status="closing",
+            reason=f"close_workflow: {'abandoned' if abandon else 'delivered'}",
+            source="herdr-task",
+            force=force,
+            store=store,
+        )
 
     if dry_run:
         print(f"[DRY RUN] close-workflow {workflow_id}")
@@ -2966,6 +3023,7 @@ def close_workflow(
         _mark_workflow_completed(
             workflow_id,
             outcome="abandoned" if abandon else "delivered",
+            force=force,
         )
         stage_reset(workflow_id)
 
@@ -3130,12 +3188,29 @@ def supersede_task(task_id, new_task_id=None, reason=None):
         )
         sys.exit(2)
 
-    task["status"] = "superseded"
+    meta = {}
     if new_task_id:
-        task["superseded_by"] = new_task_id
+        meta["superseded_by"] = new_task_id
     if reason:
-        task["supersede_reason"] = reason
-    save_tasks(data)
+        meta["supersede_reason"] = reason
+
+    store = _get_store()
+    try:
+        from herdr import kernel
+        kernel.transition_task(
+            task_id=task_id,
+            to_status="superseded",
+            reason=reason or "superseded",
+            source="herdr-task",
+            metadata=meta,
+            store=store,
+        )
+    except Exception as exc:
+        print(f"Error superseding task {task_id}: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+    sync_tasks_projection(store=store, tasks_file=Path(t_file) if t_file else None)
 
     msg = f"{task_id}: {old_status} -> superseded"
     if new_task_id:
@@ -3146,13 +3221,12 @@ def supersede_task(task_id, new_task_id=None, reason=None):
 def pause_task(task_id, reason=None):
     """Pause an in-flight task (dispatched/working/rework)."""
     if reason:
-        data = load_tasks()
-        task = find_task(data, task_id)
-        if not task:
+        from herdr import kernel
+        try:
+            kernel.update_task_metadata(task_id, {"pause_reason": reason}, store=_get_store())
+        except ValueError:
             print(f"Task not found: {task_id}")
             sys.exit(1)
-        task["pause_reason"] = reason
-        save_tasks(data)
     set_status(task_id, "paused")
 
 
@@ -3185,17 +3259,13 @@ def _clear_suppress_auto_close(workflow_id):
     if not workflow_id:
         return
 
-    entry, entries = _load_workflow_entry(workflow_id)
-
+    store = _get_store()
+    entry = store.get_workflow(workflow_id)
     if entry is None or not entry.get("suppress_auto_close"):
         return
 
-    entry.pop("suppress_auto_close", None)
-
-    tmp = WORKFLOWS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, WORKFLOWS_FILE)
+    from herdr import kernel
+    kernel.update_workflow_metadata(workflow_id, {"suppress_auto_close": None}, store=store)
 
     print(f"[AUTO-CLOSE LATCH CLEARED] workflow={workflow_id}")
 
@@ -3254,14 +3324,23 @@ def reopen_workflow(workflow_id):
         )
         sys.exit(2)
 
-    entry["status"] = "in_progress"
-    entry["suppress_auto_close"] = True
-    entry["reopened_at"] = _now()
+    store = _get_store()
+    try:
+        from herdr import kernel
+        kernel.transition_workflow(
+            workflow_id=workflow_id,
+            to_status="in_progress",
+            reason="workflow_reopened",
+            source="herdr-task",
+            metadata={"suppress_auto_close": True, "reopened_at": _now()},
+            store=store,
+        )
+    except Exception as exc:
+        print(f"Error reopening workflow {workflow_id}: {exc}", file=sys.stderr)
+        sys.exit(2)
 
-    tmp = WORKFLOWS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, WORKFLOWS_FILE)
+    wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE
+    sync_workflows_projection(store=store, wf_file=Path(wf_file) if wf_file else None)
 
     stage_reset(workflow_id)
 
@@ -3501,6 +3580,11 @@ def main():
         help="explicitly abandon a workflow whose gate verdicts are blocked "
              "(records outcome=abandoned; never triggered automatically)",
     )
+    close_wf.add_argument(
+        "--force",
+        action="store_true",
+        help="force close workflow bypassing normal status transition checks",
+    )
 
     reopen_wf = sub.add_parser("reopen-workflow")
     reopen_wf.add_argument("workflow_id")
@@ -3663,13 +3747,18 @@ def main():
 
     elif args.command == "close-workflow":
         target_wid = resolve_workflow_id_for_close(args.workflow_id)
-        close_workflow(
-            target_wid,
-            include_coordinator=args.include_coordinator,
-            purge_clones=args.purge_clones,
-            dry_run=args.dry_run,
-            abandon=args.abandon,
-        )
+        try:
+            close_workflow(
+                target_wid,
+                include_coordinator=args.include_coordinator,
+                purge_clones=args.purge_clones,
+                dry_run=args.dry_run,
+                abandon=args.abandon,
+                force=args.force,
+            )
+        except Exception as exc:
+            print(f"Error closing workflow {target_wid}: {exc}", file=sys.stderr)
+            sys.exit(2)
 
     elif args.command == "reopen-workflow":
         reopen_workflow(args.workflow_id)

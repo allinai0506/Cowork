@@ -3,9 +3,14 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
+
+HERDR_ROOT = Path(__file__).resolve().parent.parent
+if str(HERDR_ROOT) not in sys.path:
+    sys.path.insert(0, str(HERDR_ROOT))
 
 HOME = Path.home()
 ROOT = HOME / ".herdr-controller"
@@ -90,37 +95,61 @@ def nudge_enter(pane_id):
         return False
 
 
+def _get_store():
+    from herdr.state_store import get_state_store
+    if os.environ.get("HERDR_STATE_DB"):
+        return get_state_store(Path(os.environ["HERDR_STATE_DB"]))
+    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+    if t_file:
+        p = Path(t_file)
+        db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    return get_state_store()
+
+
 def update_statuses(changes):
     if not changes:
         return False
 
-    data = load_json(TASKS_FILE, {"tasks": []})
+    store = _get_store()
     changed = False
 
-    for task in data.get("tasks", []):
-        task_id = task.get("task_id")
-        if task_id not in changes:
+    for task_id, (new_status, reason) in changes.items():
+        authoritative = store.get_task(task_id)
+        if not authoritative:
+            print(f"[SENTINEL SKIP] task {task_id} missing from authoritative StateStore", file=sys.stderr, flush=True)
             continue
 
-        new_status, reason = changes[task_id]
-        old_status = task.get("status")
-
+        old_status = authoritative.get("status")
         if old_status not in ACTIVE:
             continue
 
-        task["status"] = new_status
-        task["sentinel_reason"] = reason
-        task["sentinel_updated_at"] = int(time.time())
-        changed = True
-
-        print(
-            f"[SENTINEL STATE] {task_id}: "
-            f"{old_status} -> {new_status} ({reason})",
-            flush=True,
-        )
-
-    if changed:
-        save_json_atomic(TASKS_FILE, data)
+        try:
+            from herdr import kernel
+            kernel.transition_task(
+                task_id=task_id,
+                to_status=new_status,
+                reason=reason,
+                source="herdr-sentinel",
+                metadata={
+                    "sentinel_reason": reason,
+                    "sentinel_updated_at": int(time.time()),
+                },
+                store=store,
+            )
+            changed = True
+            print(
+                f"[SENTINEL STATE] {task_id}: "
+                f"{old_status} -> {new_status} ({reason})",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"[SENTINEL ERROR] transition failed for {task_id}: {exc}; task status preserved as {old_status}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     return changed
 
@@ -147,11 +176,12 @@ def main():
     print("[HERDR SENTINEL] starting", flush=True)
 
     while True:
-        registry = load_json(TASKS_FILE, {"tasks": []})
+        store = _get_store()
+        tasks = store.list_tasks()
         now = time.time()
         changes = {}
 
-        for task in registry.get("tasks", []):
+        for task in tasks:
             status = task.get("status")
             if status not in ACTIVE:
                 continue

@@ -699,7 +699,8 @@ def test_fail_closed_prevents_silent_write_loss_when_statestore_fails(tmp_path, 
     factory_loader.exec_module(factory)
     monkeypatch.setattr(factory, "WORKFLOWS_FILE", wf_file)
 
-    with patch.object(store, "save_workflow", side_effect=simulated_err):
+    with patch.object(store, "transition_workflow", side_effect=simulated_err), \
+         patch.object(store, "save_workflow", side_effect=simulated_err):
         with pytest.raises(sqlite3.OperationalError):
             factory._update_workflow_status(wid, "paused", "paused")
         disk_data = json.loads(wf_file.read_text(encoding="utf-8"))
