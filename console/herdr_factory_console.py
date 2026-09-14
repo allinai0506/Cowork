@@ -4,7 +4,19 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-HOME=Path.home(); HERDR_ROOT=Path(os.environ.get('HERDR_ROOT', str(Path(__file__).resolve().parent.parent))); ROOT=HOME/'.herdr-controller'
+HOME=Path.home()
+def _resolve_herdr_root():
+    env = os.environ.get('HERDR_ROOT')
+    if env and Path(env).exists():
+        return Path(env)
+    candidate = Path(__file__).resolve().parent.parent
+    if (candidate / "herdr" / "__init__.py").exists() and (candidate / "bin").is_dir():
+        return candidate
+    for p in [HOME / "HAFlow", HOME / "herdr"]:
+        if (p / "herdr" / "__init__.py").exists() and (p / "bin").is_dir():
+            return p
+    return candidate
+HERDR_ROOT=_resolve_herdr_root(); ROOT=HOME/'.herdr-controller'
 sys.path.insert(0, str(HERDR_ROOT))
 from herdr import workflow as herdr_workflow
 from herdr import projects as herdr_projects
