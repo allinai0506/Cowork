@@ -122,6 +122,15 @@ class StateStore(ABC):
         """Atomically validate and transition a workflow status, appending a WorkflowEvent."""
         pass
 
+    @abstractmethod
+    def update_workflow_metadata(
+        self,
+        workflow_id: str,
+        updates: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Atomically update non-protected metadata fields of a workflow without touching status."""
+        pass
+
     # Tasks
     @abstractmethod
     def save_task(self, task: Dict[str, Any]) -> None:
@@ -158,6 +167,15 @@ class StateStore(ABC):
         force: bool = False,
     ) -> Dict[str, Any]:
         """Atomically validate and transition a task status, appending a WorkflowEvent."""
+        pass
+
+    @abstractmethod
+    def update_task_metadata(
+        self,
+        task_id: str,
+        updates: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Atomically update non-protected metadata fields of a task without touching status."""
         pass
 
     # Steering
@@ -373,6 +391,17 @@ class SQLiteStateStore(StateStore):
             db_path=self.db_path,
         )
 
+    def update_workflow_metadata(
+        self,
+        workflow_id: str,
+        updates: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return state_db.update_workflow_metadata(
+            workflow_id=workflow_id,
+            updates=updates,
+            db_path=self.db_path,
+        )
+
     # Tasks
     def save_task(self, task: Dict[str, Any]) -> None:
         state_db.save_task(task, db_path=self.db_path)
@@ -406,6 +435,17 @@ class SQLiteStateStore(StateStore):
             source=source,
             metadata=metadata,
             force=force,
+            db_path=self.db_path,
+        )
+
+    def update_task_metadata(
+        self,
+        task_id: str,
+        updates: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return state_db.update_task_metadata(
+            task_id=task_id,
+            updates=updates,
             db_path=self.db_path,
         )
 

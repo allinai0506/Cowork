@@ -28,7 +28,7 @@ from .agent_adapter import (
     get_agent_adapter,
     list_agent_adapters,
 )
-from .state_store import get_state_store, StateStore
+from .state_store import get_state_store, StateStore, sync_tasks_projection
 
 ACTIVE_STATUSES = {"dispatched", "working", "rework", "blocked", "paused", "interrupted"}
 
@@ -312,7 +312,6 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
 
     # 5. Record on task entity steering_history only when successfully delivered
     if task and delivery_ok:
-        task["last_steered_at"] = now
         steering_history = list(task.get("steering_history") or [])
         steering_history.append({
             "steer_id": steer_id,
@@ -323,8 +322,13 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
             "adapter": adapter.name,
             "dispatched_at": now,
         })
-        task["steering_history"] = steering_history
-        save_tasks_data(tasks_data)
+        store.update_task_metadata(task_id, {
+            "last_steered_at": now,
+            "steering_history": steering_history,
+        })
+        tasks_file = get_tasks_file()
+        if tasks_file.parent.exists():
+            sync_tasks_projection(store=store, tasks_file=tasks_file)
 
     return {
         "ok": delivery_ok,
@@ -427,7 +431,6 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
     save_steering_data(s_data)
 
     if task and delivery_ok:
-        task["last_steered_at"] = now
         steering_history = list(task.get("steering_history") or [])
         steering_history.append({
             "steer_id": target_item["steer_id"],
@@ -438,8 +441,13 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
             "adapter": adapter.name,
             "dispatched_at": now,
         })
-        task["steering_history"] = steering_history
-        save_tasks_data(tasks_data)
+        store.update_task_metadata(task_id, {
+            "last_steered_at": now,
+            "steering_history": steering_history,
+        })
+        tasks_file = get_tasks_file()
+        if tasks_file.parent.exists():
+            sync_tasks_projection(store=store, tasks_file=tasks_file)
 
     return {
         "ok": delivery_ok,

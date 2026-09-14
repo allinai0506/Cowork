@@ -1236,6 +1236,138 @@ def transition_workflow(
             conn.close()
 
 
+def update_task_metadata(
+    task_id: str,
+    updates: Dict[str, Any],
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    """Atomically update non-protected metadata fields of a task without touching status or identity."""
+    forbidden = set(updates.keys()) & PROTECTED_TASK_METADATA_FIELDS
+    if forbidden:
+        raise ValueError(f"Cannot update protected task fields via metadata update: {sorted(forbidden)}")
+
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+
+    try:
+        if should_close:
+            conn.execute("BEGIN IMMEDIATE;")
+
+        cur = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Task '{task_id}' not found")
+
+        now = time.time()
+        payload = json.loads(row["payload_json"] or "{}")
+        t = dict(payload)
+        t.update({
+            "task_id": row["task_id"],
+            "workflow_id": row["workflow_id"],
+            "node": row["node"],
+            "stage": row["stage"],
+            "agent": row["agent"],
+            "status": row["status"],
+            "stage_verdict": row["stage_verdict"],
+            "stage_verdict_note": row["stage_verdict_note"],
+            "pane_id": row["pane_id"],
+            "goal": row["goal"],
+            "blocker": row["blocker"],
+            "created_at": row["created_at"],
+            "updated_at": now,
+        })
+
+        for k, v in updates.items():
+            if v is None:
+                t.pop(k, None)
+            else:
+                t[k] = v
+
+        save_task(t, db_path=None, conn=conn)
+
+        if should_close:
+            conn.execute("COMMIT;")
+
+        return t
+    except Exception:
+        if should_close:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+        raise
+    finally:
+        if should_close:
+            conn.close()
+
+
+def update_workflow_metadata(
+    workflow_id: str,
+    updates: Dict[str, Any],
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    """Atomically update non-protected metadata fields of a workflow without touching status or identity."""
+    forbidden = set(updates.keys()) & PROTECTED_WORKFLOW_METADATA_FIELDS
+    if forbidden:
+        raise ValueError(f"Cannot update protected workflow fields via metadata update: {sorted(forbidden)}")
+
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+
+    try:
+        if should_close:
+            conn.execute("BEGIN IMMEDIATE;")
+
+        cur = conn.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Workflow '{workflow_id}' not found")
+
+        now = time.time()
+        meta = json.loads(row["metadata_json"] or "{}")
+        cfg = json.loads(row["config_json"] or "{}")
+        wf = dict(meta)
+        wf.update({
+            "workflow_id": row["workflow_id"],
+            "title": row["title"],
+            "status": row["status"],
+            "template_name": row["template_name"],
+            "current_stage": row["current_stage"],
+            "config": cfg,
+            "created_at": row["created_at"],
+            "updated_at": now,
+        })
+
+        for k, v in updates.items():
+            if v is None:
+                wf.pop(k, None)
+            else:
+                wf[k] = v
+
+        save_workflow(wf, db_path=None, conn=conn)
+
+        if should_close:
+            conn.execute("COMMIT;")
+
+        return wf
+    except Exception:
+        if should_close:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+        raise
+    finally:
+        if should_close:
+            conn.close()
+
+
 def create_checkpoint(
     workflow_id: str,
     tag: Optional[str] = None,

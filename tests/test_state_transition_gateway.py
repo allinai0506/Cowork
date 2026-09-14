@@ -899,6 +899,118 @@ class TestStateTransitionGateway:
         assert store.get_workflow("wf-paused-gate")["status"] == "paused"
         assert store.get_task("t-settled-gate")["status"] == "cleaned"
 
+    def test_metadata_update_never_regresses_concurrent_task_status(self, clean_store):
+        """Regression test: Metadata update must never clobber concurrent status transition."""
+        store, db_path, tmp_path = clean_store
+        from herdr import kernel
+
+        # 1. Setup task in 'working' status
+        task = {
+            "task_id": "t-concurrent-meta",
+            "workflow_id": "wf-meta-test",
+            "node": "node_impl",
+            "status": "working",
+        }
+        store.save_task(task)
+
+        # 2. Simulate process A taking a stale snapshot
+        stale_snapshot = dict(store.get_task("t-concurrent-meta"))
+        assert stale_snapshot["status"] == "working"
+
+        # 3. Process B transitions task via State Transition Gateway to 'agent_done'
+        kernel.transition_task(
+            task_id="t-concurrent-meta",
+            to_status="agent_done",
+            reason="agent finished",
+            source="agent_runtime",
+            store=store,
+        )
+        assert store.get_task("t-concurrent-meta")["status"] == "agent_done"
+
+        # 4. Attempting to tamper status via metadata update must fail closed
+        with pytest.raises(ValueError, match="Cannot update protected task fields"):
+            kernel.update_task_metadata(
+                task_id="t-concurrent-meta",
+                updates={"status": "working"},
+                store=store,
+            )
+
+        # 5. Process A updates task metadata (e.g. stage_verdict from evaluator / gate)
+        kernel.update_task_metadata(
+            task_id="t-concurrent-meta",
+            updates={
+                "stage_verdict": "pass",
+                "stage_verdict_note": "evaluator green",
+            },
+            store=store,
+        )
+
+        # 6. Assert: status REMAINS 'agent_done', metadata was cleanly applied!
+        fresh_task = store.get_task("t-concurrent-meta")
+        assert fresh_task["status"] == "agent_done"
+        assert fresh_task["stage_verdict"] == "pass"
+        assert fresh_task["stage_verdict_note"] == "evaluator green"
+
+        # 7. Assert events only contain the legitimate transition
+        events = store.list_events(workflow_id="wf-meta-test", event_type="task_transition")
+        assert len(events) == 1
+        assert events[0]["payload"]["from_status"] == "working"
+        assert events[0]["payload"]["to_status"] == "agent_done"
+
+    def test_metadata_update_never_regresses_concurrent_workflow_status(self, clean_store):
+        """Regression test: Workflow metadata update must never clobber concurrent status transition."""
+        store, db_path, tmp_path = clean_store
+        from herdr import kernel
+
+        # 1. Setup workflow in 'running' status
+        wf = {
+            "workflow_id": "wf-concurrent-meta",
+            "title": "Concurrent Workflow Test",
+            "status": "running",
+        }
+        store.save_workflow(wf)
+
+        # 2. Simulate process A taking a stale snapshot
+        stale_snapshot = dict(store.get_workflow("wf-concurrent-meta"))
+        assert stale_snapshot["status"] == "running"
+
+        # 3. Process B transitions workflow to 'completed'
+        kernel.transition_workflow(
+            workflow_id="wf-concurrent-meta",
+            to_status="completed",
+            reason="all nodes completed",
+            source="controller",
+            store=store,
+        )
+        assert store.get_workflow("wf-concurrent-meta")["status"] == "completed"
+
+        # 4. Attempting to tamper status via metadata update must fail closed
+        with pytest.raises(ValueError, match="Cannot update protected workflow fields"):
+            kernel.update_workflow_metadata(
+                workflow_id="wf-concurrent-meta",
+                updates={"status": "running"},
+                store=store,
+            )
+
+        # 5. Process A updates workflow metadata (e.g. pause/unpause a node)
+        kernel.update_workflow_metadata(
+            workflow_id="wf-concurrent-meta",
+            updates={"paused_nodes": ["node_x"]},
+            store=store,
+        )
+
+        # 6. Assert: status REMAINS 'completed', paused_nodes was cleanly applied!
+        fresh_wf = store.get_workflow("wf-concurrent-meta")
+        assert fresh_wf["status"] == "completed"
+        assert fresh_wf.get("paused_nodes") == ["node_x"]
+
+        # 7. Assert events only contain the legitimate transition
+        events = store.list_events(workflow_id="wf-concurrent-meta", event_type="workflow_transition")
+        assert len(events) == 1
+        assert events[0]["payload"]["from_status"] == "running"
+        assert events[0]["payload"]["to_status"] == "completed"
+
+
 
 
 

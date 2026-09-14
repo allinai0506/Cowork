@@ -177,28 +177,56 @@ def transition_workflow(
     return res
 
 
+def update_task_metadata(
+    task_id: str,
+    updates: Dict[str, Any],
+    store: Optional[StateStore] = None,
+) -> Dict[str, Any]:
+    """Atomically update non-protected metadata fields of a task without touching status."""
+    s = _get_store(store)
+    res = s.update_task_metadata(task_id, updates)
+    tasks_file = getattr(s, "db_path", None).parent / "tasks.json" if getattr(s, "db_path", None) else get_tasks_file()
+    sync_tasks_projection(store=s, tasks_file=tasks_file)
+    return res
+
+
+def update_workflow_metadata(
+    workflow_id: str,
+    updates: Dict[str, Any],
+    store: Optional[StateStore] = None,
+) -> Dict[str, Any]:
+    """Atomically update non-protected metadata fields of a workflow without touching status."""
+    s = _get_store(store)
+    res = s.update_workflow_metadata(workflow_id, updates)
+    wf_file = getattr(s, "db_path", None).parent / "workflows.json" if getattr(s, "db_path", None) else get_workflows_file()
+    sync_workflows_projection(store=s, wf_file=wf_file)
+    return res
+
+
 # ============================================================
 # 1. Pause & Resume Primitives
 # ============================================================
 
 def pause_workflow(workflow_id: str, node_id: Optional[str] = None, store: Optional[StateStore] = None) -> Dict[str, Any]:
     """Pause automatic workflow progression globally or hold a specific node."""
-    data = load_workflows_data(store=store)
-    wfs = data.get("workflows", {})
-    if workflow_id not in wfs:
+    s = _get_store(store)
+    target = s.get_workflow(workflow_id)
+    if not target:
         raise ValueError(f"Workflow '{workflow_id}' not found")
 
-    target = wfs[workflow_id]
     if node_id:
         paused_nodes = list(target.get("paused_nodes") or [])
         if node_id not in paused_nodes:
             paused_nodes.append(node_id)
-        target["paused_nodes"] = paused_nodes
-        save_workflows_data(data, store=store)
+        res = update_workflow_metadata(
+            workflow_id=workflow_id,
+            updates={"paused_nodes": paused_nodes},
+            store=s,
+        )
         return {
             "ok": True,
             "workflow_id": workflow_id,
-            "status": target.get("status"),
+            "status": res.get("status"),
             "node_id": node_id,
             "paused_nodes": paused_nodes,
         }
@@ -208,7 +236,7 @@ def pause_workflow(workflow_id: str, node_id: Optional[str] = None, store: Optio
         to_status="paused",
         reason="pause_workflow",
         source="kernel",
-        store=store,
+        store=s,
     )
     return {
         "ok": True,
@@ -219,22 +247,24 @@ def pause_workflow(workflow_id: str, node_id: Optional[str] = None, store: Optio
 
 def resume_workflow(workflow_id: str, node_id: Optional[str] = None, store: Optional[StateStore] = None) -> Dict[str, Any]:
     """Resume automatic workflow progression globally or unpause a specific node."""
-    data = load_workflows_data(store=store)
-    wfs = data.get("workflows", {})
-    if workflow_id not in wfs:
+    s = _get_store(store)
+    target = s.get_workflow(workflow_id)
+    if not target:
         raise ValueError(f"Workflow '{workflow_id}' not found")
 
-    target = wfs[workflow_id]
     if node_id:
         paused_nodes = list(target.get("paused_nodes") or [])
         if node_id in paused_nodes:
             paused_nodes.remove(node_id)
-        target["paused_nodes"] = paused_nodes
-        save_workflows_data(data, store=store)
+        res = update_workflow_metadata(
+            workflow_id=workflow_id,
+            updates={"paused_nodes": paused_nodes},
+            store=s,
+        )
         return {
             "ok": True,
             "workflow_id": workflow_id,
-            "status": target.get("status"),
+            "status": res.get("status"),
             "node_id": node_id,
             "paused_nodes": paused_nodes,
         }
@@ -244,7 +274,7 @@ def resume_workflow(workflow_id: str, node_id: Optional[str] = None, store: Opti
         to_status="running",
         reason="resume_workflow",
         source="kernel",
-        store=store,
+        store=s,
     )
     return {
         "ok": True,
@@ -266,28 +296,30 @@ def force_pass_gate(
     store: Optional[StateStore] = None,
 ) -> Dict[str, Any]:
     """Forcibly mark a gate node verdict as passed/approved with an audit note."""
-    tasks_data = load_tasks_data(store=store)
+    s = _get_store(store)
+    tasks = s.list_tasks(workflow_id=workflow_id)
     updated_tasks = []
 
-    for task in tasks_data.get("tasks", []):
-        if task.get("workflow_id") != workflow_id:
-            continue
+    for task in tasks:
         if gate_node_id not in (task.get("node"), task.get("stage")):
             continue
         if task.get("status") == "superseded":
             continue
 
-        task["stage_verdict"] = "pass"
-        task["stage_verdict_note"] = f"[FORCE PASS by {operator}] {note}"
-        task["updated_at"] = time.time()
-        updated_tasks.append(task.get("task_id"))
-
-    save_tasks_data(tasks_data, store=store)
+        tid = task.get("task_id")
+        update_task_metadata(
+            task_id=tid,
+            updates={
+                "stage_verdict": "pass",
+                "stage_verdict_note": f"[FORCE PASS by {operator}] {note}",
+            },
+            store=s,
+        )
+        updated_tasks.append(tid)
 
     # Also record in workflow entry gate_overrides
-    wf_data = load_workflows_data(store=store)
-    if workflow_id in wf_data.get("workflows", {}):
-        wf_entry = wf_data["workflows"][workflow_id]
+    wf_entry = s.get_workflow(workflow_id)
+    if wf_entry:
         overrides = dict(wf_entry.get("gate_overrides") or {})
         overrides[gate_node_id] = {
             "verdict": "pass",
@@ -295,8 +327,11 @@ def force_pass_gate(
             "operator": operator,
             "timestamp": time.time(),
         }
-        wf_entry["gate_overrides"] = overrides
-        save_workflows_data(wf_data, store=store)
+        update_workflow_metadata(
+            workflow_id=workflow_id,
+            updates={"gate_overrides": overrides},
+            store=s,
+        )
 
     return {
         "ok": True,
@@ -358,10 +393,11 @@ def rollback_workflow(
         invalidated.append(tid)
 
     # Clean up stage advance locks in workflow entry and stage-state.json
-    advances = dict(wf_entry.get("stage_advancing") or {})
+    s = _get_store(store)
+    wf_fresh = s.get_workflow(workflow_id) or wf_entry
+    advances = dict(wf_fresh.get("stage_advancing") or {})
     for n_id in affected_nodes:
         advances.pop(n_id, None)
-    wf_entry["stage_advancing"] = advances
 
     s_file = get_stage_state_file()
     if s_file.exists():
@@ -381,7 +417,7 @@ def rollback_workflow(
             pass
 
     # Record rollback audit history
-    history = list(wf_entry.get("history") or [])
+    history = list(wf_fresh.get("history") or [])
     history.append({
         "action": "rollback",
         "target_node_id": target_node_id,
@@ -390,8 +426,14 @@ def rollback_workflow(
         "invalidated_tasks": invalidated,
         "timestamp": time.time(),
     })
-    wf_entry["history"] = history
-    save_workflows_data(wf_data, store=store)
+    update_workflow_metadata(
+        workflow_id=workflow_id,
+        updates={
+            "stage_advancing": advances,
+            "history": history,
+        },
+        store=s,
+    )
 
     return {
         "ok": True,
@@ -456,8 +498,12 @@ def step_workflow(workflow_id: str) -> Dict[str, Any]:
     stepped_id = stepped["id"]
 
     # Keep workflow paused to enforce single-step execution control
-    wf_entry["status"] = "paused"
-    save_workflows_data(wf_data)
+    transition_workflow(
+        workflow_id=workflow_id,
+        to_status="paused",
+        reason="step_workflow",
+        source="kernel_step",
+    )
 
     return {
         "ok": True,

@@ -1591,7 +1591,8 @@ pytest -q
 1. 状态跃迁不受约束，非法跃迁（如从 `pending` 跳跃至 `completed`）无法被统一拦截；
 2. 状态变迁与 `WorkflowEvent` 事件流脱节，事件审计流遗漏了最核心的生命周期事件；
 3. 过渡期曾试图在运行时保留 JSON 反向倒灌 SQLite 以适配未初始化 DB 的旧测试，破坏了 SQLite 作为唯一事实源（Single Source of Truth）的原则，引发幽灵任务复活与跨进程写覆盖竞态；
-4. 资源清理中曾出现“先拆解实体（finalize task/close tab/purge clone），最后才做状态转移校验”的顺序倒置，导致非法转移抛错时物理现场已被破坏。
+4. 资源清理中曾出现“先拆解实体（finalize task/close tab/purge clone），最后才做状态转移校验”的顺序倒置，导致非法转移抛错时物理现场已被破坏；
+5. 快照全量写回（Snapshot UPSERT）反向击穿 Gateway：当操作仅需更新元数据（如 `stage_verdict`、`paused_nodes`、`gate_overrides`、`history`、`commit` 等）时，若读取旧内存快照并调用全量 `save_tasks` / `save_workflows`，会倒灌陈旧的 `status` 字段，从而在没有 `WorkflowEvent` 的情况下静默覆盖并发 Gateway 刚刚推进的最新状态。
 
 ### 经验教训
 
@@ -1603,6 +1604,7 @@ pytest -q
 | **门禁先于物理副作用（Gate before Side Effect）** | `close_workflow` 若先拆解任务、关闭 tab、清理 clone，最后调用 transition 才报错，会导致命令失败但现场已被破坏 | 任何物理 teardown 必须前置纯校验（`validate_workflow_transition(cur_status, "completed", force=force)`），前置门禁通过后才允许执行物理清理与状态提交 |
 | **正常业务逻辑严禁滥用 `force=True`** | 在完成工作流等正常操作中曾盲目使用 `force=True` 绕过状态机，导致 `pending`/`paused` 等非运行态非法跳到 `completed` | 业务流转必须走合法路径（`running`/`in_progress` -> `completed`）；`force=True` 仅保留给管理员显式指定 `--force` 参数以逃生故障 |
 | **异常静默吞没隐藏真实根因** | 在调用 Gateway 时若随意 `except Exception: pass` 吞掉合法性校验错误，会掩盖非法转移并继续执行旧的非法逻辑 | 非法转移（`InvalidTransitionError`）必须坚决抛出或在 CLI 明确打印并以约定退出码（exit 2）退出；严禁捕获异常后继续执行旧有旁路覆写 |
+| **元数据更新禁止覆写状态（Metadata Isolation）** | 仅改 verdict/notes/history/locks 等元数据时若做全量实体覆写，旧快照会静默踩踏并发的新状态 | 建立原子元数据更新网关（`update_task_metadata()` / `update_workflow_metadata()`）：在 `BEGIN IMMEDIATE` 事务内重载实体、校验非保护字段白名单（`PROTECTED_*_FIELDS` 严防篡改 `status`/`task_id`）、应用变更并落库，彻底消除快照覆写隐患 |
 
 ### 操作规范
 
@@ -1619,14 +1621,18 @@ pytest -q
 5. **门禁前置与 CLI 自闭环**：
    - `herdr-task set <task> <status>` 遇未知任务/状态保持 exit 1，遇非法转移保持 exit 2；
    - `herdr-task close-workflow` 严格执行 **Gate before Side Effect**：在任何 finalize/tab close 前先做状态跃迁前置校验；默认只允许 `running`/`in_progress` 正常流转至 `completed`，非运行态必须显式加 `--force` 才能完成。
+6. **元数据隔离更新与状态保护**：
+   - 严禁通过 `save_tasks` / `save_workflows_data` 全量快照更新部分属性；
+   - 凡涉及 `stage_verdict`、`commit`、`integration_*`、`paused_nodes`、`gate_overrides`、`history` 等元数据变更，必须调用 `update_task_metadata()` / `update_workflow_metadata()`；
+   - 元数据接口对 `status`、`task_id`、`workflow_id` 等核心身份与生命周期字段执行强制保护拦截，违规即报 `ValueError`。
 
 ### 验证命令 / 证据
 
 ```bash
-# 1. Gateway 契约与对抗性测试（24 项：规则、非法拒绝、事务回滚、Admin force、事件流、Fail-Closed、防倒灌、投影锁、Teardown 门禁前置）
+# 1. Gateway 契约与并发回归测试（26 项：规则、非法拒绝、事务回滚、Admin force、事件流、Fail-Closed、防倒灌、投影锁、Teardown 门禁前置、并发元数据状态防踩踏）
 pytest tests/test_state_transition_gateway.py -v
 
-# 2. 全仓 414 项自动化测试全量回归
+# 2. 全仓 416 项自动化测试全量回归
 pytest -q
 
 # 3. 生产服务体检

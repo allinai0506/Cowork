@@ -2106,10 +2106,8 @@ def commit_task(task_id, message=None):
     ).strip()
 
     # 保存 commit hash
-    data = load_tasks()
-    task = find_task(data, task_id)
-    task["commit"] = commit_hash
-    save_tasks(data)
+    from herdr import kernel
+    kernel.update_task_metadata(task_id, {"commit": commit_hash}, store=_get_store())
 
     set_status(
         task_id,
@@ -2420,13 +2418,13 @@ def integrate_task(task_id):
         check=True
     )
 
-    data = load_tasks()
-    task = find_task(data, task_id)
-    task["integration_branch"] = integration_branch
-    task["integration_ref"] = herdr_ref
-    task["base_branch"] = base_branch
-    task["source_repo"] = main_repo
-    save_tasks(data)
+    from herdr import kernel
+    kernel.update_task_metadata(task_id, {
+        "integration_branch": integration_branch,
+        "integration_ref": herdr_ref,
+        "base_branch": base_branch,
+        "source_repo": main_repo,
+    }, store=_get_store())
 
     set_status(
         task_id,
@@ -2457,10 +2455,12 @@ def cleanup_task(task_id):
 
     # Logical cleanup only.
     # Workspace / Stage Tab / Task Pane / Task Clone are retained.
-    task["resource_retention"] = "persistent"
-    task["pane_retained"] = True
-    task["clone_retained"] = True
-    save_tasks(data)
+    from herdr import kernel
+    kernel.update_task_metadata(task_id, {
+        "resource_retention": "persistent",
+        "pane_retained": True,
+        "clone_retained": True,
+    }, store=_get_store())
 
     set_status(
         task_id,
@@ -2513,12 +2513,12 @@ def purge_task(task_id):
             )
             sys.exit(3)
 
-    data = load_tasks()
-    task = find_task(data, task_id)
-    task["pane_retained"] = False
-    task["clone_retained"] = False
-    task["resource_retention"] = "purged"
-    save_tasks(data)
+    from herdr import kernel
+    kernel.update_task_metadata(task_id, {
+        "pane_retained": False,
+        "clone_retained": False,
+        "resource_retention": "purged",
+    }, store=_get_store())
 
     print(f"[PURGED] {task_id}")
 
@@ -2676,14 +2676,17 @@ def _finalize_one(task, purge_clones=False, dry_run=False):
     if status in FINALIZE_ADVANCE:
         row["status"] = _advance_to_cleaned(task_id, status)
 
-    data = load_tasks()
-    record = find_task(data, task_id)
+    store = _get_store()
+    record = store.get_task(task_id)
     if record:
-        record["pane_retained"] = False
-        record["resource_retention"] = "purged"
+        from herdr import kernel
+        meta_updates = {
+            "pane_retained": False,
+            "resource_retention": "purged",
+        }
         if row["evidence"]:
-            record["evidence"] = row["evidence"]
-        save_tasks(data)
+            meta_updates["evidence"] = row["evidence"]
+        kernel.update_task_metadata(task_id, meta_updates, store=store)
     return row
 
 
@@ -3211,13 +3214,12 @@ def supersede_task(task_id, new_task_id=None, reason=None):
 def pause_task(task_id, reason=None):
     """Pause an in-flight task (dispatched/working/rework)."""
     if reason:
-        data = load_tasks()
-        task = find_task(data, task_id)
-        if not task:
+        from herdr import kernel
+        try:
+            kernel.update_task_metadata(task_id, {"pause_reason": reason}, store=_get_store())
+        except ValueError:
             print(f"Task not found: {task_id}")
             sys.exit(1)
-        task["pause_reason"] = reason
-        save_tasks(data)
     set_status(task_id, "paused")
 
 
@@ -3255,11 +3257,8 @@ def _clear_suppress_auto_close(workflow_id):
     if entry is None or not entry.get("suppress_auto_close"):
         return
 
-    entry.pop("suppress_auto_close", None)
-    store.save_workflow(entry)
-
-    wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE
-    sync_workflows_projection(store=store, wf_file=Path(wf_file) if wf_file else None)
+    from herdr import kernel
+    kernel.update_workflow_metadata(workflow_id, {"suppress_auto_close": None}, store=store)
 
     print(f"[AUTO-CLOSE LATCH CLEARED] workflow={workflow_id}")
 
