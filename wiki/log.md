@@ -392,3 +392,24 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
     - 同步对齐 `CLAUDE.md`、`docs/guides/universal-workflow-guide.md`、`docs/architecture/architecture-overview.md`、`docs/operations/troubleshooting-faq.md`、`wiki/index.md`、`wiki/tab-node-model.md`、`wiki/common-change-paths.md` 中的同类措辞；
   - **沉淀通用工程教训 §33**（工程语言收敛与反过度承诺准则：剔除危险绝对化承诺与不可控 SLA，坚持事实驱动与严谨务实的系统定位）；
   - 全仓自动化回归测试 368 项保持 100% 全部通过。
+
+- **2026-09-14: feat | Phase 3 启动：AgentAdapter 契约与 TTY 传输彻底解耦 + 交付安全防伪闸门**
+  - **核心问题与演化**：初版将 TTY 模拟封装为 `AgentAdapter` 雏形，但 `AgentAdapter` 基类内部仍写死 `ctrl-c`/`send-text`/`pane_id`，且未知 Agent 盲目降级至全能力原型；软插话（soft steer）在能力声明为 `False` 时仍偷偷 fallback 注入；物理发送失败时仍将指令虚假标记为 `dispatched`/`interrupted`，导致指令丢失与 SQLite 状态事实漂移。
+  - **架构重塑**：
+    - **契约与传输解耦**：`class AgentAdapter` 彻底去 TTY 化，仅保留通用抽象契约（零 Pane/Subprocess/Keystroke 知识）；所有终端按键模拟下沉至 `class TTYAgentAdapter(AgentAdapter)`，为未来 `NativeRpcAdapter` / `ApiAdapter` 扫清架构障碍；
+    - **Fail-Closed 默认安全**：`AgentCapability` 默认全部 `False`；未注册 Agent 强制路由至 `UnknownAgentAdapter`，拒绝一切 Steering 操作；
+    - **能力即控制门禁**：`supports_soft_steer=False`（如 OpenCode/Qoder）时严格拒绝执行软插话（返回 `ok=False`, `reason="soft_steer_not_supported"`），零 TTY 子进程调用；
+    - **真实交付防伪（Anti-Skew）**：
+      - `dispatch_steer_now` / `dispatch_pending_steer`：无 Pane 或物理投递失败时，指令严格保持 `pending`（记录 `last_delivery_error`），返回 `ok=False`, `pane_delivery_ok=False`，防止指令无故丢失；
+      - `halt_task`：物理中断失败时，严格拒绝推进 Task 状态至 `interrupted`，保持原状态并记录 `task_halt_failed`，杜绝后台 Agent 裸跑但状态显示已中断的虚假成功；
+  - **测试覆盖**：
+    - `tests/test_agent_adapter.py` 增至 11 项（覆盖 Fail-Closed、Soft-Steer 阻断、TTY 独立契约验证、中断失败防御）；
+    - `tests/test_steering_mesh.py` 增至 13 项（覆盖无 Pane 投递拒绝、物理失败保持 Pending、中断失败防状态漂移、OpenCode 软插话阻断、紧急插话半途失败反向漂移防御、历史事件 Append-Only 防重复膨胀）；
+    - 全量回归 **386 / 386 passed**（基线 368，净新增 18 项）。
+  - **PR #25 Review Blockers 修复**：
+    1. **紧急插话半途失败反向漂移防御**：当 Urgent Steer 中断成功但注入失败时，Task 强制流转至 `interrupted` (`requires_attention=True`)，指令保留 `pending`，杜绝 Agent 进程已停但数据库显示 working 的事实漂移；
+    2. **切断循环依赖与 Steering 纯粹化**：消除 `TTYAgentAdapter` 内部对 `steering._send_keys/_send_text` 的反向依赖与 monkeypatch 钩子；`steering.py` 彻底移除 `import subprocess`，纯粹收敛为编排层；
+    3. **历史记录 Append-Only 防重复膨胀**：修复 `save_steering_data` 遍历旧历史全量二次插入 SQLite 的严重缺陷，确立 audit 事件严格单向 append-only，单次重试零膨胀，为 PR #26 Event Stream 扫清障碍；
+  - **Wiki & Lessons**：`wiki/index.md`、`wiki/log.md`、`docs/lessons/lessons-learned.md §34` 全面同步。
+
+

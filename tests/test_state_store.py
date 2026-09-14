@@ -250,6 +250,7 @@ def test_cross_module_single_source_of_truth_anti_skew(store_env):
         "task_id": tid,
         "workflow_id": wid,
         "node": "dev",
+        "agent": "codex",
         "status": "working",
         "pane_id": "pane-mock-99",
     })
@@ -276,7 +277,8 @@ def test_cross_module_single_source_of_truth_anti_skew(store_env):
     assert steer_in_sqlite["status"] == "pending"
 
     # 4. Steering dispatch mutation: verify SQLite reflects dispatched status and task history
-    with patch("herdr.steering._send_keys", return_value=True), patch("herdr.steering._send_text", return_value=True):
+    from unittest.mock import MagicMock
+    with patch("subprocess.run", return_value=MagicMock(returncode=0)):
         d_res = steering.dispatch_steer_now(tid, steer_id)
         assert d_res["ok"] is True
         steer_dispatched = store.get_steer(steer_id)
@@ -288,7 +290,7 @@ def test_cross_module_single_source_of_truth_anti_skew(store_env):
         assert task_in_sqlite["steering_history"][0]["steer_id"] == steer_id
 
     # 5. Steering halt task: verify SQLite reflects interrupted status
-    with patch("herdr.steering._send_keys", return_value=True):
+    with patch("subprocess.run", return_value=MagicMock(returncode=0)):
         h_res = steering.halt_task(tid, reason="manual pause for audit", operator="lead", execute_kill=True)
         assert h_res["ok"] is True
         task_halted = store.get_task(tid)

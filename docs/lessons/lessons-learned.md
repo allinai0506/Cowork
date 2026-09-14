@@ -1486,3 +1486,54 @@ git grep -iE "(100% 向下兼容|100% 兼容|毫秒级自动修复|毫秒级自�
 pytest -q
 ```
 
+
+---
+
+## §34 原型实现勿冒充通用协议：以 TTY Steering 为例的 AgentAdapter 解耦
+
+### 问题背景
+
+`dispatch_steer_now()` 以 `ctrl-c → sleep(0.1) → send-text → enter` 的纯 TTY 按键模拟作为 "Universal Agent Steering" 流通。这个实现能工作，但将其标签为"通用跨 Agent Steering 协议"是个技术谎言：OpenCode（auto 模式工具循环）、Codex（多轮对话 Session）、Claude（context 保持打断恢复）、Qoder（私有 TUI）、Agy（特殊 stdin 行为）对 Ctrl-C 信号捕获、提示词注入、Session 状态保持和中断后恢复的行为截然不同。若未来不同 Agent 需要差异化处理，极可能在 `steering.py` 内部演化出大量 `if agent == "claude": ... elif agent == "codex": ...` 分支，严重违反关注点分离，将核心调度层变成知识污水池。
+
+### 经验教训
+
+| 陷阱 | 说明 |
+|---|---|
+| **原型冒充通用协议** | 能跑通 ≠ 通用。应在 commit 时即明确标注当前实现的协议等级（`tty_prototype`），不过度标签 |
+| **Adapter 绑定 TTY 实现** | 基础 `AgentAdapter` 若直接耦合 `ctrl-c`/`send-text`/`pane_id`，未来 RPC/API Adapter 就会隐式继承 TTY 副作用。必须拆分为纯契约 `AgentAdapter` 与传输实现 `TTYAgentAdapter` |
+| **未知 Agent 乐观假设** | 未知 Agent 绝不能默认假设支持 TTY 信号。未知必须 Fail-Closed（`UnknownAgentAdapter` 所有能力全 `False`，拒绝执行干预） |
+| **能力声明沦为说明书** | `supports_soft_steer=False` 时若仍向 TTY 注入，能力矩阵就只是装饰。声明不支持时必须在 Adapter 层直接阻断并返回 `ok=False`，严禁偷偷 fallback |
+| **物理发送失败掩盖为已分发** | TTY 物理投递失败若将指令标记为 `dispatched`，指令就会永久丢失。投递失败必须保持 `pending` 并记录 `last_delivery_error`；interrupt 失败必须阻止 Task 进入 `interrupted`，防事实漂移 |
+| **半途失败反向事实漂移** | Urgent Steer 存在“Ctrl-C 成功但 prompt 注入失败”：Agent 真实已停止，若 Task 保持 working 则发生反向漂移。必须推进 Task 为 `interrupted` (`requires_attention=True`)，指令保持 pending 待重发 |
+| **反向依赖与传输不纯粹** | Adapter 若反向调用 Steering 内部的私有按键方法，会导致循环依赖。Steering 编排层必须 100% 零 Subprocess；所有按键逻辑必须收敛于 `TTYAgentAdapter` |
+| **快照保存引发历史重复膨胀** | Audit History 必须真正 append-only。严禁在状态保存函数中遍历全量历史重新 insert，否则重试越多历史膨胀越严重，直接污染下游 Event Stream |
+
+### 操作规范
+
+1. **抽象契约与传输解耦**：基础 `AgentAdapter` 零 TTY/Pane/Subprocess 知识；`steering.py` 零 Subprocess 导入；所有终端按键模拟严格下沉至 `TTYAgentAdapter`；
+2. **Fail-Closed 默认安全**：`AgentCapability` 默认全部 `False`，未注册 Agent 降级为 `UnknownAgentAdapter`，拒绝一切 Steering；
+3. **能力即门禁**：`supports_soft_steer=False`（如 OpenCode/Qoder）时必须拒绝软插话并阻止物理写入，提示使用带中断的 urgent steer；
+4. **真实交付语义（Anti-Skew）**：
+   - 物理投递失败或无 Pane 时，指令状态严格保持 `pending`，返回 `ok=False`、`pane_delivery_ok=False`；
+   - 中断信号物理发送失败时，`halt_task` 严格拒绝将 Task 状态推进为 `interrupted`，保持原状态并记录 `task_halt_failed`；
+   - Urgent Steer 半途失败（中断成功、注入失败）时，Task 强制推进为 `interrupted` (`requires_attention=True`)，指令保持 `pending`，杜绝真实进程已死但数据库仍在 working 的反向漂移；
+5. **真正的 Append-Only 历史记录**：每次操作仅单向追加 1 条历史事件至 SQLite，`save_steering_data` 仅同步状态与队列，严禁重放全量历史；
+6. **门禁与审计追溯**：每个干预指令在 StateStore 与任务历史中均附带 `protocol` 与 `adapter` 元信息，全量回归验证 386 项全绿。
+
+### 验证命令 / 证据
+
+```bash
+# 1. AgentAdapter 契约纯净度、Fail-Closed 与 Soft-Steer 阻断门禁
+pytest tests/test_agent_adapter.py -v
+
+# 2. Steering Mesh 物理投递失败保持 pending、半途失败防漂移、历史不重复膨胀
+pytest tests/test_steering_mesh.py -v
+
+# 3. 全量回归（基线 368 → 386 passed）
+pytest -q
+
+# 4. CLI 能力矩阵查询验证
+bin/herdr-task adapters
+```
+
+

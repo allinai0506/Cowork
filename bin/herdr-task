@@ -3577,6 +3577,9 @@ def main():
     steer_queue_cmd = sub.add_parser("steer-queue")
     steer_queue_cmd.add_argument("task_id")
 
+    adapters_cmd = sub.add_parser("adapters", help="查看各 AgentAdapter 运行时能力矩阵 (TTY Prototype)")
+    adapters_cmd.add_argument("--json", action="store_true", help="输出完整 JSON 数据")
+
     project_cmd = sub.add_parser("project")
     project_cmd.add_argument("task_id")
     project_cmd.add_argument("--json", action="store_true", help="输出完整 JSON 数据")
@@ -3757,6 +3760,21 @@ def main():
         else:
             for s in steers:
                 print(f"- [{s['status']}] {s['steer_id']} (urgent={s['urgent']}): {s['instruction']}")
+
+    elif args.command == "adapters":
+        from herdr.agent_adapter import list_agent_adapters
+        adapters = list_agent_adapters()
+        if getattr(args, "json", False):
+            print(json.dumps(adapters, ensure_ascii=False, indent=2))
+        else:
+            print("=== Herdr Agent Adapter Capability Matrix (TTY Prototype) ===")
+            for name, item in adapters.items():
+                caps = item.get("capabilities", {})
+                print(f"- [{name}] (protocol: {item.get('protocol_level')}):")
+                print(f"    supports_interrupt:        {caps.get('supports_interrupt')}")
+                print(f"    supports_soft_steer:       {caps.get('supports_soft_steer')}")
+                print(f"    supports_resume:           {caps.get('supports_resume')}")
+                print(f"    supports_prompt_injection: {caps.get('supports_prompt_injection')}")
 
     elif args.command == "project":
         import herdr.projection as herdr_projection
