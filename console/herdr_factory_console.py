@@ -508,6 +508,11 @@ def api_task_steer_queue(tid):
     if not tid:return []
     return herdr_steering.list_task_steers(tid)
 
+def api_agent_adapters():
+    from herdr.agent_adapter import list_agent_adapters
+    return list_agent_adapters()
+
+
 def api_task_force_review(b):
     tid=str(b.get('task_id') or '').strip()
     if not tid:raise RuntimeError('task_id 不能为空')
@@ -1443,6 +1448,8 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/task/steer/queue':
                 tid=self.query().get('task_id',[''])[0]
                 return self.send_json(200,api_task_steer_queue(tid))
+            if p=='/api/agent/adapters':
+                return self.send_json(200,api_agent_adapters())
             if p=='/api/task/projection':
                 tid=self.query().get('id',[''])[0] or self.query().get('task_id',[''])[0]
                 if not tid:raise RuntimeError('task_id 不能为空')

@@ -1,9 +1,16 @@
 """Worker Intervention & Steering Mesh (herdr/steering.py).
 
-Provides fine-grained human-in-the-loop intervention primitives:
-1. In-flight Steering Queue (queue_steer, dispatch_pending_steer)
-2. Immediate Halt / Interrupt (halt_task)
-3. Structured Prompt Injection for heterogeneous Agent runtimes
+NOTE ON PROTOCOL STATUS:
+This module currently operates as a TTY-level steering prototype via AgentAdapter,
+NOT a universal agent steering protocol. Heterogeneous agents (Claude, Codex,
+OpenCode, Qoder, Agy, Pi) differ substantially in their handling of:
+- Ctrl-C interrupt signals
+- Interactive prompt injection & stdin consumption
+- Multi-turn session state preservation
+- Contextual session resumption
+
+All agent-specific runtime differences and capabilities are formalized through
+herdr.agent_adapter.AgentAdapter.
 """
 
 import json
@@ -17,6 +24,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import state_db
+from .agent_adapter import (
+    AgentAdapter,
+    AgentCapability,
+    get_agent_adapter,
+    list_agent_adapters,
+)
 from .state_store import get_state_store, StateStore
 
 ACTIVE_STATUSES = {"dispatched", "working", "rework", "blocked", "paused", "interrupted"}
@@ -187,8 +200,16 @@ def queue_steer(
     }
 
 
+def get_task_adapter(task_id: str) -> AgentAdapter:
+    """Resolve the AgentAdapter for a given task, falling back to tty_prototype."""
+    tasks_data = load_tasks_data()
+    task = next((t for t in tasks_data.get("tasks", []) if t.get("task_id") == task_id), None)
+    agent_name = task.get("agent") if task else None
+    return get_agent_adapter(agent_name)
+
+
 def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
-    """Immediately dispatch a specific steer item by interrupting the active pane."""
+    """Immediately dispatch a specific steer item via the task's AgentAdapter (TTY prototype)."""
     s_data = load_steering_data()
     q = s_data.get("steering_queues", {}).get(task_id, [])
     item = next((x for x in q if x.get("steer_id") == steer_id), None)
@@ -198,21 +219,26 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
     tasks_data = load_tasks_data()
     task = next((t for t in tasks_data.get("tasks", []) if t.get("task_id") == task_id), None)
     pane_id = task.get("pane_id") if task else None
+    agent_name = task.get("agent") if task else None
+    adapter = get_agent_adapter(agent_name)
 
-    # 1. Soft interrupt (ctrl-c)
+    # 1. Dispatch urgent intervention via AgentAdapter
+    steer_result = {"ok": True, "interrupted": False, "injected": False}
     if pane_id:
-        _send_keys(pane_id, "ctrl-c")
-        time.sleep(0.1)
+        steer_result = adapter.steer_urgent(
+            pane_id,
+            instruction=item["instruction"],
+            operator=item.get("operator", "human"),
+            wait_after_interrupt=0.1,
+        )
 
-    # 2. Inject structured prompt
-    prompt = format_steer_prompt(item["instruction"], operator=item.get("operator", "human"))
-    if pane_id:
-        _send_text(pane_id, prompt)
-        _send_keys(pane_id, "enter")
-
-    # 3. Update steer item status
+    # 2. Update steer item status & protocol metadata
+    now = time.time()
     item["status"] = "dispatched"
-    item["dispatched_at"] = time.time()
+    item["dispatched_at"] = now
+    item["protocol"] = adapter.protocol_level
+    item["adapter"] = adapter.name
+
     s_data.setdefault("history", []).append({
         "action": "steer_dispatched",
         "steer_id": steer_id,
@@ -220,36 +246,43 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
         "instruction": item["instruction"],
         "operator": item.get("operator"),
         "urgent": item.get("urgent", False),
-        "timestamp": time.time(),
+        "protocol": adapter.protocol_level,
+        "adapter": adapter.name,
+        "timestamp": now,
     })
     save_steering_data(s_data)
 
-    # 4. Record on task entity in tasks.json
+    # 3. Record on task entity in tasks.json
     if task:
-        task["last_steered_at"] = time.time()
+        task["last_steered_at"] = now
         steering_history = list(task.get("steering_history") or [])
         steering_history.append({
             "steer_id": steer_id,
             "instruction": item["instruction"],
             "operator": item.get("operator"),
             "urgent": item.get("urgent", False),
-            "dispatched_at": time.time(),
+            "protocol": adapter.protocol_level,
+            "adapter": adapter.name,
+            "dispatched_at": now,
         })
         task["steering_history"] = steering_history
         save_tasks_data(tasks_data)
 
     return {
-        "ok": True,
+        "ok": True,  # "ok" = steer was recorded as dispatched, regardless of TTY delivery
         "steer_id": steer_id,
         "task_id": task_id,
         "urgent": item.get("urgent", False),
         "status": "dispatched",
+        "protocol": adapter.protocol_level,
+        "adapter": adapter.name,
+        "pane_delivery_ok": steer_result.get("ok", True),  # TTY-level send result for observability
         "dispatched_at": item["dispatched_at"],
     }
 
 
 def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Dispatch the next pending steer item (or a specified one) in the task's queue."""
+    """Dispatch the next pending steer item via task's AgentAdapter (soft non-interrupting)."""
     s_data = load_steering_data()
     q = s_data.get("steering_queues", {}).get(task_id, [])
     if not q:
@@ -267,15 +300,24 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
     tasks_data = load_tasks_data()
     task = next((t for t in tasks_data.get("tasks", []) if t.get("task_id") == task_id), None)
     pane_id = task.get("pane_id") if task else None
+    agent_name = task.get("agent") if task else None
+    adapter = get_agent_adapter(agent_name)
 
     # Inject without interrupt for smooth steering
-    prompt = format_steer_prompt(target_item["instruction"], operator=target_item.get("operator", "human"))
+    steer_result = {"ok": True, "interrupted": False, "injected": False}
     if pane_id:
-        _send_text(pane_id, prompt)
-        _send_keys(pane_id, "enter")
+        steer_result = adapter.steer_soft(
+            pane_id,
+            instruction=target_item["instruction"],
+            operator=target_item.get("operator", "human"),
+        )
 
+    now = time.time()
     target_item["status"] = "dispatched"
-    target_item["dispatched_at"] = time.time()
+    target_item["dispatched_at"] = now
+    target_item["protocol"] = adapter.protocol_level
+    target_item["adapter"] = adapter.name
+
     s_data.setdefault("history", []).append({
         "action": "steer_dispatched",
         "steer_id": target_item["steer_id"],
@@ -283,28 +325,35 @@ def dispatch_pending_steer(task_id: str, steer_id: Optional[str] = None) -> Opti
         "instruction": target_item["instruction"],
         "operator": target_item.get("operator"),
         "urgent": target_item.get("urgent", False),
-        "timestamp": time.time(),
+        "protocol": adapter.protocol_level,
+        "adapter": adapter.name,
+        "timestamp": now,
     })
     save_steering_data(s_data)
 
     if task:
-        task["last_steered_at"] = time.time()
+        task["last_steered_at"] = now
         steering_history = list(task.get("steering_history") or [])
         steering_history.append({
             "steer_id": target_item["steer_id"],
             "instruction": target_item["instruction"],
             "operator": target_item.get("operator"),
             "urgent": target_item.get("urgent", False),
-            "dispatched_at": time.time(),
+            "protocol": adapter.protocol_level,
+            "adapter": adapter.name,
+            "dispatched_at": now,
         })
         task["steering_history"] = steering_history
         save_tasks_data(tasks_data)
 
     return {
-        "ok": True,
+        "ok": True,  # "ok" = steer was recorded as dispatched, regardless of TTY delivery
         "steer_id": target_item["steer_id"],
         "task_id": task_id,
         "status": "dispatched",
+        "protocol": adapter.protocol_level,
+        "adapter": adapter.name,
+        "pane_delivery_ok": steer_result.get("ok", True),  # TTY-level send result for observability
         "dispatched_at": target_item["dispatched_at"],
     }
 
@@ -315,15 +364,18 @@ def halt_task(
     operator: str = "human",
     execute_kill: bool = True,
 ) -> Dict[str, Any]:
-    """Perform a graceful soft halt (SIGINT / ctrl-c) on a task."""
+    """Perform a graceful soft halt (SIGINT / ctrl-c) on a task via its AgentAdapter."""
     tasks_data = load_tasks_data()
     task = next((t for t in tasks_data.get("tasks", []) if t.get("task_id") == task_id), None)
     if not task:
         raise ValueError(f"Task '{task_id}' not found")
 
     pane_id = task.get("pane_id")
+    agent_name = task.get("agent")
+    adapter = get_agent_adapter(agent_name)
+
     if pane_id and execute_kill:
-        _send_keys(pane_id, "ctrl-c")
+        adapter.interrupt(pane_id, reason=reason)
 
     old_status = task.get("status")
     now = time.time()
@@ -331,11 +383,15 @@ def halt_task(
     task["interrupt_reason"] = reason
     task["interrupted_by"] = operator
     task["interrupted_at"] = now
+    task["protocol"] = adapter.protocol_level
+    task["adapter"] = adapter.name
     task.setdefault("status_history", []).append({
         "from": old_status,
         "to": "interrupted",
         "reason": reason,
         "operator": operator,
+        "protocol": adapter.protocol_level,
+        "adapter": adapter.name,
         "timestamp": now,
     })
     save_tasks_data(tasks_data)
@@ -347,6 +403,8 @@ def halt_task(
         "task_id": task_id,
         "reason": reason,
         "operator": operator,
+        "protocol": adapter.protocol_level,
+        "adapter": adapter.name,
         "timestamp": now,
     })
     save_steering_data(s_data)
@@ -357,6 +415,8 @@ def halt_task(
         "status": "interrupted",
         "reason": reason,
         "operator": operator,
+        "protocol": adapter.protocol_level,
+        "adapter": adapter.name,
         "timestamp": now,
     }
 

@@ -187,3 +187,59 @@ def test_steer_nonexistent_or_inactive_task(steering_env):
 
     with pytest.raises(ValueError, match="Task 'unknown' not found"):
         steering.halt_task("unknown")
+
+
+def test_steer_with_agent_adapter_protocol_metadata(steering_env):
+    from herdr.state_store import get_state_store
+
+    # Seed task with claude agent
+    t_data = json.loads(steering_env["tasks_file"].read_text(encoding="utf-8"))
+    task = {
+        "task_id": "task-claude-01",
+        "workflow_id": "wf-test",
+        "status": "working",
+        "pane_id": "pane-claude-1",
+        "node": "dev",
+        "agent": "claude",
+        "status_history": [{"from": None, "to": "working", "timestamp": time.time()}],
+    }
+    t_data["tasks"].append(task)
+    steering_env["tasks_file"].write_text(json.dumps(t_data), encoding="utf-8")
+    store = get_state_store(db_path=steering_env["tasks_file"].parent / "state.db")
+    store.save_task(task)
+
+    # Test get_task_adapter
+    adapter = steering.get_task_adapter("task-claude-01")
+    assert adapter.name == "claude"
+    assert adapter.protocol_level == "tty_prototype"
+    assert adapter.supports_interrupt is True
+
+    # Urgent steer
+    mock_run = MagicMock()
+    mock_run.return_value.returncode = 0
+    with patch("subprocess.run", mock_run):
+        res = steering.queue_steer("task-claude-01", "Focus on simplicity", urgent=True)
+
+    assert res["ok"] is True
+    assert res["status"] == "dispatched"
+    assert res["protocol"] == "tty_prototype"
+    assert res["adapter"] == "claude"
+
+    # Verify steering data contains protocol and adapter
+    s_data = steering.load_steering_data()
+    q = s_data["steering_queues"]["task-claude-01"]
+    assert q[0]["protocol"] == "tty_prototype"
+    assert q[0]["adapter"] == "claude"
+
+    # Verify task entity in tasks.json contains protocol and adapter
+    t_updated = json.loads(steering_env["tasks_file"].read_text(encoding="utf-8"))
+    t = next(x for x in t_updated["tasks"] if x["task_id"] == "task-claude-01")
+    assert t["steering_history"][-1]["protocol"] == "tty_prototype"
+    assert t["steering_history"][-1]["adapter"] == "claude"
+
+    # Soft halt
+    with patch("subprocess.run", mock_run):
+        halt_res = steering.halt_task("task-claude-01", reason="Manual stop")
+    assert halt_res["protocol"] == "tty_prototype"
+    assert halt_res["adapter"] == "claude"
+

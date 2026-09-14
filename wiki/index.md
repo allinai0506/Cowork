@@ -38,7 +38,7 @@
 | **排查后台服务不推进、状态不同步** | [[architecture]] | `services/herdr-controller.py` |
 | **编写或修改自动化测试** | [[dag-workflow-engine]] | `tests/test_workflow_engine.py` |
 | **工作流外部受控元语与快照回溯** | [[dag-workflow-engine]], [[task-lifecycle]] | `herdr/kernel.py`, `console/herdr_factory_console.py` |
-| **工位实时打断与插话纠偏 (Steering Mesh)** | [[task-lifecycle]] | `herdr/steering.py`, `bin/herdr-task:steer` |
+| **工位实时打断与插话纠偏 (Steering Mesh & AgentAdapter)** | [[task-lifecycle]] | `herdr/steering.py`, `herdr/agent_adapter.py`, `bin/herdr-task:steer/adapters` |
 | **白盒遥测、语义提炼与产物投影 (Projection Engine)** | [[task-lifecycle]] | `herdr/projection.py`, `console/herdr_factory_console.py` |
 | **通用配置驱动与受控 MCP 生态容器 (Dynamic Config & MCP Mesh)** | [[dag-workflow-engine]] | `herdr/mcp.py`, `herdr/workflow.py` |
 | **嵌入式状态引擎、检查点快照与时间旅行分叉 (StateStore & Checkpoint Store V2)** | [[task-lifecycle]], [[domain-model]] | `herdr/state_store.py`, `herdr/state_db.py`, `herdr/kernel.py`, `bin/herdr-task` |

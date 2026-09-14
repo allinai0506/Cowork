@@ -392,3 +392,15 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
     - 同步对齐 `CLAUDE.md`、`docs/guides/universal-workflow-guide.md`、`docs/architecture/architecture-overview.md`、`docs/operations/troubleshooting-faq.md`、`wiki/index.md`、`wiki/tab-node-model.md`、`wiki/common-change-paths.md` 中的同类措辞；
   - **沉淀通用工程教训 §33**（工程语言收敛与反过度承诺准则：剔除危险绝对化承诺与不可控 SLA，坚持事实驱动与严谨务实的系统定位）；
   - 全仓自动化回归测试 368 项保持 100% 全部通过。
+
+- **2026-09-14: feat | Phase 3 启动：AgentAdapter 矩阵形式化 + TTY Steering 原型定位收敛**
+  - **核心问题**：`dispatch_steer_now()` 以 `ctrl-c → sleep(0.1) → send-text → enter` 的纯 TTY 模拟作为"通用跨 Agent Steering 协议"流通，实际是高度依赖 TTY 行为的原型实现。OpenCode、Codex、Claude、Qoder、Agy 对 Ctrl-C 信号捕获、提示词注入、多轮 Session 状态保持和中断恢复的行为截然不同；若后续直接在 `steering.py` 散落 `if agent == "claude": ...` 将严重腐化核心调度层。
+  - **架构决策**：
+    - **新增 `herdr/agent_adapter.py`**（Functional Core 纯逻辑）：形式化定义 `@dataclass(frozen=True) class AgentCapability`（四大能力位 + `protocol_level`）与 `class AgentAdapter` 基类；实现各具体适配器（`TTYSteeringPrototypeAdapter`、`ClaudeAdapter`、`CodexAdapter`、`OpenCodeAdapter`、`QoderAdapter`、`AgyAdapter`、`PiAdapter`）；建立适配器注册中心 `get_agent_adapter(agent_name)`、`register_agent_adapter()`、`list_agent_adapters()`；支持别名解析（`qoder`/`qodercn` → `qodercli`）与未知 Agent 降级到 `tty_prototype`。
+    - **重构 `herdr/steering.py`**：正式重命名协议定位为 "TTY-level steering prototype"；`dispatch_steer_now()`/`dispatch_pending_steer()`/`halt_task()` 通过 `get_agent_adapter(task.agent)` 动态获取适配器并委托执行；返回体增加 `protocol` + `adapter` + `pane_delivery_ok` 三字段；`ok` 语义明确收敛为"dispatch 已被记录"，与 TTY 物理发送结果解耦。
+    - **`ok` 语义精确化**：`ok=True` 表示 steer 已被原子记录为 dispatched；TTY 物理发送结果通过 `pane_delivery_ok` 字段单独暴露，防止无人值守环境 subprocess 失败引发误报。
+  - **新增命令**：`herdr-task adapters [--json]`，显示完整 AgentAdapter 能力矩阵；Console 后端新增 `/api/agent/adapters` GET 接口与 `api_agent_adapters()` 函数。
+  - **测试覆盖**：新增 `tests/test_agent_adapter.py`（9 项，覆盖能力矩阵、注册查找、别名解析、多态 steer/halt/resume 调用）；`tests/test_steering_mesh.py` 追加协议元信息断言（7→7 项，新增 `test_steer_with_agent_adapter_protocol_metadata`）；全量回归 **378 / 378 passed**（基线 368，净新增 10 项）。
+  - **未来扩展路径**：下一个 Agent 接入只需：1) 实现 `class XxxAdapter(AgentAdapter)`，声明 `capabilities`；2) 调用 `register_agent_adapter(XxxAdapter())`——`steering.py` 零修改，没有任何 `if agent == ...` 分支。
+  - **Wiki 更新**：`wiki/index.md` 路由行更新指向 `herdr/agent_adapter.py`；`wiki/log.md` 追加本条目。
+

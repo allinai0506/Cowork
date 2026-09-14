@@ -1486,3 +1486,45 @@ git grep -iE "(100% 向下兼容|100% 兼容|毫秒级自动修复|毫秒级自�
 pytest -q
 ```
 
+
+---
+
+## §34 原型实现勿冒充通用协议：以 TTY Steering 为例的 AgentAdapter 解耦
+
+### 问题背景
+
+`dispatch_steer_now()` 以 `ctrl-c → sleep(0.1) → send-text → enter` 的纯 TTY 按键模拟作为 "Universal Agent Steering" 流通。这个实现能工作，但将其标签为"通用跨 Agent Steering 协议"是个技术谎言：OpenCode（auto 模式工具循环）、Codex（多轮对话 Session）、Claude（context 保持打断恢复）、Qoder（私有 TUI）、Agy（特殊 stdin 行为）对 Ctrl-C 信号捕获、提示词注入、Session 状态保持和中断后恢复的行为截然不同。若未来不同 Agent 需要差异化处理，极可能在 `steering.py` 内部演化出大量 `if agent == "claude": ... elif agent == "codex": ...` 分支，严重违反关注点分离，将核心调度层变成知识污水池。
+
+### 经验教训
+
+| 陷阱 | 说明 |
+|---|---|
+| **原型冒充通用协议** | 能跑通 ≠ 通用。应在 commit 时即明确标注当前实现的协议等级（`tty_prototype`），不过度标签 |
+| **if-agent 分支蔓延** | 在核心调度层直接散落 `if agent == X` 的代价是：每新增 Agent 必须改调度层，测试矩阵指数增长 |
+| **`ok` 语义混淆** | "dispatch 已被记录"与"TTY 物理发送成功"是两个不同断言。混用会导致无人值守环境 subprocess 失败 → `ok=False` → 误报 dispatch 失败，即使数据已落库 |
+| **副作用与能力声明分离** | Agent 的能力差异（是否支持 interrupt/soft_steer/resume）应通过声明式矩阵（dataclass）表达，而非散落在条件分支里 |
+
+### 操作规范
+
+1. **命名即协议契约**：凡是 TTY 层面的模拟实现，代码注释与返回体必须明确标注 `protocol_level="tty_prototype"`，区别于 `native_rpc`、`api` 等未来更高层协议；
+2. **能力矩阵 > 条件分支**：为每个 Agent 实现 `AgentAdapter` 子类，以 `@dataclass(frozen=True) AgentCapability` 声明四大能力位（`supports_interrupt`、`supports_soft_steer`、`supports_resume`、`supports_prompt_injection`），调度逻辑依能力标志路由，零 `if agent ==` 分支；
+3. **注册中心扩展**：新增 Agent 只需实现 `class XxxAdapter(AgentAdapter)` + `register_agent_adapter(XxxAdapter())`，核心调度层零修改；
+4. **`ok` 与 `pane_delivery_ok` 解耦**：业务层 `ok=True` 表示 steer 已被原子记录 dispatched；TTY 物理发送结果通过 `pane_delivery_ok` 字段单独暴露，防止无人值守环境 subprocess 失败引发误报；
+5. **门禁：dispatch 后必须有协议元信息**：steer 历史、task entity 的 `steering_history` 条目均必须包含 `protocol` 与 `adapter` 字段，确保审计可追溯。
+
+### 验证命令 / 证据
+
+```bash
+# 1. AgentAdapter 能力矩阵与注册中心完整性
+pytest tests/test_agent_adapter.py -v
+
+# 2. Steering Mesh 协议元信息断言（protocol/adapter 字段必须出现在历史记录）
+pytest tests/test_steering_mesh.py -v
+
+# 3. 全量回归（基线 368 → 378 passed）
+pytest -q
+
+# 4. CLI 能力矩阵查询验证
+bin/herdr-task adapters
+```
+
