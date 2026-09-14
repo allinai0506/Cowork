@@ -1605,34 +1605,41 @@ pytest -q
 | **正常业务逻辑严禁滥用 `force=True`** | 在完成工作流等正常操作中曾盲目使用 `force=True` 绕过状态机，导致 `pending`/`paused` 等非运行态非法跳到 `completed` | 业务流转必须走合法路径（`running`/`in_progress` -> `completed`）；`force=True` 仅保留给管理员显式指定 `--force` 参数以逃生故障 |
 | **异常静默吞没隐藏真实根因** | 在调用 Gateway 时若随意 `except Exception: pass` 吞掉合法性校验错误，会掩盖非法转移并继续执行旧的非法逻辑 | 非法转移（`InvalidTransitionError`）必须坚决抛出或在 CLI 明确打印并以约定退出码（exit 2）退出；严禁捕获异常后继续执行旧有旁路覆写 |
 | **元数据更新禁止覆写状态（Metadata Isolation）** | 仅改 verdict/notes/history/locks 等元数据时若做全量实体覆写，旧快照会静默踩踏并发的新状态 | 建立原子元数据更新网关（`update_task_metadata()` / `update_workflow_metadata()`）：在 `BEGIN IMMEDIATE` 事务内重载实体、校验非保护字段白名单（`PROTECTED_*_FIELDS` 严防篡改 `status`/`task_id`）、应用变更并落库，彻底消除快照覆写隐患 |
+| **Teardown 物理销毁 TOCTOU 竞态** | 若只做只读前置校验就启动不可逆资源销毁（关 Tab/删 Clone），销毁期间并发 pause 成功会导致终态提交失败，陷入资源已毁但状态停留在 paused 的撕裂 | 引入中间态 `closing`（`running`/`in_progress` -> `closing` -> `completed`）；在任何物理清理前先原子将状态推进为 `closing` 预占所有权；`closing` 状态下天然拒绝 `paused`，物理销毁完成后再流转至 `completed`，消除 TOCTOU 竞态 |
+| **投影文件优先级混乱** | 若在同步 JSON 投影时优先取 `db_path.parent`，会覆盖调用方显式配置的 `TASKS_FILE` / `WORKFLOWS_FILE` 独立投影路径 | 统一收口解析优先级（`resolve_*_projection_file`）：`explicit argument -> os.environ -> store.db_path.parent -> default CONTROLLER_DIR` |
+| **事件审计流元数据篡改防伪** | 若将调用方传入的 metadata 直接追加在事件 payload 和状态历史末尾，恶意或失误的元数据（如 `from_status` / `source`）会篡改真实审计字段 | 建立双重防伪机制：1. `RESERVED_EVENT_METADATA_FIELDS` 校验（违规直接抛 `ValueError`）；2. 结构级防御：写入 `status_history` 与 `event_payload` 时规范字段置于末尾覆写，确保核心审计事实不可伪造 |
 
 ### 操作规范
 
 1. **函数式核心与命令式外壳解耦**：
-   - `herdr/transitions.py` 纯逻辑：`TASK_TRANSITIONS`、`WORKFLOW_TRANSITIONS`、`ACTIVE_TASK_STATUSES`、`COMPLETED_TASK_STATUSES`、`TERMINAL_TASK_STATUSES`、`validate_task_transition()`、`validate_workflow_transition()`。零 I/O、零第三方依赖。
+   - `herdr/transitions.py` 纯逻辑：`TASK_TRANSITIONS`、`WORKFLOW_TRANSITIONS`、`ACTIVE_TASK_STATUSES`、`COMPLETED_TASK_STATUSES`、`TERMINAL_TASK_STATUSES`、`validate_task_transition()`、`validate_workflow_transition()`。零 I/O、零第三方依赖。引入 `closing` 状态（允许流转至 `completed` 或 `failed`）。
 2. **唯一状态变更网关**：
    - `herdr.kernel.transition_task()` 与 `herdr.kernel.transition_workflow()` 作为全系统状态推进的唯一法定入口；
    - 统一由 `StateStore.transition_task()` 与 `StateStore.transition_workflow()` 在底层 SQLite 强事务内原子写入数据表与 `WorkflowEvent`（`event_type="task_transition"` / `"workflow_transition"`）。
 3. **全量上游与控制原语改造**：
    - `kernel.pause_workflow()`、`kernel.resume_workflow()`、`kernel.rollback_workflow()` 统一通过 Gateway 推进状态；
    - `bin/herdr-task`（`set`、`supersede`、`_mark_workflow_completed`、`reopen_workflow`）、`bin/herdr-factory`（`_update_workflow_status`）、`services/herdr-sentinel.py`（看门狗超时）、`herdr/steering.py`（紧急中断与 halt）全量收敛至 Gateway。
-4. **单向跨进程锁定投影同步**：
-   - 所有兼容性 JSON 导出（`tasks.json` / `workflows.json`）通过 `sync_tasks_projection` / `sync_workflows_projection` 统一在 `.{filename}.lock` 排他锁内从 SQLite 最新状态重导出后原子写入，杜绝旧快照覆盖更新。
-5. **门禁前置与 CLI 自闭环**：
+4. **单向跨进程锁定投影同步与严格解析优先级**：
+   - 所有兼容性 JSON 导出（`tasks.json` / `workflows.json`）通过 `sync_tasks_projection` / `sync_workflows_projection` 统一在 `.{filename}.lock` 排他锁内从 SQLite 最新状态重导出后原子写入，杜绝旧快照覆盖更新；
+   - 投影路径通过 `resolve_tasks_projection_file` 与 `resolve_workflows_projection_file` 解析，严格保证显式参数与环境变量优先。
+5. **门禁前置、Teardown 所有权预占与 CLI 自闭环**：
    - `herdr-task set <task> <status>` 遇未知任务/状态保持 exit 1，遇非法转移保持 exit 2；
-   - `herdr-task close-workflow` 严格执行 **Gate before Side Effect**：在任何 finalize/tab close 前先做状态跃迁前置校验；默认只允许 `running`/`in_progress` 正常流转至 `completed`，非运行态必须显式加 `--force` 才能完成。
+   - `herdr-task close-workflow` 严格执行 **Gate before Side Effect** 与 **Ownership Acquisition**：在任何 finalize/tab close 前先做状态跃迁前置校验，并原子推进为 `closing` 状态；默认只允许 `running`/`in_progress` 正常流转，物理销毁完成后最终落库 `completed`。
 6. **元数据隔离更新与状态保护**：
    - 严禁通过 `save_tasks` / `save_workflows_data` 全量快照更新部分属性；
    - 凡涉及 `stage_verdict`、`commit`、`integration_*`、`paused_nodes`、`gate_overrides`、`history` 等元数据变更，必须调用 `update_task_metadata()` / `update_workflow_metadata()`；
    - 元数据接口对 `status`、`task_id`、`workflow_id` 等核心身份与生命周期字段执行强制保护拦截，违规即报 `ValueError`。
+7. **事件审计流防篡改双重防御**：
+   - 定义 `RESERVED_EVENT_METADATA_FIELDS = {"from", "to", "from_status", "to_status", "reason", "source", "timestamp", "forced"}`；
+   - 拦截包含保留字段的元数据，并在 payload/history 字典构造中将权威字段最后解包，双重杜绝审计日志伪造。
 
 ### 验证命令 / 证据
 
 ```bash
-# 1. Gateway 契约与并发回归测试（26 项：规则、非法拒绝、事务回滚、Admin force、事件流、Fail-Closed、防倒灌、投影锁、Teardown 门禁前置、并发元数据状态防踩踏）
+# 1. Gateway 契约与并发回归测试（29 项：规则、非法拒绝、事务回滚、Admin force、事件流、Fail-Closed、防倒灌、投影锁、Teardown 门禁前置、并发元数据状态防踩踏、closing 状态防 TOCTOU 竞态、投影环境变量优先级、保留事件字段防伪）
 pytest tests/test_state_transition_gateway.py -v
 
-# 2. 全仓 416 项自动化测试全量回归
+# 2. 全仓 419 项自动化测试全量回归
 pytest -q
 
 # 3. 生产服务体检

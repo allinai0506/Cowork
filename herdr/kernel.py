@@ -30,12 +30,14 @@ HOME = Path.home()
 CONTROLLER_DIR = HOME / ".herdr-controller"
 
 
-def get_workflows_file() -> Path:
-    return Path(os.environ.get("WORKFLOWS_FILE") or (CONTROLLER_DIR / "workflows.json"))
+def get_workflows_file(store: Optional[StateStore] = None) -> Path:
+    from .state_store import resolve_workflows_projection_file
+    return resolve_workflows_projection_file(store=store)
 
 
-def get_tasks_file() -> Path:
-    return Path(os.environ.get("TASKS_FILE") or (CONTROLLER_DIR / "tasks.json"))
+def get_tasks_file(store: Optional[StateStore] = None) -> Path:
+    from .state_store import resolve_tasks_projection_file
+    return resolve_tasks_projection_file(store=store)
 
 
 def get_checkpoints_dir() -> Path:
@@ -86,8 +88,7 @@ def save_workflows_data(data: Dict[str, Any], store: Optional[StateStore] = None
     for wid, wf in (data.get("workflows") or {}).items():
         wf.setdefault("workflow_id", wid)
         s.save_workflow(wf)
-    wf_file = getattr(s, "db_path", None).parent / "workflows.json" if getattr(s, "db_path", None) else get_workflows_file()
-    sync_workflows_projection(store=s, wf_file=wf_file)
+    sync_workflows_projection(store=s)
 
 
 def load_tasks_data(store: Optional[StateStore] = None) -> Dict[str, Any]:
@@ -102,8 +103,7 @@ def save_tasks_data(data: Dict[str, Any], store: Optional[StateStore] = None) ->
     for t in data.get("tasks", []):
         if t.get("task_id") and t.get("workflow_id"):
             s.save_task(t)
-    tasks_file = getattr(s, "db_path", None).parent / "tasks.json" if getattr(s, "db_path", None) else get_tasks_file()
-    sync_tasks_projection(store=s, tasks_file=tasks_file)
+    sync_tasks_projection(store=s)
 
 
 
@@ -148,8 +148,7 @@ def transition_task(
         metadata=metadata,
         force=force,
     )
-    tasks_file = getattr(s, "db_path", None).parent / "tasks.json" if getattr(s, "db_path", None) else get_tasks_file()
-    sync_tasks_projection(store=s, tasks_file=tasks_file)
+    sync_tasks_projection(store=s)
     return res
 
 
@@ -172,8 +171,7 @@ def transition_workflow(
         metadata=metadata,
         force=force,
     )
-    wf_file = getattr(s, "db_path", None).parent / "workflows.json" if getattr(s, "db_path", None) else get_workflows_file()
-    sync_workflows_projection(store=s, wf_file=wf_file)
+    sync_workflows_projection(store=s)
     return res
 
 
@@ -185,8 +183,7 @@ def update_task_metadata(
     """Atomically update non-protected metadata fields of a task without touching status."""
     s = _get_store(store)
     res = s.update_task_metadata(task_id, updates)
-    tasks_file = getattr(s, "db_path", None).parent / "tasks.json" if getattr(s, "db_path", None) else get_tasks_file()
-    sync_tasks_projection(store=s, tasks_file=tasks_file)
+    sync_tasks_projection(store=s)
     return res
 
 
@@ -198,8 +195,7 @@ def update_workflow_metadata(
     """Atomically update non-protected metadata fields of a workflow without touching status."""
     s = _get_store(store)
     res = s.update_workflow_metadata(workflow_id, updates)
-    wf_file = getattr(s, "db_path", None).parent / "workflows.json" if getattr(s, "db_path", None) else get_workflows_file()
-    sync_workflows_projection(store=s, wf_file=wf_file)
+    sync_workflows_projection(store=s)
     return res
 
 
@@ -569,12 +565,8 @@ def restore_checkpoint(workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
     res = store.restore_checkpoint(workflow_id, checkpoint_id)
 
     # Sync compatibility files
-    wf_file = get_workflows_file()
-    if wf_file.parent.exists():
-        _atomic_write_json(wf_file, store.export_workflows_json())
-    tasks_file = get_tasks_file()
-    if tasks_file.parent.exists():
-        _atomic_write_json(tasks_file, store.export_tasks_json())
+    sync_workflows_projection(store=store)
+    sync_tasks_projection(store=store)
 
     # Clean up any transient stage advance locks in stage-state.json
     s_file = get_stage_state_file()
@@ -606,12 +598,8 @@ def fork_workflow_from_checkpoint(
         new_workflow_id=new_workflow_id,
         new_title=new_title,
     )
-    wf_file = get_workflows_file()
-    if wf_file.parent.exists():
-        _atomic_write_json(wf_file, store.export_workflows_json())
-    tasks_file = get_tasks_file()
-    if tasks_file.parent.exists():
-        _atomic_write_json(tasks_file, store.export_tasks_json())
+    sync_workflows_projection(store=store)
+    sync_tasks_projection(store=store)
     return res
 
 

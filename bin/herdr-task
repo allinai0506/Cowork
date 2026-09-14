@@ -2901,12 +2901,12 @@ def close_workflow(
         print(f"Unknown workflow (no tasks, no record): {workflow_id}")
         sys.exit(1)
 
-    # 1. Preflight Gate: Validate workflow transition to 'completed' BEFORE any teardown side effects
+    # 1. Preflight Gate: Validate workflow transition to 'closing' BEFORE any teardown side effects
     if entry:
         from herdr.transitions import validate_workflow_transition
         validate_workflow_transition(
             entry.get("status", "pending"),
-            "completed",
+            "closing",
             force=force,
         )
 
@@ -2959,6 +2959,19 @@ def close_workflow(
             + ", ".join(blocking)
         )
         sys.exit(2)
+
+    # 2. Acquire exclusive closing ownership via State Transition Gateway to block concurrent transitions
+    if not dry_run and entry:
+        from herdr import kernel
+        store = _get_store()
+        kernel.transition_workflow(
+            workflow_id=workflow_id,
+            to_status="closing",
+            reason=f"close_workflow: {'abandoned' if abandon else 'delivered'}",
+            source="herdr-task",
+            force=force,
+            store=store,
+        )
 
     if dry_run:
         print(f"[DRY RUN] close-workflow {workflow_id}")

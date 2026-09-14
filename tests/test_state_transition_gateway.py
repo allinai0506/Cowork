@@ -1010,6 +1010,220 @@ class TestStateTransitionGateway:
         assert events[0]["payload"]["from_status"] == "running"
         assert events[0]["payload"]["to_status"] == "completed"
 
+    def test_close_workflow_acquires_closing_state_and_blocks_concurrent_pause(self, clean_store, monkeypatch):
+        """P1 verification: close_workflow transitions running -> closing before teardown,
+        blocking concurrent pause, and finishes with closing -> completed."""
+        store, db_path, tmp_path = clean_store
+        import importlib.machinery
+        import importlib.util
+        from unittest.mock import MagicMock
+        from herdr import kernel
+        from herdr.transitions import InvalidTransitionError
+
+        def _load_src_module(name, path):
+            loader = importlib.machinery.SourceFileLoader(name, str(path))
+            spec = importlib.util.spec_from_loader(name, loader)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+
+        ht_path = Path(__file__).resolve().parent.parent / "bin" / "herdr-task"
+        ht_mod = _load_src_module("herdr_task_closing_race_test", ht_path)
+        ht_mod.TASKS_FILE = str(tmp_path / "tasks.json")
+        ht_mod.WORKFLOWS_FILE = str(tmp_path / "workflows.json")
+
+        wf = {
+            "workflow_id": "wf-closing-race",
+            "project_id": "p-closing",
+            "status": "running",
+        }
+        store.save_workflow(wf)
+
+        task = {
+            "task_id": "t-closing-settled",
+            "workflow_id": "wf-closing-race",
+            "status": "cleaned",
+        }
+        store.save_task(task)
+
+        # Hook into _finalize_one to simulate a concurrent actor trying to pause during teardown
+        pause_attempted_result = {}
+
+        def _mock_finalize_interceptor(t, purge_clones=False, dry_run=False):
+            # Mid-teardown: workflow MUST already be in 'closing' state
+            current_status = store.get_workflow("wf-closing-race")["status"]
+            assert current_status == "closing", f"Expected workflow to be 'closing' during teardown, got {current_status}"
+
+            # Concurrent actor tries to pause the workflow
+            try:
+                kernel.pause_workflow("wf-closing-race", store=store)
+                pause_attempted_result["success"] = True
+            except InvalidTransitionError as exc:
+                pause_attempted_result["error"] = exc
+
+            return {
+                "task_id": t["task_id"],
+                "status": "completed",
+                "action": "purged",
+            }
+
+        monkeypatch.setattr(ht_mod, "_finalize_one", _mock_finalize_interceptor)
+        monkeypatch.setattr(ht_mod, "_herdr", MagicMock(return_value=MagicMock(returncode=0)))
+
+        report = ht_mod.close_workflow("wf-closing-race", force=False)
+        assert report["workflow_id"] == "wf-closing-race"
+
+        # Assert concurrent pause was strictly blocked
+        assert "error" in pause_attempted_result
+        assert "Illegal workflow transition: 'closing' -> 'paused'" in str(pause_attempted_result["error"])
+
+        # Final state must be completed
+        final_wf = store.get_workflow("wf-closing-race")
+        assert final_wf["status"] == "completed"
+
+        # Check sequence of workflow_transition events: running -> closing -> completed
+        events = store.list_events(workflow_id="wf-closing-race", event_type="workflow_transition")
+        assert len(events) == 2
+        assert events[0]["payload"]["from_status"] == "running"
+        assert events[0]["payload"]["to_status"] == "closing"
+        assert events[1]["payload"]["from_status"] == "closing"
+        assert events[1]["payload"]["to_status"] == "completed"
+
+    def test_projection_sync_respects_explicit_env_var_over_db_sibling(self, tmp_path, monkeypatch):
+        """P2 verification: Projection sync precedence is:
+        explicit argument -> os.environ["TASKS_FILE"] -> store.db_path.parent -> default CONTROLLER_DIR."""
+        from herdr.state_store import (
+            get_state_store,
+            resolve_tasks_projection_file,
+            resolve_workflows_projection_file,
+            sync_tasks_projection,
+        )
+        from herdr import kernel
+
+        db_dir = tmp_path / "runtime_db"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        db_path = db_dir / "state.db"
+        store = get_state_store(db_path=db_path)
+
+        custom_dir = tmp_path / "custom_projection"
+        custom_dir.mkdir(parents=True, exist_ok=True)
+        env_tasks_file = custom_dir / "tasks.json"
+        env_wf_file = custom_dir / "workflows.json"
+
+        # 1. When env vars are set, resolve_* MUST pick env vars over store.db_path.parent
+        monkeypatch.setenv("TASKS_FILE", str(env_tasks_file))
+        monkeypatch.setenv("WORKFLOWS_FILE", str(env_wf_file))
+
+        assert resolve_tasks_projection_file(store=store) == env_tasks_file
+        assert resolve_workflows_projection_file(store=store) == env_wf_file
+
+        # 2. Kernel transition_task and transition_workflow sync to env_tasks_file, NOT db_dir / "tasks.json"
+        wf = {"workflow_id": "wf-proj-test", "status": "pending"}
+        store.save_workflow(wf)
+        task = {"task_id": "t-proj-test", "workflow_id": "wf-proj-test", "status": "dispatched"}
+        store.save_task(task)
+
+        kernel.transition_task(
+            task_id="t-proj-test",
+            to_status="working",
+            reason="started",
+            source="worker",
+            store=store,
+        )
+
+        # Assert custom_projection has tasks.json and was updated
+        assert env_tasks_file.exists(), "tasks.json should have been written to TASKS_FILE path"
+        assert not (db_dir / "tasks.json").exists(), "tasks.json should NOT be written to db_path.parent when TASKS_FILE is set"
+        with open(env_tasks_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        assert any(t["task_id"] == "t-proj-test" and t["status"] == "working" for t in data["tasks"])
+
+        # 3. Explicit argument overrides env var
+        arg_file = tmp_path / "explicit" / "override_tasks.json"
+        assert resolve_tasks_projection_file(store=store, tasks_file=arg_file) == arg_file
+        sync_tasks_projection(store=store, tasks_file=arg_file)
+        assert arg_file.exists()
+
+        # 4. When env var is cleared, store.db_path.parent is preferred over default
+        monkeypatch.delenv("TASKS_FILE", raising=False)
+        monkeypatch.delenv("WORKFLOWS_FILE", raising=False)
+        assert resolve_tasks_projection_file(store=store) == db_dir / "tasks.json"
+        assert resolve_workflows_projection_file(store=store) == db_dir / "workflows.json"
+
+    def test_metadata_cannot_spoof_canonical_event_fields(self, clean_store):
+        """P2 verification: User metadata cannot spoof reserved event or history fields,
+        both via validation rejection and structural write-order guarantee."""
+        store, db_path, tmp_path = clean_store
+        from herdr import kernel
+
+        wf = {
+            "workflow_id": "wf-spoof-test",
+            "project_id": "p-spoof",
+            "status": "pending",
+        }
+        store.save_workflow(wf)
+
+        task = {
+            "task_id": "t-spoof-test",
+            "workflow_id": "wf-spoof-test",
+            "status": "dispatched",
+        }
+        store.save_task(task)
+
+        # 1. Attempting to spoof reserved fields in transition_task metadata must fail closed
+        for reserved_field in ["from", "to", "from_status", "to_status", "reason", "source", "timestamp", "forced"]:
+            with pytest.raises(ValueError, match="Cannot overwrite reserved event fields via metadata"):
+                kernel.transition_task(
+                    task_id="t-spoof-test",
+                    to_status="working",
+                    reason="legit",
+                    metadata={reserved_field: "spoofed"},
+                    store=store,
+                )
+
+        # 2. Attempting to spoof reserved fields in transition_workflow metadata must fail closed
+        for reserved_field in ["from", "to", "from_status", "to_status", "reason", "source", "timestamp", "forced"]:
+            with pytest.raises(ValueError, match="Cannot overwrite reserved event fields via metadata"):
+                kernel.transition_workflow(
+                    workflow_id="wf-spoof-test",
+                    to_status="running",
+                    reason="legit",
+                    metadata={reserved_field: "spoofed"},
+                    store=store,
+                )
+
+        # 3. Legitimate metadata passes cleanly and canonical event fields are preserved structurally
+        res = kernel.transition_task(
+            task_id="t-spoof-test",
+            to_status="working",
+            reason="worker picked up",
+            source="worker-1",
+            metadata={"iteration": 1, "worker_ip": "10.0.0.1"},
+            store=store,
+        )
+        assert res["ok"] is True
+
+        events = store.list_events(task_id="t-spoof-test", event_type="task_transition")
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["payload"]["from_status"] == "dispatched"
+        assert ev["payload"]["to_status"] == "working"
+        assert ev["payload"]["reason"] == "worker picked up"
+        assert ev["payload"]["forced"] is False
+        assert ev["payload"]["iteration"] == 1
+        assert ev["payload"]["worker_ip"] == "10.0.0.1"
+
+        saved_task = store.get_task("t-spoof-test")
+        assert saved_task["status"] == "working"
+        assert saved_task["iteration"] == 1
+        assert saved_task["worker_ip"] == "10.0.0.1"
+        history = saved_task["status_history"]
+        assert len(history) == 1
+        assert history[0]["from"] == "dispatched"
+        assert history[0]["to"] == "working"
+        assert history[0]["source"] == "worker-1"
+        assert history[0]["iteration"] == 1
+
 
 
 

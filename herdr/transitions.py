@@ -88,10 +88,11 @@ def validate_task_transition(old_status: str, new_status: str, force: bool = Fal
 
 WORKFLOW_TRANSITIONS: Dict[str, Set[str]] = {
     "pending": {"running", "in_progress", "paused", "failed"},
-    "running": {"paused", "completed", "failed", "in_progress"},
-    "in_progress": {"paused", "completed", "failed", "running"},
+    "running": {"paused", "closing", "completed", "failed", "in_progress"},
+    "in_progress": {"paused", "closing", "completed", "failed", "running"},
     "paused": {"running", "in_progress", "failed"},
-    "completed": {"in_progress", "running"},
+    "closing": {"completed", "failed"},
+    "completed": {"in_progress", "running", "closing"},
     "failed": {"in_progress", "running"},
 }
 
@@ -100,6 +101,7 @@ ACTIVE_WORKFLOW_STATUSES: Set[str] = {
     "running",
     "in_progress",
     "paused",
+    "closing",
 }
 
 TERMINAL_WORKFLOW_STATUSES: Set[str] = {

@@ -1001,6 +1001,17 @@ PROTECTED_WORKFLOW_METADATA_FIELDS = {
     "updated_at",
 }
 
+RESERVED_EVENT_METADATA_FIELDS = {
+    "from",
+    "to",
+    "from_status",
+    "to_status",
+    "reason",
+    "source",
+    "timestamp",
+    "forced",
+}
+
 
 def transition_task(
     task_id: str,
@@ -1034,6 +1045,9 @@ def transition_task(
         forbidden = set(meta.keys()) & PROTECTED_TASK_METADATA_FIELDS
         if forbidden:
             raise ValueError(f"Cannot overwrite protected task fields via metadata: {sorted(forbidden)}")
+        forbidden_event = set(meta.keys()) & RESERVED_EVENT_METADATA_FIELDS
+        if forbidden_event:
+            raise ValueError(f"Cannot overwrite reserved event fields via metadata: {sorted(forbidden_event)}")
 
         now = time.time()
         payload = json.loads(row["payload_json"] or "{}")
@@ -1055,7 +1069,7 @@ def transition_task(
         })
 
         if force:
-            meta["forced"] = True
+            task_dict["forced"] = True
         for k, v in meta.items():
             task_dict[k] = v
 
@@ -1069,25 +1083,29 @@ def transition_task(
         if to_status in COMPLETED_TASK_STATUSES and not task_dict.get("last_result"):
             task_dict["last_result"] = to_status
 
-        # Append to status_history in payload
+        # Append to status_history in payload (meta unpacked first, canonical fields last)
         status_history = list(task_dict.get("status_history") or [])
-        status_history.append({
+        status_history_entry = {
+            **meta,
             "from": old_status,
             "to": to_status,
             "reason": reason,
             "source": source,
             "timestamp": now,
-            **meta,
-        })
+        }
+        if force:
+            status_history_entry["forced"] = True
+        status_history.append(status_history_entry)
         task_dict["status_history"] = status_history
 
         save_task(task_dict, db_path=None, conn=conn)
 
         event_payload = {
+            **meta,
             "from_status": old_status,
             "to_status": to_status,
             "reason": reason,
-            **meta,
+            "forced": force,
         }
         event = record_event(
             {
@@ -1161,6 +1179,9 @@ def transition_workflow(
         forbidden = set(user_meta.keys()) & PROTECTED_WORKFLOW_METADATA_FIELDS
         if forbidden:
             raise ValueError(f"Cannot overwrite protected workflow fields via metadata: {sorted(forbidden)}")
+        forbidden_event = set(user_meta.keys()) & RESERVED_EVENT_METADATA_FIELDS
+        if forbidden_event:
+            raise ValueError(f"Cannot overwrite reserved event fields via metadata: {sorted(forbidden_event)}")
 
         now = time.time()
         meta = json.loads(row["metadata_json"] or "{}")
@@ -1179,7 +1200,7 @@ def transition_workflow(
         })
 
         if force:
-            user_meta["forced"] = True
+            wf_dict["forced"] = True
         for k, v in user_meta.items():
             wf_dict[k] = v
 
@@ -1192,10 +1213,11 @@ def transition_workflow(
         save_workflow(wf_dict, db_path=None, conn=conn)
 
         event_payload = {
+            **user_meta,
             "from_status": old_status,
             "to_status": to_status,
             "reason": reason,
-            **user_meta,
+            "forced": force,
         }
         event = record_event(
             {
