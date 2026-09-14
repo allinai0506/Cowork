@@ -275,7 +275,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                                 cur_wf = conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (wid,))
                                 if not cur_wf.fetchone():
                                     save_workflow(
-                                        snap.get("workflow") or {"workflow_id": wid, "title": wid, "status": "unknown"},
+                                        snap.get("workflow") or {"workflow_id": wid, "title": wid, "status": "pending"},
                                         db_path=None,
                                         conn=conn,
                                     )
@@ -291,7 +291,7 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                                     snap.get("tag", ""),
                                     snap.get("parent_checkpoint_id"),
                                     float(snap.get("created_at") or time.time()),
-                                    snap.get("workflow", {}).get("status", "unknown"),
+                                    snap.get("workflow", {}).get("status", "pending"),
                                     len(snap.get("tasks", [])),
                                     json.dumps(snap, ensure_ascii=False),
                                     json.dumps(snap.get("metadata", {}), ensure_ascii=False),
@@ -505,7 +505,7 @@ def save_task(
     # Auto-ensure parent workflow exists to prevent foreign key violation
     cur_wf = conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (wid,))
     if not cur_wf.fetchone():
-        save_workflow({"workflow_id": wid, "title": wid, "status": "unknown"}, db_path, conn=conn)
+        save_workflow({"workflow_id": wid, "title": wid, "status": "pending"}, db_path, conn=conn)
 
     now = time.time()
     node = task_dict.get("node") or task_dict.get("stage", "")
@@ -1759,7 +1759,7 @@ def migrate_v1_to_v2(
                         snap.get("tag", ""),
                         snap.get("parent_checkpoint_id"),
                         float(snap.get("created_at") or time.time()),
-                        snap.get("workflow", {}).get("status", "unknown"),
+                        snap.get("workflow", {}).get("status", "pending"),
                         len(snap.get("tasks", [])),
                         json.dumps(snap, ensure_ascii=False),
                         json.dumps(snap.get("metadata", {}), ensure_ascii=False),

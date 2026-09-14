@@ -1188,29 +1188,23 @@ def set_status(task_id, new_status, verdict=None, note=None):
     old_status = task["status"]
 
     if old_status == new_status:
-        if new_status == "completed" and (verdict or note):
-            metadata = {}
+        if verdict or note:
+            updates = {}
             if verdict:
-                metadata["stage_verdict"] = verdict
+                updates["stage_verdict"] = verdict
             if note:
-                metadata["stage_verdict_note"] = note
+                updates["stage_verdict_note"] = note
             store = _get_store()
             try:
                 from herdr import kernel
-                kernel.transition_task(
+                kernel.update_task_metadata(
                     task_id=task_id,
-                    to_status=new_status,
-                    reason="update_verdict_note",
-                    source="herdr-task",
-                    metadata=metadata,
+                    updates=updates,
                     store=store,
                 )
             except Exception as exc:
                 print(f"Error updating task {task_id}: {exc}", file=sys.stderr)
                 sys.exit(2)
-
-            t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
-            sync_tasks_projection(store=store, tasks_file=Path(t_file) if t_file else None)
 
             print(f"{task_id}: already {new_status}; verdict/note updated")
             return

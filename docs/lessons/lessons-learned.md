@@ -1608,6 +1608,9 @@ pytest -q
 | **Teardown 物理销毁 TOCTOU 竞态** | 若只做只读前置校验就启动不可逆资源销毁（关 Tab/删 Clone），销毁期间并发 pause 成功会导致终态提交失败，陷入资源已毁但状态停留在 paused 的撕裂 | 引入中间态 `closing`（`running`/`in_progress` -> `closing` -> `completed`）；在任何物理清理前先原子将状态推进为 `closing` 预占所有权；`closing` 状态下天然拒绝 `paused`，物理销毁完成后再流转至 `completed`，消除 TOCTOU 竞态 |
 | **投影文件优先级混乱** | 若在同步 JSON 投影时优先取 `db_path.parent`，会覆盖调用方显式配置的 `TASKS_FILE` / `WORKFLOWS_FILE` 独立投影路径 | 统一收口解析优先级（`resolve_*_projection_file`）：`explicit argument -> os.environ -> store.db_path.parent -> default CONTROLLER_DIR` |
 | **事件审计流元数据篡改防伪** | 若将调用方传入的 metadata 直接追加在事件 payload 和状态历史末尾，恶意或失误的元数据（如 `from_status` / `source`）会篡改真实审计字段 | 建立双重防伪机制：1. `RESERVED_EVENT_METADATA_FIELDS` 校验（违规直接抛 `ValueError`）；2. 结构级防御：写入 `status_history` 与 `event_payload` 时规范字段置于末尾覆写，确保核心审计事实不可伪造 |
+| **后台守护服务启动环境依赖脆弱** | 守护进程脚本（如 `services/herdr-sentinel.py`）若直接独立执行，`sys.path[0]` 为 `services/`，未显式注入仓库根目录会导致 `from herdr.state_store...` 报 `ModuleNotFoundError` | 在文件最顶部显式注入 `HERDR_ROOT` 到 `sys.path[0]`，确保后台常驻看门狗在任何工作目录下均可开箱即用 |
+| **同状态更新 verdict/note 伪装跃迁** | 任务已处于 `completed` 等状态时，若仅补录 `verdict`/`note` 仍调用 `transition_task`，会产生伪 `completed -> completed` 审计事件与冗余历史 | 同状态属性变更属于纯元数据操作，严格通过 `update_task_metadata()` 更新，绝不伪装为生命周期状态跃迁 |
+| **自动补全父工作流产生非法 `unknown` 状态** | `save_task` 为防外键约束自动补全父工作流记录时曾赋予 `"unknown"` 状态，而状态机中并无此状态，导致产生 Gateway 无法流转的死锁工作流 | 自动补全的父工作流必须赋予状态机合法初始态 `"pending"`，确保后续可合法跃迁推进 |
 
 ### 操作规范
 
@@ -1623,23 +1626,24 @@ pytest -q
    - 所有兼容性 JSON 导出（`tasks.json` / `workflows.json`）通过 `sync_tasks_projection` / `sync_workflows_projection` 统一在 `.{filename}.lock` 排他锁内从 SQLite 最新状态重导出后原子写入，杜绝旧快照覆盖更新；
    - 投影路径通过 `resolve_tasks_projection_file` 与 `resolve_workflows_projection_file` 解析，严格保证显式参数与环境变量优先。
 5. **门禁前置、Teardown 所有权预占与 CLI 自闭环**：
-   - `herdr-task set <task> <status>` 遇未知任务/状态保持 exit 1，遇非法转移保持 exit 2；
+   - `herdr-task set <task> <status>` 遇未知任务/状态保持 exit 1，遇非法转移保持 exit 2；同状态仅更新 verdict/note 时走 `update_task_metadata()`，不产生假事件；
    - `herdr-task close-workflow` 严格执行 **Gate before Side Effect** 与 **Ownership Acquisition**：在任何 finalize/tab close 前先做状态跃迁前置校验，并原子推进为 `closing` 状态；默认只允许 `running`/`in_progress` 正常流转，物理销毁完成后最终落库 `completed`。
 6. **元数据隔离更新与状态保护**：
    - 严禁通过 `save_tasks` / `save_workflows_data` 全量快照更新部分属性；
    - 凡涉及 `stage_verdict`、`commit`、`integration_*`、`paused_nodes`、`gate_overrides`、`history` 等元数据变更，必须调用 `update_task_metadata()` / `update_workflow_metadata()`；
    - 元数据接口对 `status`、`task_id`、`workflow_id` 等核心身份与生命周期字段执行强制保护拦截，违规即报 `ValueError`。
-7. **事件审计流防篡改双重防御**：
-   - 定义 `RESERVED_EVENT_METADATA_FIELDS = {"from", "to", "from_status", "to_status", "reason", "source", "timestamp", "forced"}`；
-   - 拦截包含保留字段的元数据，并在 payload/history 字典构造中将权威字段最后解包，双重杜绝审计日志伪造。
+7. **事件审计流防篡改与实体合法性兜底**：
+   - 定义 `RESERVED_EVENT_METADATA_FIELDS = {"from", "to", "from_status", "to_status", "reason", "source", "timestamp", "forced"}`，双重杜绝审计日志伪造；
+   - `save_task` 自动确保的父工作流初始状态严格置为 `"pending"`，严禁 `"unknown"`；
+   - 独立常驻进程（`herdr-sentinel.py`）启动显式引导根目录 `sys.path`。
 
 ### 验证命令 / 证据
 
 ```bash
-# 1. Gateway 契约与并发回归测试（29 项：规则、非法拒绝、事务回滚、Admin force、事件流、Fail-Closed、防倒灌、投影锁、Teardown 门禁前置、并发元数据状态防踩踏、closing 状态防 TOCTOU 竞态、投影环境变量优先级、保留事件字段防伪）
+# 1. Gateway 契约与并发回归测试（32 项：规则、非法拒绝、事务回滚、Admin force、事件流、Fail-Closed、防倒灌、投影锁、Teardown 门禁前置、并发元数据状态防踩踏、closing 状态防 TOCTOU 竞态、投影环境变量优先级、保留事件字段防伪、Sentinel 独立启动 bootstrap、已完成 Task verdict 纯元数据更新防假跃迁、自动补全父工作流 pending 状态）
 pytest tests/test_state_transition_gateway.py -v
 
-# 2. 全仓 419 项自动化测试全量回归
+# 2. 全仓 422 项自动化测试全量回归
 pytest -q
 
 # 3. 生产服务体检

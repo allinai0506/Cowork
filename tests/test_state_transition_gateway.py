@@ -1,5 +1,8 @@
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import time
 from pathlib import Path
 import pytest
@@ -1223,6 +1226,101 @@ class TestStateTransitionGateway:
         assert history[0]["to"] == "working"
         assert history[0]["source"] == "worker-1"
         assert history[0]["iteration"] == 1
+
+    def test_sentinel_directly_bootstraps_and_imports_herdr_without_pythonpath(self, tmp_path):
+        """P1 verification: services/herdr-sentinel.py inserts HERDR_ROOT into sys.path,
+        so it can be invoked directly from any cwd without PYTHONPATH."""
+        import subprocess
+        sentinel_script = Path(__file__).resolve().parent.parent / "services" / "herdr-sentinel.py"
+        code = (
+            f"import runpy\n"
+            f"mod = runpy.run_path('{sentinel_script}')\n"
+            f"store = mod['_get_store']()\n"
+            f"assert store is not None\n"
+        )
+        res = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(tmp_path),
+            env={"PATH": os.environ["PATH"], "HOME": str(tmp_path)},
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0, f"Sentinel bootstrap failed: {res.stderr}"
+
+    def test_set_verdict_note_on_same_status_updates_metadata_without_fake_transition(self, clean_store):
+        """P2 verification: Setting verdict/note on a task with the same status (e.g. completed)
+        updates task metadata without emitting a spurious lifecycle transition event or history entry."""
+        store, db_path, tmp_path = clean_store
+        import subprocess
+
+        bin_path = Path(__file__).resolve().parent.parent / "bin" / "herdr-task"
+        env = os.environ.copy()
+        env["HERDR_STATE_DB"] = str(db_path)
+        env["TASKS_FILE"] = str(tmp_path / "tasks.json")
+        env["WORKFLOWS_FILE"] = str(tmp_path / "workflows.json")
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
+
+        task = {
+            "task_id": "t-completed-meta",
+            "workflow_id": "wf-meta",
+            "status": "completed",
+            "stage_verdict": "pending",
+        }
+        store.save_task(task)
+
+        # Baseline: zero transition events
+        assert len(store.list_events(task_id="t-completed-meta", event_type="task_transition")) == 0
+
+        # Invoke herdr-task set with same status and new verdict/note
+        cmd = [
+            "python3", str(bin_path), "set", "t-completed-meta", "completed",
+            "--verdict", "pass", "--note", "verified by human",
+        ]
+        res = subprocess.run(cmd, env=env, text=True, capture_output=True)
+        assert res.returncode == 0, res.stderr
+        assert "already completed; verdict/note updated" in res.stdout
+
+        # Metadata MUST be updated
+        updated = store.get_task("t-completed-meta")
+        assert updated["status"] == "completed"
+        assert updated["stage_verdict"] == "pass"
+        assert updated["stage_verdict_note"] == "verified by human"
+
+        # MUST NOT create a completed -> completed transition event or duplicate history entry
+        events = store.list_events(task_id="t-completed-meta", event_type="task_transition")
+        assert len(events) == 0, "No lifecycle transition event should be emitted when updating verdict/note on same status"
+        history = updated.get("status_history") or []
+        assert len(history) == 0, "No status_history entry should be appended on metadata-only update"
+
+    def test_save_task_auto_creates_parent_workflow_as_pending_not_unknown(self, clean_store):
+        """P2 verification: save_task auto-creates parent workflow with status 'pending'
+        instead of illegal 'unknown', allowing normal lifecycle progression through Gateway."""
+        store, db_path, tmp_path = clean_store
+        from herdr import kernel
+
+        # 1. Save task under non-existent workflow
+        task = {
+            "task_id": "t-new-task",
+            "workflow_id": "wf-auto-created",
+            "status": "dispatched",
+        }
+        store.save_task(task)
+
+        # 2. Parent workflow MUST exist with status 'pending', NOT 'unknown'
+        wf = store.get_workflow("wf-auto-created")
+        assert wf is not None
+        assert wf["status"] == "pending", f"Expected auto-created workflow status to be 'pending', got {wf['status']}"
+
+        # 3. Legally transition workflow from 'pending' to 'running' via Gateway without errors
+        res = kernel.transition_workflow(
+            workflow_id="wf-auto-created",
+            to_status="running",
+            reason="workflow launched",
+            source="controller",
+            store=store,
+        )
+        assert res["ok"] is True
+        assert store.get_workflow("wf-auto-created")["status"] == "running"
 
 
 
