@@ -391,7 +391,7 @@ def test_anti_split_brain_json_cannot_override_sqlite(store_env):
     fresh_wf = store.get_workflow(wid)
     assert fresh_wf["status"] == "completed"
 
-    # 7. Verify one-way cold boot import for completely new/unseeded items
+    # 7. Verify JSON tampering never resurrects or imports new tasks into SQLite
     new_tid = "task-cold-boot-99"
     tampered_tasks["tasks"].append({
         "task_id": new_tid,
@@ -402,22 +402,10 @@ def test_anti_split_brain_json_cannot_override_sqlite(store_env):
     })
     store_env["tasks_file"].write_text(json.dumps(tampered_tasks), encoding="utf-8")
 
-    # Before load, it is not in SQLite
+    # Before and after load, SQLite remains authoritative and does NOT import from JSON
     assert store.get_task(new_tid) is None
-
-    # After load, the missing task is imported into SQLite
     kernel.load_tasks_data()
-    imported = store.get_task(new_tid)
-    assert imported is not None
-    assert imported["status"] == "pending"
-
-    # Now tamper with this new task in JSON to try overriding it
-    tampered_tasks["tasks"][1]["status"] = "failed"
-    store_env["tasks_file"].write_text(json.dumps(tampered_tasks), encoding="utf-8")
-
-    kernel.load_tasks_data()
-    # Must remain "pending" in SQLite, proving subsequent disk sync does NOT overwrite
-    assert store.get_task(new_tid)["status"] == "pending"
+    assert store.get_task(new_tid) is None
 
 
 def test_herdr_task_cli_writes_directly_to_sqlite(store_env):

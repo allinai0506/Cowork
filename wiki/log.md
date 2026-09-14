@@ -354,3 +354,32 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - **治理规范与知识归档**：
   - 沉淀并归档通用工程教训 §31（工作流抗停滞自愈、CoW沙盒纯净隔离与总指挥主动干预）；
   - 全仓自动化回归测试通过。
+
+## [2026-09-14] feat | Critical Control Reads Fail Closed & Authoritative StateStore Freeze
+- **核心控制读取链路 Fail-Closed 终极收口与事实源彻底冻结**：
+  - **根除自动冷导入导致的工作流与任务“起死回生” (`herdr/agent_router.py`, `herdr/projects.py`, `herdr/kernel.py`, `herdr/steering.py`, `bin/herdr-task`, `services/herdr-controller.py`, `herdr/state_db.py`)**：
+    - 彻底废除 `workflow_record()`、`active_workflows_for_project()`、`_workflow_entry()`、`load_workflows()` 读链路上的 `_sync_missing_workflows_into_store` 旁路扫描；
+    - 彻底废除 `agent_router.py` 的 `_sync_missing_tasks_into_store`、`kernel.py` 的 `_import_missing_tasks_from_disk`、`steering.py` 读取 `tasks.json` 的旁路，以及 `bin/herdr-task` 与 `herdr-controller.py` 的 `load_tasks()` 中的磁盘冷插入逻辑，确保运行时任何正常路径绝无反向 JSON → SQLite 写回；
+    - 数据库底层在 `_ensure_schema` 中引入 `schema_meta` (`v1_migration_done`) 表，使用原子显式事务（`BEGIN TRANSACTION;` ... `COMMIT;`）执行一次性 bootstrap 导入；任一历史文件损坏立即 `ROLLBACK;` 且不标记完成、不污染缓存，保留重试通道；
+  - **路由决策未注册工作流 Fail-Closed (`herdr/agent_router.py`)**：
+    - `choose_agent()` 显式增加对 `workflow_id` 的存在性校验：当指定了 `workflow_id` 但在 StateStore 查无记录时，立即抛出 `RuntimeError("Workflow not found in authoritative StateStore: ...")`，杜绝静默兜底到 `"opencode"` 绕过项目池黑名单、健康准入与并发预占；仅限未指定 `workflow_id` 的独立任务走默认代理；
+    - `_clean_reservations()` 与 `_active_agent_loads()` 彻底废除对 `workflows.json` 与 `tasks.json` 的异常降级读取，底层 StateStore 异常直接抛出阻断；
+  - **调度协调看门狗与事实源纯化 (`services/herdr-controller.py`)**：
+    - `_workflow_entry()` 仅查询 StateStore，移除任何磁盘扫描；
+    - `active_registered_workflows()` 100% 仅源自 `store.list_workflows()`，彻底移除从 `~/.herdr-controller/projects.json` 注入 `wf` 的逻辑，杜绝 Ghost Workflow；
+  - **检查点 Checkpoint 读写与分叉彻底收口 Fail-Closed (`herdr/kernel.py`)**：
+    - 彻底移除 `list_checkpoints`、`get_checkpoint` 和 `fork_workflow_from_checkpoint` 扫描磁盘旧 `.json` 并向 SQLite 反向补写 `store.save_workflow` / `store.save_task` / `store.create_checkpoint` 的运行时旁路；
+    - 所有检查点操作 100% 仅依赖 `StateStore`；若底层不存在直接抛出 `FileNotFoundError` 阻断，绝不在运行时从磁盘“起死回生”状态；
+    - 历史遗留检查点文件（`checkpoints/`）统一纳入底层 `state_db.py` 的首次建库原子事务，由 bootstrap 一次性迁移并绑定外键。
+  - **Bootstrap 失败显式抛出异常阻断启动与旧库升级防覆写 (`herdr/state_db.py`)**：
+    - 修复迁移失败被静默吞掉的严重隐患：`_ensure_schema` 在显式事务 `BEGIN TRANSACTION;` ... `COMMIT;` 失败并 `ROLLBACK;` 后，**必须显式 `raise` 异常**，严禁 `except: pass` 导致系统在空 SQLite 库上裸跑造成严重数据丢失；
+    - 增加已有数据库升级保护机制：在执行 Bootstrap 前探活核心表业务数据（`has_existing_state`），若 SQLite 已有数据（如旧版本升至当前版本），说明 SQLite 已是权威事实源，直接写入 `v1_migration_done = '1'`，严禁读取陈旧 legacy JSON 避免状态被覆写（防止例如 completed 被回滚为 running）；仅当 SQLite 完全为空且存在 legacy JSON 时才允许执行 Bootstrap；
+    - `get_db_connection` 捕获初始化异常后显式 `conn.close()` 释放文件句柄并重新抛出异常；
+    - 兼容遗留 `workflows.json` 既为 dict 亦为 list 的格式形态，增强老旧工作流格式鲁棒性。
+  - **新增专项对抗测试套件 (`tests/test_critical_reads_fail_closed.py`)**：
+    - 17 项测试全面覆盖：9 项模拟 `sqlite3.OperationalError` 时的 Fail-Closed 异常阻断；Test A 验证陈旧 JSON 绝不复活已删除/不存在的 Workflow；Test B 验证未注册 Workflow 调用 `choose_agent` 抛出 `RuntimeError`；Test C 验证 `projects.json` 注入的 Ghost 工作流被 100% 过滤；Test D 验证一次性 bootstrap 迁移与后续持久隔离；Test E/G 验证损坏 JSON 触发原子回滚且显式 raise 阻断启动、修复后重试无缝成功；Test F 验证 Checkpoint 读取与分叉绝不复活状态到 SQLite 且查无记录时严格抛出 `FileNotFoundError`；Test H 验证已有业务数据的旧 SQLite 数据库在无 migration marker 升级启动时 100% 免疫陈旧 JSON 覆写并自动补齐 marker；
+  - **沉淀并归档通用工程教训 §32**（核心控制读取 Fail-Closed 铁律、Task/Checkpoint 运行时防复活、原子迁移显式阻断与旧库升级防覆写）；
+  - 全仓自动化回归测试达 368 项（100% 绿灯全部通过）。
+
+
+

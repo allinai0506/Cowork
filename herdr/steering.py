@@ -49,42 +49,6 @@ def _atomic_write_json(file_path: Path, data: Any) -> None:
     os.replace(tmp_path, file_path)
 
 
-def _sync_tasks_from_disk_if_needed(store: StateStore) -> None:
-    tasks_file = get_tasks_file()
-    if tasks_file.exists():
-        try:
-            with open(tasks_file, "r", encoding="utf-8") as f:
-                disk_data = json.load(f)
-            if isinstance(disk_data, dict):
-                for t in disk_data.get("tasks", []):
-                    tid = t.get("task_id")
-                    if tid and t.get("workflow_id"):
-                        existing = store.get_task(tid)
-                        if not existing or existing.get("status") != t.get("status") or existing.get("last_steered_at") != t.get("last_steered_at"):
-                            store.save_task(t)
-        except Exception:
-            pass
-
-
-def _sync_steering_from_disk_if_needed(store: StateStore) -> None:
-    st_file = get_steering_file()
-    if st_file.exists():
-        try:
-            with open(st_file, "r", encoding="utf-8") as f:
-                disk_data = json.load(f)
-            if isinstance(disk_data, dict):
-                for tid, q in disk_data.get("steering_queues", {}).items():
-                    for item in q:
-                        sid = item.get("steer_id")
-                        if sid:
-                            existing = store.get_steer(sid)
-                            if not existing or existing.get("status") != item.get("status"):
-                                item.setdefault("task_id", tid)
-                                store.save_steer(item)
-        except Exception:
-            pass
-
-
 def _sync_tasks_file(store: StateStore) -> None:
     tasks_file = get_tasks_file()
     if tasks_file.parent.exists():
@@ -99,7 +63,6 @@ def _sync_steering_file(store: StateStore) -> None:
 
 def load_tasks_data() -> Dict[str, Any]:
     store = get_state_store()
-    _sync_tasks_from_disk_if_needed(store)
     return store.export_tasks_json()
 
 
@@ -115,7 +78,6 @@ def save_tasks_data(data: Dict[str, Any]) -> None:
 
 def load_steering_data() -> Dict[str, Any]:
     store = get_state_store()
-    _sync_steering_from_disk_if_needed(store)
     return store.export_steering_json()
 
 

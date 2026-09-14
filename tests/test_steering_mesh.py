@@ -32,6 +32,7 @@ def steering_env(tmp_path, monkeypatch):
 
 
 def _seed_task(env, task_id, status="working", pane_id="pane-101", workflow_id="wf-test"):
+    from herdr.state_store import get_state_store
     t_data = json.loads(env["tasks_file"].read_text(encoding="utf-8"))
     task = {
         "task_id": task_id,
@@ -44,6 +45,8 @@ def _seed_task(env, task_id, status="working", pane_id="pane-101", workflow_id="
     }
     t_data["tasks"].append(task)
     env["tasks_file"].write_text(json.dumps(t_data), encoding="utf-8")
+    store = get_state_store(db_path=env["tasks_file"].parent / "state.db")
+    store.save_task(task)
     return task
 
 

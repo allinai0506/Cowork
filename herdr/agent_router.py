@@ -109,59 +109,17 @@ def _get_store():
     return get_state_store()
 
 
-def _sync_missing_tasks_into_store(store):
-    try:
-        t_file = Path(globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE") or TASKS_FILE)
-        if t_file.exists():
-            disk_data = _load(t_file, {})
-            if isinstance(disk_data, dict):
-                for t in disk_data.get("tasks", []):
-                    if isinstance(t, dict):
-                        tid = t.get("task_id")
-                        if tid and not store.get_task(tid):
-                            store.save_task(t)
-    except Exception:
-        pass
-
-
-def _sync_missing_workflows_into_store(store):
-    try:
-        wf_file = Path(globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE)
-        if wf_file.exists():
-            disk_data = _load(wf_file, {})
-            if isinstance(disk_data, dict):
-                for wid, wf in disk_data.get("workflows", {}).items():
-                    if isinstance(wf, dict):
-                        wf.setdefault("workflow_id", wid)
-                        existing = store.get_workflow(wid)
-                        is_placeholder = bool(existing and existing.get("status") == "unknown" and not existing.get("project_id"))
-                        if not existing or is_placeholder:
-                            store.save_workflow(wf)
-    except Exception:
-        pass
-
-
 def workflow_record(workflow_id):
-    try:
-        store = _get_store()
-        _sync_missing_workflows_into_store(store)
-        wf = store.get_workflow(workflow_id)
-        if wf and not (wf.get("status") == "unknown" and not wf.get("project_id")):
-            return wf
-    except Exception:
-        pass
-    data = _load(WORKFLOWS_FILE, {"workflows": {}})
-    return data.get("workflows", {}).get(workflow_id, {})
+    store = _get_store()
+    wf = store.get_workflow(workflow_id)
+    if wf and not (wf.get("status") == "unknown" and not wf.get("project_id")):
+        return wf
+    return {}
 
 
 def set_workflow_agent_override(workflow_id, agent):
     store = _get_store()
-    _sync_missing_workflows_into_store(store)
     record = store.get_workflow(workflow_id)
-    if not record:
-        data = _load(WORKFLOWS_FILE, {"workflows": {}})
-        record = data.setdefault("workflows", {}).get(workflow_id)
-
     if not record:
         return
 
@@ -175,13 +133,8 @@ def set_workflow_agent_override(workflow_id, agent):
 
 def _clean_reservations(data, ttl=300):
     now = time.time()
-    try:
-        store = _get_store()
-        _sync_missing_tasks_into_store(store)
-        tasks = store.list_tasks()
-    except Exception:
-        t_data = _load(TASKS_FILE, {"tasks": []})
-        tasks = t_data.get("tasks", [])
+    store = _get_store()
+    tasks = store.list_tasks()
 
     registered = {
         t.get("task_id")
@@ -219,13 +172,8 @@ def release_agent_reservation(task_id):
 
 
 def _active_agent_loads(project_id):
-    try:
-        store = _get_store()
-        _sync_missing_tasks_into_store(store)
-        tasks = store.list_tasks()
-    except Exception:
-        t_data = _load(TASKS_FILE, {"tasks": []})
-        tasks = t_data.get("tasks", [])
+    store = _get_store()
+    tasks = store.list_tasks()
 
     active = {
         "pending", "dispatched", "working", "blocked", "agent_done",
@@ -268,10 +216,16 @@ def choose_agent(
     requested="auto",
     reservation_key=None,
 ):
-    record = workflow_record(workflow_id)
-    project_id = record.get("project_id")
-
-    if not project_id:
+    if workflow_id:
+        record = workflow_record(workflow_id)
+        project_id = record.get("project_id")
+        if not project_id:
+            raise RuntimeError(
+                f"Workflow not found in authoritative StateStore: {workflow_id}"
+            )
+    else:
+        record = {}
+        project_id = None
         return requested if requested and requested != "auto" else "opencode"
 
     node_policy = {}
