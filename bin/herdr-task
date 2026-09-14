@@ -2898,6 +2898,15 @@ def close_workflow(
         print(f"Unknown workflow (no tasks, no record): {workflow_id}")
         sys.exit(1)
 
+    # 1. Preflight Gate: Validate workflow transition to 'completed' BEFORE any teardown side effects
+    if entry:
+        from herdr.transitions import validate_workflow_transition
+        validate_workflow_transition(
+            entry.get("status", "pending"),
+            "completed",
+            force=force,
+        )
+
     if not tasks:
         # 中止在注册任何 Task 之前的运行:没有可销毁的资源,
         # 视为平凡完成,仅做登记与状态清理。
@@ -3732,14 +3741,18 @@ def main():
 
     elif args.command == "close-workflow":
         target_wid = resolve_workflow_id_for_close(args.workflow_id)
-        close_workflow(
-            target_wid,
-            include_coordinator=args.include_coordinator,
-            purge_clones=args.purge_clones,
-            dry_run=args.dry_run,
-            abandon=args.abandon,
-            force=args.force,
-        )
+        try:
+            close_workflow(
+                target_wid,
+                include_coordinator=args.include_coordinator,
+                purge_clones=args.purge_clones,
+                dry_run=args.dry_run,
+                abandon=args.abandon,
+                force=args.force,
+            )
+        except Exception as exc:
+            print(f"Error closing workflow {target_wid}: {exc}", file=sys.stderr)
+            sys.exit(2)
 
     elif args.command == "reopen-workflow":
         reopen_workflow(args.workflow_id)

@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -107,25 +108,21 @@ def update_statuses(changes):
     if not changes:
         return False
 
-    data = load_json(TASKS_FILE, {"tasks": []})
+    store = _get_store()
     changed = False
 
-    for task in data.get("tasks", []):
-        task_id = task.get("task_id")
-        if task_id not in changes:
+    for task_id, (new_status, reason) in changes.items():
+        authoritative = store.get_task(task_id)
+        if not authoritative:
+            print(f"[SENTINEL SKIP] task {task_id} missing from authoritative StateStore", file=sys.stderr, flush=True)
             continue
 
-        new_status, reason = changes[task_id]
-        old_status = task.get("status")
-
+        old_status = authoritative.get("status")
         if old_status not in ACTIVE:
             continue
 
         try:
             from herdr import kernel
-            store = _get_store()
-            if not store.get_task(task_id):
-                store.save_task(task)
             kernel.transition_task(
                 task_id=task_id,
                 to_status=new_status,
@@ -175,11 +172,12 @@ def main():
     print("[HERDR SENTINEL] starting", flush=True)
 
     while True:
-        registry = load_json(TASKS_FILE, {"tasks": []})
+        store = _get_store()
+        tasks = store.list_tasks()
         now = time.time()
         changes = {}
 
-        for task in registry.get("tasks", []):
+        for task in tasks:
             status = task.get("status")
             if status not in ACTIVE:
                 continue

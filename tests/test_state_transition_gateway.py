@@ -811,6 +811,95 @@ class TestStateTransitionGateway:
         assert len(t_data["tasks"]) == 1
         assert t_data["tasks"][0]["task_id"] == "t-lock-1"
 
+    def test_sentinel_never_resurrects_deleted_tasks(self, clean_store):
+        store, db_path, tmp_path = clean_store
+        import importlib.machinery
+        import importlib.util
+
+        def _load_src_module(name, path):
+            loader = importlib.machinery.SourceFileLoader(name, str(path))
+            spec = importlib.util.spec_from_loader(name, loader)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+
+        sentinel_path = Path(__file__).resolve().parent.parent / "services" / "herdr-sentinel.py"
+        sentinel_mod = _load_src_module("herdr_sentinel_resurrect_test", sentinel_path)
+        sentinel_mod.TASKS_FILE = str(tmp_path / "tasks.json")
+
+        task = {
+            "task_id": "t-ghost-sentinel",
+            "workflow_id": "wf-ghost",
+            "status": "working",
+        }
+        store.save_task(task)
+        assert store.get_task("t-ghost-sentinel") is not None
+
+        # Delete from SQLite directly
+        store.delete_task("t-ghost-sentinel")
+        assert store.get_task("t-ghost-sentinel") is None
+
+        # Call update_statuses with candidate change
+        changed = sentinel_mod.update_statuses({"t-ghost-sentinel": ("agent_done", "completion_sentinel")})
+        assert changed is False
+
+        # Verify task is STILL None in authoritative StateStore (never resurrected!)
+        assert store.get_task("t-ghost-sentinel") is None
+
+    def test_close_workflow_preflight_gate_blocks_before_side_effects(self, clean_store, monkeypatch):
+        store, db_path, tmp_path = clean_store
+        import importlib.machinery
+        import importlib.util
+        from herdr.transitions import InvalidTransitionError
+        from unittest.mock import MagicMock
+
+        def _load_src_module(name, path):
+            loader = importlib.machinery.SourceFileLoader(name, str(path))
+            spec = importlib.util.spec_from_loader(name, loader)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+
+        ht_path = Path(__file__).resolve().parent.parent / "bin" / "herdr-task"
+        ht_mod = _load_src_module("herdr_task_preflight_side_effects_test", ht_path)
+        ht_mod.TASKS_FILE = str(tmp_path / "tasks.json")
+        ht_mod.WORKFLOWS_FILE = str(tmp_path / "workflows.json")
+
+        # 1. Setup workflow in 'paused' state
+        wf = {
+            "workflow_id": "wf-paused-gate",
+            "project_id": "p-gate",
+            "status": "paused",
+        }
+        store.save_workflow(wf)
+
+        # 2. Setup settled task
+        task = {
+            "task_id": "t-settled-gate",
+            "workflow_id": "wf-paused-gate",
+            "status": "cleaned",
+        }
+        store.save_task(task)
+
+        # 3. Mock _finalize_one and _herdr tab close to record calls
+        mock_finalize = MagicMock()
+        monkeypatch.setattr(ht_mod, "_finalize_one", mock_finalize)
+        mock_herdr = MagicMock(return_value=MagicMock(returncode=0))
+        monkeypatch.setattr(ht_mod, "_herdr", mock_herdr)
+
+        # 4. Attempt to close workflow without force -> MUST fail closed on preflight gate
+        with pytest.raises(InvalidTransitionError):
+            ht_mod.close_workflow("wf-paused-gate", force=False)
+
+        # 5. Assert: zero physical side effects were executed!
+        assert mock_finalize.call_count == 0, "_finalize_one MUST NOT be called when preflight gate fails"
+        assert mock_herdr.call_count == 0, "_herdr tab close MUST NOT be called when preflight gate fails"
+
+        # 6. Assert: task and workflow statuses in SQLite remain completely untouched
+        assert store.get_workflow("wf-paused-gate")["status"] == "paused"
+        assert store.get_task("t-settled-gate")["status"] == "cleaned"
+
+
 
 
 

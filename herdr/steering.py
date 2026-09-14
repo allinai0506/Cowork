@@ -276,8 +276,6 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
             try:
                 from herdr import kernel
                 store = get_state_store()
-                if not store.get_task(tid):
-                    store.save_task(task)
                 kernel.transition_task(
                     task_id=tid,
                     to_status="interrupted",
@@ -539,8 +537,6 @@ def halt_task(
     try:
         from herdr import kernel
         store = get_state_store()
-        if not store.get_task(task_id):
-            store.save_task(task)
         kernel.transition_task(
             task_id=task_id,
             to_status="interrupted",

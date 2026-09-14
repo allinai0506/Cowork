@@ -1590,7 +1590,8 @@ pytest -q
 在引入控制原语与 StateStore 统一事实源后，运行时仍有多处组件（`herdr-task` CLI、`herdr-factory`、`services/herdr-sentinel.py`、`herdr/steering.py`）直接修改 `task["status"]` 或 `workflow["status"]`。这种分散的状态突变导致：
 1. 状态跃迁不受约束，非法跃迁（如从 `pending` 跳跃至 `completed`）无法被统一拦截；
 2. 状态变迁与 `WorkflowEvent` 事件流脱节，事件审计流遗漏了最核心的生命周期事件；
-3. 过渡期曾试图在运行时保留 JSON 反向倒灌 SQLite 以适配未初始化 DB 的旧测试，破坏了 SQLite 作为唯一事实源（Single Source of Truth）的原则，并引发跨进程写覆盖竞态。
+3. 过渡期曾试图在运行时保留 JSON 反向倒灌 SQLite 以适配未初始化 DB 的旧测试，破坏了 SQLite 作为唯一事实源（Single Source of Truth）的原则，引发幽灵任务复活与跨进程写覆盖竞态；
+4. 资源清理中曾出现“先拆解实体（finalize task/close tab/purge clone），最后才做状态转移校验”的顺序倒置，导致非法转移抛错时物理现场已被破坏。
 
 ### 经验教训
 
@@ -1598,7 +1599,8 @@ pytest -q
 |---|---|---|
 | **状态修改入口分散且缺乏约束** | 状态机逻辑若散落在各 CLI 与守护进程中，规则修改极易遗漏，非法跳转无法自证 | 建立 Functional Core（`herdr/transitions.py`）集中管理状态矩阵与纯校验逻辑，严禁各模块手写内联 transitions 字典 |
 | **状态落库与事件追加脱节** | 状态写完了但事件写入失败，或者事件写入成功但状态未持久化，导致状态快照与事件重放流不一致 | 在 `state_db.py` 中将状态持久化与 `record_event(..., conn=conn)` 收敛在同一个 SQLite `BEGIN IMMEDIATE` 事务内，强保原子性 |
-| **严格单一事实源与防止测试倒灌生产** | 曾试图在生产读取代码中保留 JSON 倒灌 SQLite 以适应未初始化 DB 的旧测试，导致幽灵任务复活与事实源裂脑 | 绝不因为测试 fixture 遗留而在生产代码中开 JSON 倒灌口；测试必须显式通过 StateStore 预置基准；JSON 投影由 `sync_*_projection` 基于 `fcntl.flock` 跨进程锁单向覆写 |
+| **严格单一事实源与防止测试倒灌生产** | 曾试图在生产读取代码中保留 JSON 倒灌 SQLite 以适应未初始化 DB 的旧测试，导致幽灵任务复活与事实源裂脑 | 绝不因为测试 fixture 遗留而在生产代码中开 JSON 倒灌口；测试必须显式通过 StateStore 预置基准；Sentinel 与 Steering 仅能操作 DB 现有任务，缺失实体一律 skip 绝不 `save_task` 逆向注入；JSON 投影由 `sync_*_projection` 基于 `fcntl.flock` 跨进程锁单向覆写 |
+| **门禁先于物理副作用（Gate before Side Effect）** | `close_workflow` 若先拆解任务、关闭 tab、清理 clone，最后调用 transition 才报错，会导致命令失败但现场已被破坏 | 任何物理 teardown 必须前置纯校验（`validate_workflow_transition(cur_status, "completed", force=force)`），前置门禁通过后才允许执行物理清理与状态提交 |
 | **正常业务逻辑严禁滥用 `force=True`** | 在完成工作流等正常操作中曾盲目使用 `force=True` 绕过状态机，导致 `pending`/`paused` 等非运行态非法跳到 `completed` | 业务流转必须走合法路径（`running`/`in_progress` -> `completed`）；`force=True` 仅保留给管理员显式指定 `--force` 参数以逃生故障 |
 | **异常静默吞没隐藏真实根因** | 在调用 Gateway 时若随意 `except Exception: pass` 吞掉合法性校验错误，会掩盖非法转移并继续执行旧的非法逻辑 | 非法转移（`InvalidTransitionError`）必须坚决抛出或在 CLI 明确打印并以约定退出码（exit 2）退出；严禁捕获异常后继续执行旧有旁路覆写 |
 
@@ -1614,17 +1616,17 @@ pytest -q
    - `bin/herdr-task`（`set`、`supersede`、`_mark_workflow_completed`、`reopen_workflow`）、`bin/herdr-factory`（`_update_workflow_status`）、`services/herdr-sentinel.py`（看门狗超时）、`herdr/steering.py`（紧急中断与 halt）全量收敛至 Gateway。
 4. **单向跨进程锁定投影同步**：
    - 所有兼容性 JSON 导出（`tasks.json` / `workflows.json`）通过 `sync_tasks_projection` / `sync_workflows_projection` 统一在 `.{filename}.lock` 排他锁内从 SQLite 最新状态重导出后原子写入，杜绝旧快照覆盖更新。
-5. **CLI 行为与门禁自闭环**：
+5. **门禁前置与 CLI 自闭环**：
    - `herdr-task set <task> <status>` 遇未知任务/状态保持 exit 1，遇非法转移保持 exit 2；
-   - `herdr-task close-workflow` 默认只允许 `running`/`in_progress` 正常流转至 `completed`，非运行态必须显式加 `--force` 才能完成。
+   - `herdr-task close-workflow` 严格执行 **Gate before Side Effect**：在任何 finalize/tab close 前先做状态跃迁前置校验；默认只允许 `running`/`in_progress` 正常流转至 `completed`，非运行态必须显式加 `--force` 才能完成。
 
 ### 验证命令 / 证据
 
 ```bash
-# 1. Gateway 契约与对抗性测试（22 项：规则、非法拒绝、事务回滚、Admin force、事件流、Fail-Closed、防倒灌、投影锁）
+# 1. Gateway 契约与对抗性测试（24 项：规则、非法拒绝、事务回滚、Admin force、事件流、Fail-Closed、防倒灌、投影锁、Teardown 门禁前置）
 pytest tests/test_state_transition_gateway.py -v
 
-# 2. 全仓 409 项自动化测试全量回归
+# 2. 全仓 414 项自动化测试全量回归
 pytest -q
 
 # 3. 生产服务体检
