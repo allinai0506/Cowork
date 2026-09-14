@@ -63,18 +63,6 @@ def _sync_steering_file(store: StateStore) -> None:
 
 def load_tasks_data() -> Dict[str, Any]:
     store = get_state_store()
-    tasks_file = get_tasks_file()
-    if tasks_file.exists():
-        try:
-            with open(tasks_file, "r", encoding="utf-8") as f:
-                disk_data = json.load(f)
-            if isinstance(disk_data, dict):
-                for t in disk_data.get("tasks", []):
-                    tid = t.get("task_id")
-                    if tid and not store.get_task(tid):
-                        store.save_task(t)
-        except Exception:
-            pass
     return store.export_tasks_json()
 
 

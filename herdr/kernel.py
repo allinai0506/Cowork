@@ -66,26 +66,9 @@ def save_workflows_data(data: Dict[str, Any]) -> None:
         _atomic_write_json(wf_file, data)
 
 
-def _import_missing_tasks_from_disk(store: StateStore) -> None:
-    tasks_file = get_tasks_file()
-    if tasks_file.exists():
-        try:
-            with open(tasks_file, "r", encoding="utf-8") as f:
-                disk_data = json.load(f)
-            if isinstance(disk_data, dict):
-                for t in disk_data.get("tasks", []):
-                    tid = t.get("task_id")
-                    if tid and not store.get_task(tid):
-                        # ONLY import missing tasks; SQLite is authoritative and never overwritten
-                        store.save_task(t)
-        except Exception:
-            pass
-
-
 def load_tasks_data() -> Dict[str, Any]:
     """Load tasks via StateStore (single source of truth)."""
     store = get_state_store()
-    _import_missing_tasks_from_disk(store)
     return store.export_tasks_json()
 
 

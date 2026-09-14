@@ -357,9 +357,10 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 
 ## [2026-09-14] feat | Critical Control Reads Fail Closed & Authoritative StateStore Freeze
 - **核心控制读取链路 Fail-Closed 终极收口与事实源彻底冻结**：
-  - **根除自动冷导入导致的工作流“起死回生” (`herdr/agent_router.py`, `herdr/projects.py`, `services/herdr-controller.py`, `herdr/state_db.py`)**：
-    - 彻底废除 `workflow_record()`、`active_workflows_for_project()`、`_workflow_entry()`、`load_workflows()` 等读链路上的 `_sync_missing_workflows_into_store` 旁路扫描；
-    - 数据库底层在 `_ensure_schema` 中引入 `schema_meta` (`v1_migration_done`) 表，仅在空库初建时执行一次性 bootstrap 导入遗留文件，正常运行时永远只读写 SQLite；严禁被删除或不存在的 Workflow 被旧 JSON 重新写回 SQLite；
+  - **根除自动冷导入导致的工作流与任务“起死回生” (`herdr/agent_router.py`, `herdr/projects.py`, `herdr/kernel.py`, `herdr/steering.py`, `bin/herdr-task`, `services/herdr-controller.py`, `herdr/state_db.py`)**：
+    - 彻底废除 `workflow_record()`、`active_workflows_for_project()`、`_workflow_entry()`、`load_workflows()` 读链路上的 `_sync_missing_workflows_into_store` 旁路扫描；
+    - 彻底废除 `agent_router.py` 的 `_sync_missing_tasks_into_store`、`kernel.py` 的 `_import_missing_tasks_from_disk`、`steering.py` 读取 `tasks.json` 的旁路，以及 `bin/herdr-task` 与 `herdr-controller.py` 的 `load_tasks()` 中的磁盘冷插入逻辑，确保运行时任何正常路径绝无反向 JSON → SQLite 写回；
+    - 数据库底层在 `_ensure_schema` 中引入 `schema_meta` (`v1_migration_done`) 表，使用原子显式事务（`BEGIN TRANSACTION;` ... `COMMIT;`）执行一次性 bootstrap 导入；任一历史文件损坏立即 `ROLLBACK;` 且不标记完成、不污染缓存，保留重试通道；
   - **路由决策未注册工作流 Fail-Closed (`herdr/agent_router.py`)**：
     - `choose_agent()` 显式增加对 `workflow_id` 的存在性校验：当指定了 `workflow_id` 但在 StateStore 查无记录时，立即抛出 `RuntimeError("Workflow not found in authoritative StateStore: ...")`，杜绝静默兜底到 `"opencode"` 绕过项目池黑名单、健康准入与并发预占；仅限未指定 `workflow_id` 的独立任务走默认代理；
     - `_clean_reservations()` 与 `_active_agent_loads()` 彻底废除对 `workflows.json` 与 `tasks.json` 的异常降级读取，底层 StateStore 异常直接抛出阻断；
@@ -367,6 +368,7 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
     - `_workflow_entry()` 仅查询 StateStore，移除任何磁盘扫描；
     - `active_registered_workflows()` 100% 仅源自 `store.list_workflows()`，彻底移除从 `~/.herdr-controller/projects.json` 注入 `wf` 的逻辑，杜绝 Ghost Workflow；
   - **新增专项对抗测试套件 (`tests/test_critical_reads_fail_closed.py`)**：
-    - 13 项测试全面覆盖：9 项模拟 `sqlite3.OperationalError` 时的 Fail-Closed 异常阻断，Test A 验证陈旧 JSON 绝不复活已删除/不存在的 Workflow，Test B 验证未注册 Workflow 调用 `choose_agent` 抛出 `RuntimeError`，Test C 验证 `projects.json` 注入的 Ghost 工作流被 100% 过滤，Test D 验证一次性 bootstrap 迁移与后续持久隔离；
-  - **沉淀并归档通用工程教训 §32**（核心控制读取 Fail-Closed 铁律与单事实源冻结）；
-  - 全仓自动化回归测试达 364 项（100% 绿灯全部通过）。
+    - 14 项测试全面覆盖：9 项模拟 `sqlite3.OperationalError` 时的 Fail-Closed 异常阻断，Test A 验证陈旧 JSON 绝不复活已删除/不存在的 Workflow，Test B 验证未注册 Workflow 调用 `choose_agent` 抛出 `RuntimeError`，Test C 验证 `projects.json` 注入的 Ghost 工作流被 100% 过滤，Test D 验证一次性 bootstrap 迁移与后续持久隔离，Test E 验证损坏 JSON 触发原子回滚且不置位迁移标记、修复后重试无缝成功；
+  - **沉淀并归档通用工程教训 §32**（核心控制读取 Fail-Closed 铁律、Task 运行时防复活与原子迁移事务）；
+  - 全仓自动化回归测试达 365 项（100% 绿灯全部通过）。
+

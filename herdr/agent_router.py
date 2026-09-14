@@ -109,21 +109,6 @@ def _get_store():
     return get_state_store()
 
 
-def _sync_missing_tasks_into_store(store):
-    try:
-        t_file = Path(globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE") or TASKS_FILE)
-        if t_file.exists():
-            disk_data = _load(t_file, {})
-            if isinstance(disk_data, dict):
-                for t in disk_data.get("tasks", []):
-                    if isinstance(t, dict):
-                        tid = t.get("task_id")
-                        if tid and not store.get_task(tid):
-                            store.save_task(t)
-    except Exception:
-        pass
-
-
 def workflow_record(workflow_id):
     store = _get_store()
     wf = store.get_workflow(workflow_id)
@@ -149,7 +134,6 @@ def set_workflow_agent_override(workflow_id, agent):
 def _clean_reservations(data, ttl=300):
     now = time.time()
     store = _get_store()
-    _sync_missing_tasks_into_store(store)
     tasks = store.list_tasks()
 
     registered = {
@@ -189,7 +173,6 @@ def release_agent_reservation(task_id):
 
 def _active_agent_loads(project_id):
     store = _get_store()
-    _sync_missing_tasks_into_store(store)
     tasks = store.list_tasks()
 
     active = {

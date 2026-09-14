@@ -36,6 +36,8 @@ def e2e_env(tmp_path, monkeypatch):
     cp_dir = tmp_path / "checkpoints"
     cp_dir.mkdir(parents=True, exist_ok=True)
 
+    db_file = tmp_path / "state.db"
+    monkeypatch.setenv("HERDR_STATE_DB", str(db_file))
     monkeypatch.setenv("WORKFLOWS_FILE", str(wf_file))
     monkeypatch.setenv("TASKS_FILE", str(tasks_file))
     monkeypatch.setenv("STEERING_FILE", str(steer_file))
@@ -113,12 +115,12 @@ class TestUniversalSubstrateEndToEnd:
         }
         tasks_db = json.loads(e2e_env["tasks_file"].read_text(encoding="utf-8"))
         tasks_db["tasks"].append(task_scope)
-        e2e_env["tasks_file"].write_text(json.dumps(tasks_db), encoding="utf-8")
+        kernel.save_tasks_data(tasks_db)
 
         # Complete Node 1
         tasks_db["tasks"][0]["status"] = "completed"
         tasks_db["tasks"][0]["stage_verdict"] = "pass"
-        e2e_env["tasks_file"].write_text(json.dumps(tasks_db), encoding="utf-8")
+        kernel.save_tasks_data(tasks_db)
 
         # 5. Node 2: data_extraction with Phase 2 Steering & Halt
         task_data = {
@@ -132,7 +134,7 @@ class TestUniversalSubstrateEndToEnd:
             "started_at": 1773479050,
         }
         tasks_db["tasks"].append(task_data)
-        e2e_env["tasks_file"].write_text(json.dumps(tasks_db), encoding="utf-8")
+        kernel.save_tasks_data(tasks_db)
 
         # Verify Node 2 MCP capability resolution
         node_def = next(n for n in nodes if n["id"] == "data_extraction")
@@ -185,7 +187,7 @@ class TestUniversalSubstrateEndToEnd:
         # Resume and complete data_extraction
         t_data_now["status"] = "completed"
         t_data_now["stage_verdict"] = "pass"
-        e2e_env["tasks_file"].write_text(json.dumps(tasks_db), encoding="utf-8")
+        kernel.save_tasks_data(tasks_db)
 
         # 6. Node 3: comparative_analysis with Phase 3 Telemetry & Projection
         task_comp = {
@@ -204,7 +206,7 @@ class TestUniversalSubstrateEndToEnd:
             ],
         }
         tasks_db["tasks"].append(task_comp)
-        e2e_env["tasks_file"].write_text(json.dumps(tasks_db), encoding="utf-8")
+        kernel.save_tasks_data(tasks_db)
 
         # Validate Phase 3 Projection
         p_data = c.api_task_projection("task-comp-003")
@@ -219,7 +221,7 @@ class TestUniversalSubstrateEndToEnd:
         # Complete Node 3
         tasks_db["tasks"][-1]["status"] = "completed"
         tasks_db["tasks"][-1]["stage_verdict"] = "pass"
-        e2e_env["tasks_file"].write_text(json.dumps(tasks_db), encoding="utf-8")
+        kernel.save_tasks_data(tasks_db)
 
         # 7. Node 4: executive_briefing (Gate Blocked -> Signoff Chamber Approve)
         task_gate = {
@@ -234,7 +236,7 @@ class TestUniversalSubstrateEndToEnd:
             "started_at": 1773479200,
         }
         tasks_db["tasks"].append(task_gate)
-        e2e_env["tasks_file"].write_text(json.dumps(tasks_db), encoding="utf-8")
+        kernel.save_tasks_data(tasks_db)
 
         # Check Attention Hub aggregation before signoff
         wp = c.api_workflow_projection(wid)

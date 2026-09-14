@@ -263,3 +263,79 @@ def test_one_time_bootstrap_migration_then_strict_isolation(tmp_path, monkeypatc
     # The store was already initialized (v1_migration_done); subsequent reads MUST NOT import it
     assert store.get_task("task-after-boot") is None
 
+
+def test_atomic_bootstrap_rollback_on_corrupt_legacy_json(tmp_path):
+    """Test E: Verify corrupt legacy JSON prevents v1_migration_done, rolls back data, and retrying after fix succeeds."""
+    from herdr.state_store import get_state_store, reset_state_store
+
+    test_db = tmp_path / "atomic_boot_test" / "state.db"
+    test_dir = test_db.parent
+    test_dir.mkdir(parents=True, exist_ok=True)
+
+    legacy_wf = test_dir / "workflows.json"
+    legacy_tasks = test_dir / "tasks.json"
+
+    wid = "wf-atomic-01"
+    tid = "task-atomic-01"
+
+    legacy_wf.write_text(json.dumps({
+        "version": 1,
+        "workflows": {
+            wid: {
+                "workflow_id": wid,
+                "project_id": "proj-atomic",
+                "status": "running",
+            }
+        }
+    }), encoding="utf-8")
+
+    # Intentionally corrupt tasks.json
+    legacy_tasks.write_text("{invalid json corrupt content...", encoding="utf-8")
+
+    # First init attempt:
+    reset_state_store()
+    store = get_state_store(db_path=test_db)
+
+    # Verify migration failed atomically:
+    # 1. v1_migration_done was NOT marked
+    conn = sqlite3.connect(str(test_db))
+    cur = conn.execute("SELECT value FROM schema_meta WHERE key = 'v1_migration_done';")
+    assert cur.fetchone() is None
+    # 2. wf-atomic-01 was rolled back and is NOT present
+    cur_wf = conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?;", (wid,))
+    assert cur_wf.fetchone() is None
+    conn.close()
+
+    assert store.get_workflow(wid) is None
+    assert store.get_task(tid) is None
+
+    # Now repair tasks.json
+    legacy_tasks.write_text(json.dumps({
+        "tasks": [
+            {
+                "task_id": tid,
+                "workflow_id": wid,
+                "status": "pending",
+            }
+        ]
+    }), encoding="utf-8")
+
+    # Retry initialization: reset cached state store & trigger new connection
+    reset_state_store()
+    store2 = get_state_store(db_path=test_db)
+
+    # Verify migration now succeeded completely:
+    conn = sqlite3.connect(str(test_db))
+    cur = conn.execute("SELECT value FROM schema_meta WHERE key = 'v1_migration_done';")
+    row = cur.fetchone()
+    assert row is not None and row[0] == "1"
+    conn.close()
+
+    wf = store2.get_workflow(wid)
+    assert wf is not None
+    assert wf["status"] == "running"
+    task = store2.get_task(tid)
+    assert task is not None
+    assert task["status"] == "pending"
+
+

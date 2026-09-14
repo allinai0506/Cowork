@@ -1058,18 +1058,6 @@ def _get_store():
 
 def load_tasks():
     store = _get_store()
-    if os.path.exists(TASKS_FILE):
-        try:
-            with open(TASKS_FILE, "r", encoding="utf-8") as f:
-                disk_data = json.load(f)
-            if isinstance(disk_data, dict):
-                for t in disk_data.get("tasks", []):
-                    tid = t.get("task_id")
-                    if tid and not store.get_task(tid):
-                        # ONLY insert new tasks from disk; existing SQLite state is authoritative
-                        store.save_task(t)
-        except Exception:
-            pass
     return {"tasks": store.list_tasks()}
 
 

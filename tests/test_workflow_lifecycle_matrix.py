@@ -22,6 +22,7 @@ def temp_herdr_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TASKS_FILE", str(tasks_file))
     monkeypatch.setenv("WORKFLOWS_FILE", str(workflows_file))
     monkeypatch.setenv("STAGE_STATE_FILE", str(stage_state_file))
+    monkeypatch.setenv("HERDR_STATE_DB", str(tmp_path / "state.db"))
     monkeypatch.setenv("HERDR_CONTROLLER_TEST", "1")
 
     return {
@@ -39,10 +40,12 @@ def _run_task_cli(args, env):
     custom_env["TASKS_FILE"] = str(env["tasks_file"])
     custom_env["WORKFLOWS_FILE"] = str(env["workflows_file"])
     custom_env["STAGE_STATE_FILE"] = str(env["stage_state_file"])
+    custom_env["HERDR_STATE_DB"] = str(env["root"] / "state.db")
     return subprocess.run(cmd, env=custom_env, text=True, capture_output=True)
 
 
 def _seed_task(env, task_id, workflow_id="wf-test-01", node="plan", status="pending"):
+    from herdr.state_store import get_state_store
     data = json.loads(env["tasks_file"].read_text(encoding="utf-8"))
     task = {
         "task_id": task_id,
@@ -60,10 +63,19 @@ def _seed_task(env, task_id, workflow_id="wf-test-01", node="plan", status="pend
     }
     data["tasks"].append(task)
     env["tasks_file"].write_text(json.dumps(data, indent=2), encoding="utf-8")
+    db_path = env["root"] / "state.db"
+    store = get_state_store(db_path=db_path)
+    store.save_task(task)
     return task
 
 
 def _get_task(env, task_id):
+    from herdr.state_store import get_state_store
+    db_path = env["root"] / "state.db"
+    store = get_state_store(db_path=db_path)
+    t = store.get_task(task_id)
+    if t:
+        return t
     data = json.loads(env["tasks_file"].read_text(encoding="utf-8"))
     for t in data.get("tasks", []):
         if t["task_id"] == task_id:

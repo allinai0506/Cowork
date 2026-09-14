@@ -1404,32 +1404,37 @@ pytest -q
 | 问题 | 教训 | 规范 |
 |------|------|------|
 | 读取故障静默降级到陈旧 JSON | 核心控制链路（Routing/Advance/Registration/State Transition）绝不能依据非权威或陈旧的数据做决策 | 核心控制读取必须遵守 Fail-Closed 铁律：底层 StateStore 报错直接向上阻断，严禁静默降级到 JSON |
-| 读链路自动冷导入导致工作流“起死回生” | 每次查询扫描 `workflows.json` 并插回 SQLite 会让已被删除/已归档的记录复活 | 废除常规读链路上的 `_sync_missing_workflows_into_store`；仅在空库初建（`schema_meta` 标记 `v1_migration_done`）执行一次性导入，运行时工作流只读 SQLite |
+| 读链路自动冷导入导致状态“起死回生” | 每次查询扫描 `workflows.json` 或 `tasks.json` 并插回 SQLite 会让已被删除/已归档或外部篡改的记录复活 | 彻底废除常规读链路上的 `_sync_missing_workflows_into_store`、`_sync_missing_tasks_into_store` 与 `_import_missing_tasks_from_disk`；仅在空库初建（`schema_meta` 标记 `v1_migration_done`）执行严格原子的一体化导入，运行时严禁任何从 JSON 反向写入 SQLite 的行为 |
 | 未注册工作流静默降级到 opencode | 调度路由查不到工作流时静默 fallback 会绕过项目池黑名单、健康准入与 reservation 并发锁 | 当指定了 `workflow_id` 但在 StateStore 查无记录时，必须直接抛出 `RuntimeError` 拒绝调度，仅限无 workflow_id 的独立任务走默认代理 |
 | projects.json 倒灌幽灵工作流 | 调度器从辅助项目注册表追加未完成 workflow 会导致已结案记录形成幽灵活跃流 | `active_registered_workflows()` 100% 仅源自 `store.list_workflows()`，彻底清理跨表倒灌逻辑 |
+| 启动数据继承过程缺乏原子性 | 启动时部分遗留 JSON 格式损坏若置位迁移完成，会导致部分数据永久丢失且无法修复重试 | 初始化迁移必须由单次数据库事务（`BEGIN TRANSACTION;` ... `COMMIT;`）保护；任一历史文件损坏立即 `ROLLBACK;` 且不标记 `v1_migration_done`、不缓存连接初始化标志，保留下次启动修复重试通道 |
 
-### 操作规范（已固化到 `herdr/agent_router.py`、`herdr/projects.py`、`services/herdr-controller.py`、`herdr/state_db.py` 与 `tests/test_critical_reads_fail_closed.py`）
+### 操作规范（已固化到 `herdr/agent_router.py`、`herdr/projects.py`、`herdr/kernel.py`、`herdr/steering.py`、`bin/herdr-task`、`services/herdr-controller.py`、`herdr/state_db.py` 与 `tests/test_critical_reads_fail_closed.py`）
 
 1. **路由与负载计算收口**：
    - `agent_router.workflow_record()` 废除 `_sync_missing_workflows_into_store`；
    - `agent_router.choose_agent()` 对传入但未注册的 `workflow_id` 显式抛出 `RuntimeError("Workflow not found in authoritative StateStore: ...")`；
-   - `_clean_reservations()` 与 `_active_agent_loads()` 废除 JSON 读取 fallback，StateStore 异常直接抛出；
-2. **工作流生命周期与注册表收口**：
+   - `_clean_reservations()` 与 `_active_agent_loads()` 废除 `_sync_missing_tasks_into_store` 与 JSON 降级，StateStore 异常直接抛出阻断；
+2. **任务运行时事实源纯化（彻底根除 Task 从 JSON 偷渡复活）**：
+   - `herdr/kernel.py` 彻底移除 `_import_missing_tasks_from_disk`，`load_tasks_data()` 纯净输出 `store.export_tasks_json()`；
+   - `herdr/steering.py` 彻底移除 `load_tasks_data()` 读取 `tasks.json` 的旁路；
+   - `bin/herdr-task` 与 `services/herdr-controller.py` 的 `load_tasks()` 100% 仅返回 `store.list_tasks()`，移除从磁盘向 SQLite 冷插入的新任务逻辑；
+3. **工作流生命周期与注册表收口**：
    - `projects.load_workflows()`、`active_workflows_for_project()`、`non_terminal_workflow_ids()`、`project_for_workflow()` 与 `generate_workflow_id()` 彻底废除 `_sync_missing_workflows_into_store`，严禁回退或读回写入 SQLite；
-   - 数据库初始化在 `_ensure_schema` 中引入 `schema_meta` (`v1_migration_done`) 实现一次性启动数据继承，杜绝后续运行时扫描；
-3. **调度看门狗与推进主循环收口**：
-   - `herdr-controller.py` 的 `_workflow_entry()` 仅纯净查询 StateStore，废除旁路写入；
-   - `active_registered_workflows()` 100% 仅查询 `store.list_workflows()`，清理从 `projects.json` 注入 `wf` 的幽灵链路。
+   - 调度看门狗 `herdr-controller.py` 的 `_workflow_entry()` 仅纯净查询 StateStore；`active_registered_workflows()` 100% 仅查询 `store.list_workflows()`，清理从 `projects.json` 注入 `wf` 的幽灵链路；
+4. **启动 Bootstrap 原子事务保障**：
+   - 数据库初始化在 `_ensure_schema` 中通过显式事务包裹 legacy 文件继承；任一文件损坏立即回滚且绝不置位 `v1_migration_done`，不污染缓存，待文件修复后可安全重试导入。
 
 ### 验证命令 / 证据
 
 ```bash
-# 1. 运行核心控制读取 Fail-Closed 专项测试套件（13 项对抗异常与反复活测试）
+# 1. 运行核心控制读取 Fail-Closed 专项测试套件（14 项测试，含 Test A~E 全量对抗场景）
 pytest -v tests/test_critical_reads_fail_closed.py
 
-# 2. 运行单事实源与全流程 E2E
+# 2. 运行单事实源防篡改与全流程 E2E
 pytest -v tests/test_state_store.py tests/test_universal_substrate_e2e.py
 
-# 3. 全仓自动化回归（364 项测试 100% 全部通过）
+# 3. 全仓自动化回归（365 项测试 100% 全部通过）
 pytest -q
 ```
+
