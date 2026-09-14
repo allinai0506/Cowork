@@ -14,7 +14,6 @@ from abc import ABC, abstractmethod
 import json
 import os
 import tempfile
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -130,9 +129,27 @@ class StateStore(ABC):
         event_type: str,
         payload: Dict[str, Any],
         workflow_id: Optional[str] = None,
+        node_id: Optional[str] = None,
         task_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        source: str = "system",
+        timestamp: Optional[float] = None,
     ) -> None:
         """Record a generic lifecycle event."""
+        pass
+
+    @abstractmethod
+    def list_events(
+        self,
+        workflow_id: Optional[str] = None,
+        node_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        event_type: Optional[str] = None,
+        source: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """List canonical WorkflowEvent records."""
         pass
 
     # Checkpoints
@@ -315,16 +332,43 @@ class SQLiteStateStore(StateStore):
         event_type: str,
         payload: Dict[str, Any],
         workflow_id: Optional[str] = None,
+        node_id: Optional[str] = None,
         task_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        source: str = "system",
+        timestamp: Optional[float] = None,
     ) -> None:
-        conn = state_db.get_db_connection(self.db_path)
-        try:
-            conn.execute("""
-                INSERT INTO events (workflow_id, task_id, event_type, payload_json, timestamp)
-                VALUES (?, ?, ?, ?, ?);
-            """, (workflow_id, task_id, event_type, json.dumps(payload, ensure_ascii=False), time.time()))
-        finally:
-            conn.close()
+        state_db.record_event({
+            "workflow_id": workflow_id,
+            "node_id": node_id,
+            "task_id": task_id,
+            "agent_id": agent_id,
+            "event_type": event_type,
+            "timestamp": timestamp,
+            "payload": payload,
+            "source": source,
+        }, db_path=self.db_path)
+
+    def list_events(
+        self,
+        workflow_id: Optional[str] = None,
+        node_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        event_type: Optional[str] = None,
+        source: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        return state_db.list_events(
+            workflow_id=workflow_id,
+            node_id=node_id,
+            task_id=task_id,
+            agent_id=agent_id,
+            event_type=event_type,
+            source=source,
+            limit=limit,
+            db_path=self.db_path,
+        )
 
     # Checkpoints
     def create_checkpoint(

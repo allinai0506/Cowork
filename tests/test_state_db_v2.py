@@ -77,6 +77,45 @@ def test_init_db_and_wal_mode(state_env):
         conn.close()
 
 
+def test_workflow_event_stream_records_full_context_and_filters(state_env):
+    """Verify the canonical WorkflowEvent stream captures shared context."""
+    state_db.init_db(state_env["db_file"])
+
+    recorded = state_db.record_event({
+        "workflow_id": "wf-event-01",
+        "node_id": "implement",
+        "task_id": "task-event-01",
+        "agent_id": "codex",
+        "event_type": "task.started",
+        "timestamp": 1773471000.5,
+        "payload": {"attempt": 1, "status": "working"},
+        "source": "controller",
+    }, db_path=state_env["db_file"])
+
+    assert recorded["event_type"] == "task.started"
+    assert recorded["node_id"] == "implement"
+    assert recorded["agent_id"] == "codex"
+    assert recorded["payload"]["attempt"] == 1
+
+    events = state_db.list_events(
+        workflow_id="wf-event-01",
+        task_id="task-event-01",
+        agent_id="codex",
+        event_type="task.started",
+        source="controller",
+        db_path=state_env["db_file"],
+    )
+    assert len(events) == 1
+    assert events[0]["workflow_id"] == "wf-event-01"
+    assert events[0]["node_id"] == "implement"
+    assert events[0]["task_id"] == "task-event-01"
+    assert events[0]["agent_id"] == "codex"
+    assert events[0]["event_type"] == "task.started"
+    assert events[0]["timestamp"] == 1773471000.5
+    assert events[0]["payload"] == {"attempt": 1, "status": "working"}
+    assert events[0]["source"] == "controller"
+
+
 def test_workflow_and_task_upsert(state_env):
     """Verify workflow and task upsert and query."""
     state_db.init_db(state_env["db_file"])
@@ -166,6 +205,11 @@ def test_create_and_list_checkpoints_atomic(state_env):
     assert snap["checkpoint_id"] == cp1["checkpoint_id"]
     assert snap["tag"] == "step1_done"
     assert len(snap["tasks"]) == 1
+
+    events = state_db.list_events(workflow_id=wid, db_path=state_env["db_file"])
+    assert [e["event_type"] for e in events] == ["checkpoint_created", "checkpoint_created"]
+    assert events[0]["source"] == "checkpoint_store"
+    assert events[0]["payload"]["checkpoint_id"] == cp1["checkpoint_id"]
 
 
 def test_restore_checkpoint_atomic(state_env):
@@ -265,6 +309,12 @@ def test_fork_workflow_from_checkpoint(state_env):
     assert forked_tasks[0]["workflow_id"] == forked_wid
     assert forked_tasks[0]["task_id"] != "t-source-1"
     assert "t-source-1-fork-" in forked_tasks[0]["task_id"]
+
+    events = state_db.list_events(workflow_id=forked_wid, db_path=state_env["db_file"])
+    assert len(events) == 1
+    assert events[0]["event_type"] == "workflow_forked"
+    assert events[0]["source"] == "checkpoint_store"
+    assert events[0]["payload"]["source_checkpoint_id"] == cpid
 
 
 def test_checkpoint_lineage(state_env):
@@ -537,6 +587,7 @@ def test_unified_state_db_extensions(state_env):
     # Steering history
     state_db.record_steering_history({
         "action": "steer_dispatched",
+        "workflow_id": "wf-ext-1",
         "task_id": "t-ext-1",
         "steer_id": "str-001",
         "instruction": "Stop loop and write tests",
@@ -546,3 +597,39 @@ def test_unified_state_db_extensions(state_env):
     assert len(history) == 1
     assert history[0]["action"] == "steer_dispatched"
 
+    events = state_db.list_events(task_id="t-ext-1", db_path=db)
+    assert len(events) == 1
+    assert events[0]["workflow_id"] == "wf-ext-1"
+    assert events[0]["event_type"] == "steering.steer_dispatched"
+    assert events[0]["source"] == "steering"
+    assert events[0]["payload"]["steer_id"] == "str-001"
+
+
+def test_steering_history_and_workflow_event_rollback_together(state_env, monkeypatch):
+    """A failed WorkflowEvent append must rollback the steering audit row."""
+    db = state_env["db_file"]
+    state_db.init_db(db)
+
+    def fail_record_event(*args, **kwargs):
+        raise RuntimeError("simulated event append failure")
+
+    monkeypatch.setattr(state_db, "record_event", fail_record_event)
+
+    with pytest.raises(RuntimeError, match="simulated event append failure"):
+        state_db.record_steering_history({
+            "action": "steer_dispatched",
+            "workflow_id": "wf-rollback",
+            "task_id": "t-rollback",
+            "steer_id": "str-rollback",
+            "instruction": "must rollback as a unit",
+            "operator": "commander",
+        }, db)
+
+    assert state_db.list_steering_history(task_id="t-rollback", db_path=db) == []
+
+    conn = state_db.get_db_connection(db)
+    try:
+        event_count = conn.execute("SELECT COUNT(*) FROM events;").fetchone()[0]
+    finally:
+        conn.close()
+    assert event_count == 0

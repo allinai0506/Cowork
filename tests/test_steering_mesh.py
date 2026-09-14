@@ -120,9 +120,66 @@ def test_urgent_steer_immediate_dispatch(steering_env):
     assert t["steering_history"][0]["instruction"] == "Stop! Fix syntax error immediately"
 
 
+def test_repeated_steering_appends_one_history_and_event_per_action(steering_env):
+    from herdr.state_store import get_state_store
+
+    task_id = "task-event-steering"
+    _seed_task(
+        steering_env,
+        task_id,
+        status="working",
+        pane_id="pane-event",
+        workflow_id="wf-event-steering",
+    )
+
+    mock_run = MagicMock()
+    mock_run.return_value.returncode = 0
+    mock_run.return_value.stdout = ""
+    mock_run.return_value.stderr = ""
+
+    with patch("subprocess.run", mock_run):
+        for n in range(3):
+            steering.queue_steer(
+                task_id,
+                f"Steering instruction {n}",
+                operator="lead",
+                urgent=True,
+            )
+
+    store = get_state_store(db_path=steering_env["tasks_file"].parent / "state.db")
+    history = store.list_steering_history(task_id=task_id)
+    events = store.list_events(task_id=task_id, event_type="steering.steer_dispatched")
+
+    assert len(history) == 3
+    assert len(events) == 3
+    assert [h["instruction"] for h in history] == [
+        "Steering instruction 0",
+        "Steering instruction 1",
+        "Steering instruction 2",
+    ]
+    assert [e["payload"]["instruction"] for e in events] == [
+        "Steering instruction 0",
+        "Steering instruction 1",
+        "Steering instruction 2",
+    ]
+    assert all(e["workflow_id"] == "wf-event-steering" for e in events)
+    assert all(e["node_id"] == "dev" for e in events)
+    assert all(e["task_id"] == task_id for e in events)
+    assert all(e["agent_id"] == "codex" for e in events)
+    assert all(e["source"] == "steering" for e in events)
+
+
 def test_halt_task_lifecycle(steering_env):
+    from herdr.state_store import get_state_store
+
     task_id = "task-003"
-    _seed_task(steering_env, task_id, status="working", pane_id="pane-888")
+    _seed_task(
+        steering_env,
+        task_id,
+        status="working",
+        pane_id="pane-888",
+        workflow_id="wf-halt-context",
+    )
 
     mock_run = MagicMock()
     mock_run.return_value.returncode = 0
@@ -142,6 +199,14 @@ def test_halt_task_lifecycle(steering_env):
     assert t["status"] == "interrupted"
     assert t["interrupt_reason"] == "Severe logic flaw detected"
     assert t["status_history"][-1]["to"] == "interrupted"
+
+    store = get_state_store(db_path=steering_env["tasks_file"].parent / "state.db")
+    events = store.list_events(task_id=task_id, event_type="steering.task_halted")
+    assert len(events) == 1
+    assert events[0]["workflow_id"] == "wf-halt-context"
+    assert events[0]["node_id"] == "dev"
+    assert events[0]["agent_id"] == "codex"
+    assert events[0]["source"] == "steering"
 
 
 def test_drain_pending_steer(steering_env):

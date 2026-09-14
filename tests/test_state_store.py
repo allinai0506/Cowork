@@ -159,6 +159,33 @@ def test_steering_operations(store_env):
     assert hist[0]["action"] == "steer_dispatched"
 
 
+def test_state_store_records_and_lists_workflow_events(store_env):
+    store = SQLiteStateStore(db_path=store_env["db_file"])
+
+    store.record_event(
+        "task.blocked",
+        {"reason": "needs review"},
+        workflow_id="wf-store-event",
+        node_id="review",
+        task_id="task-store-event",
+        agent_id="claude",
+        source="sentinel",
+        timestamp=1773472000.25,
+    )
+
+    events = store.list_events(workflow_id="wf-store-event")
+
+    assert len(events) == 1
+    assert events[0]["workflow_id"] == "wf-store-event"
+    assert events[0]["node_id"] == "review"
+    assert events[0]["task_id"] == "task-store-event"
+    assert events[0]["agent_id"] == "claude"
+    assert events[0]["event_type"] == "task.blocked"
+    assert events[0]["timestamp"] == 1773472000.25
+    assert events[0]["payload"] == {"reason": "needs review"}
+    assert events[0]["source"] == "sentinel"
+
+
 def test_checkpoint_lifecycle_via_store(store_env):
     store = SQLiteStateStore(db_path=store_env["db_file"])
 
@@ -697,7 +724,6 @@ def test_fail_closed_prevents_silent_write_loss_when_statestore_fails(tmp_path, 
                 factory.run_workflow_preflight({"project_id": "p1"}, wid)
             disk_data = json.loads(wf_file.read_text(encoding="utf-8"))
             assert "preflight_checked_at" not in disk_data["workflows"][wid]
-
 
 
 

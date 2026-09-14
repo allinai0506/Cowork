@@ -1536,4 +1536,47 @@ pytest -q
 bin/herdr-task adapters
 ```
 
+---
 
+## 35. WorkflowEvent Contract 与首批生产者接入：先统一事件骨架，再逐步补齐 Task/Workflow/Node 生命周期事件
+
+### 问题背景
+
+在 StateStore 完成 SQLite 单一事实源后，运行时仍存在多条语义相近但形态分散的历史链路：`events` 表仅保存部分 checkpoint/fork 事件，`steering_history` 记录人工纠偏历史，task payload 内又保留 task history 片段，Projection/Dashboard 仍主要从任务表和终端缓冲拼装当前视图。本阶段只建立统一 `WorkflowEvent` 契约并接入 checkpoint/fork/steering 等首批生产者；Task/Workflow/Node 的完整生命周期事件化必须单独规划，不能在事件骨架 PR 中顺手做大。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| 事件事实散落在业务表与兼容历史表中 | 状态表描述当前状态，事件流描述发生过什么；两者职责不能混用 | 本阶段新增的 checkpoint/fork/steering 事件必须写入 `WorkflowEvent`；业务历史表保留兼容读模型或局部索引 |
+| 事件缺少 node/agent/source 维度 | Dashboard、Audit、Notifier、Replay 与 Metrics 的消费维度不同，缺字段会迫使消费者反查任务表或猜测来源 | `WorkflowEvent` 至少包含 `workflow_id`、`node_id`、`task_id`、`agent_id`、`event_type`、`timestamp`、`payload`、`source` |
+| 内部事件源各自手写 `INSERT INTO events` | 分散写入会在扩字段、事务透传和索引策略变化时产生半新半旧记录 | 所有写入统一经过 `state_db.record_event()` 或 `StateStore.record_event()`，事务内路径通过 `conn` 透传保持原子性 |
+| 为统一模型顺手改旧事件类型 | 事件名是消费者契约，重命名会破坏旧 Dashboard、审计脚本或测试夹具 | 扩字段不改语义名；`checkpoint_created`、`checkpoint_restored`、`workflow_forked` 等既有 `event_type` 必须保留 |
+| 只新增 API 未验证旧路径进入 Stream | 新消费者会误以为首批生产者已完整接入，实际 checkpoint/fork/steering 等关键源可能仍漏写 | 测试必须覆盖新 API 与首批生产路径：直接 record/list、checkpoint create、workflow fork、steering history 都要能从统一 stream 读到 |
+| 过早宣称 Canonical Stream 完整可替代所有读模型 | 当前 Task/Workflow/Node 状态转换尚未全部事件化，只读 Event Stream 会漏掉核心生命周期 | 本 PR 只声明 `WorkflowEvent Contract + first producers`；完整生命周期事件化与增量 cursor 放入后续 PR |
+
+### 操作规范（已固化到 `herdr/state_db.py`、`herdr/state_store.py`、`tests/test_state_db_v2.py` 与 `tests/test_state_store.py`）
+
+1. **事件表扩展只做兼容升级**：
+   - `events` 表新增 `node_id`、`agent_id`、`source`；
+   - `_ensure_event_columns()` 对既有库原地补列，保留旧列与旧事件类型。
+2. **统一写入与查询入口**：
+   - `state_db.record_event(event, conn=None)` 负责校验 `event_type`、要求 `payload` 为 dict、规范化 `node`/`agent` 别名并保留显式 timestamp；
+   - `state_db.list_events(...)` 支持 workflow/node/task/agent/type/source/limit 过滤，按 `timestamp ASC, id ASC` 稳定回放；
+   - `SQLiteStateStore.record_event()` 与 `SQLiteStateStore.list_events()` 作为上层唯一公开入口。
+3. **现有事件源同步进入统一 Stream**：
+   - `record_steering_history()` 继续写 `steering_history`，同时追加 `steering.<action>`；
+   - `create_checkpoint()`、`restore_checkpoint()`、`fork_workflow_from_checkpoint()` 不再手写 SQL，统一经 `record_event()` 追加事件。
+
+### 验证命令 / 证据
+
+```bash
+# 1. WorkflowEvent schema/API 与 checkpoint/fork/steering 旧路径回归
+pytest tests/test_state_db_v2.py -q
+
+# 2. StateStore 公开接口与兼容导出回归
+pytest tests/test_state_store.py -q
+
+# 3. 全仓自动化回归
+pytest -q
+```

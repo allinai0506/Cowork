@@ -103,10 +103,13 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             workflow_id TEXT,
+            node_id TEXT,
             task_id TEXT,
+            agent_id TEXT,
             event_type TEXT,
             payload_json TEXT,
-            timestamp REAL
+            timestamp REAL,
+            source TEXT
         );
     """)
 
@@ -152,7 +155,14 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_wf_created ON checkpoints(workflow_id, created_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_checkpoint_id);")
+    _ensure_event_columns(conn)
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_wf ON events(workflow_id, timestamp);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_node ON events(node_id, timestamp);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, timestamp);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_agent ON events(agent_id, timestamp);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, timestamp);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_source ON events(source, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_task ON steering_items(task_id, status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_hist_task ON steering_history(task_id, timestamp);")
 
@@ -293,6 +303,14 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
                     raise
     else:
         _INITIALIZED_DBS.add(path_key)
+
+
+def _ensure_event_columns(conn: sqlite3.Connection) -> None:
+    """Upgrade pre-WorkflowEvent event tables in place."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(events);")}
+    for name in ("node_id", "agent_id", "source"):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {name} TEXT;")
 
 
 def get_db_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -773,6 +791,8 @@ def record_steering_history(
         conn = get_db_connection(db_path)
         should_close = True
     try:
+        if should_close:
+            conn.execute("BEGIN TRANSACTION;")
         now = float(record.get("timestamp") or time.time())
         action = record.get("action", "unknown")
         task_id = record.get("task_id")
@@ -791,6 +811,32 @@ def record_steering_history(
                 action, task_id, steer_id, instruction, operator, urgent, reason, timestamp, payload_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
         """, (action, task_id, steer_id, instruction, operator, urgent, reason, now, payload_json))
+        record_event({
+            "workflow_id": record.get("workflow_id"),
+            "node_id": record.get("node_id") or record.get("node"),
+            "task_id": task_id,
+            "agent_id": record.get("agent_id") or record.get("agent"),
+            "event_type": f"steering.{action}",
+            "timestamp": now,
+            "payload": {
+                "steer_id": steer_id,
+                "instruction": instruction,
+                "operator": operator,
+                "urgent": bool(urgent),
+                "reason": reason,
+                **payload,
+            },
+            "source": record.get("source") or "steering",
+        }, conn=conn)
+        if should_close:
+            conn.execute("COMMIT;")
+    except Exception:
+        if should_close:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+        raise
     finally:
         if should_close:
             conn.close()
@@ -822,6 +868,108 @@ def list_steering_history(
                 "timestamp": row["timestamp"],
             })
             results.append(item)
+        return results
+    finally:
+        conn.close()
+
+
+def record_event(
+    event: Dict[str, Any],
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    """Append a canonical WorkflowEvent and return the normalized event."""
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+
+    try:
+        event_type = event.get("event_type")
+        if not event_type:
+            raise ValueError("event_type is required")
+
+        payload = event.get("payload") or {}
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be a dict")
+
+        normalized = {
+            "workflow_id": event.get("workflow_id"),
+            "node_id": event.get("node_id") or event.get("node"),
+            "task_id": event.get("task_id"),
+            "agent_id": event.get("agent_id") or event.get("agent"),
+            "event_type": event_type,
+            "timestamp": float(event["timestamp"]) if event.get("timestamp") is not None else time.time(),
+            "payload": payload,
+            "source": event.get("source") or "system",
+        }
+
+        cur = conn.execute("""
+            INSERT INTO events (
+                workflow_id, node_id, task_id, agent_id,
+                event_type, payload_json, timestamp, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+        """, (
+            normalized["workflow_id"],
+            normalized["node_id"],
+            normalized["task_id"],
+            normalized["agent_id"],
+            normalized["event_type"],
+            json.dumps(normalized["payload"], ensure_ascii=False),
+            normalized["timestamp"],
+            normalized["source"],
+        ))
+        normalized["id"] = cur.lastrowid
+        return normalized
+    finally:
+        if should_close:
+            conn.close()
+
+
+def list_events(
+    workflow_id: Optional[str] = None,
+    node_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    event_type: Optional[str] = None,
+    source: Optional[str] = None,
+    limit: Optional[int] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """List WorkflowEvents in chronological order with optional filters."""
+    conn = get_db_connection(db_path)
+    try:
+        query = "SELECT * FROM events WHERE 1=1"
+        params: List[Any] = []
+        for column, value in (
+            ("workflow_id", workflow_id),
+            ("node_id", node_id),
+            ("task_id", task_id),
+            ("agent_id", agent_id),
+            ("event_type", event_type),
+            ("source", source),
+        ):
+            if value is not None:
+                query += f" AND {column} = ?"
+                params.append(value)
+        query += " ORDER BY timestamp ASC, id ASC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(int(limit))
+
+        results = []
+        for row in conn.execute(query, params).fetchall():
+            results.append({
+                "id": row["id"],
+                "workflow_id": row["workflow_id"],
+                "node_id": row["node_id"],
+                "task_id": row["task_id"],
+                "agent_id": row["agent_id"],
+                "event_type": row["event_type"],
+                "timestamp": row["timestamp"],
+                "payload": json.loads(row["payload_json"] or "{}"),
+                "source": row["source"] or "unknown",
+            })
         return results
     finally:
         conn.close()
@@ -915,11 +1063,13 @@ def create_checkpoint(
                 json.dumps(metadata or {}, ensure_ascii=False),
             ))
 
-            # Record checkpoint event
-            conn.execute("""
-                INSERT INTO events (workflow_id, task_id, event_type, payload_json, timestamp)
-                VALUES (?, ?, ?, ?, ?);
-            """, (workflow_id, None, "checkpoint_created", json.dumps({"checkpoint_id": cp_id, "tag": tag}), now))
+            record_event({
+                "workflow_id": workflow_id,
+                "event_type": "checkpoint_created",
+                "timestamp": now,
+                "payload": {"checkpoint_id": cp_id, "tag": tag},
+                "source": "checkpoint_store",
+            }, conn=conn)
             conn.execute("COMMIT;")
         except Exception:
             conn.execute("ROLLBACK;")
@@ -1010,10 +1160,12 @@ def restore_checkpoint(
                 save_task(t, db_path, conn=conn)
 
             # 3. Record event
-            conn.execute("""
-                INSERT INTO events (workflow_id, task_id, event_type, payload_json, timestamp)
-                VALUES (?, ?, ?, ?, ?);
-            """, (workflow_id, None, "checkpoint_restored", json.dumps({"checkpoint_id": checkpoint_id}), time.time()))
+            record_event({
+                "workflow_id": workflow_id,
+                "event_type": "checkpoint_restored",
+                "payload": {"checkpoint_id": checkpoint_id},
+                "source": "checkpoint_store",
+            }, conn=conn)
 
             conn.execute("COMMIT;")
         except Exception:
@@ -1077,13 +1229,16 @@ def fork_workflow_from_checkpoint(
             for t in forked_tasks:
                 save_task(t, db_path, conn=conn)
 
-            conn.execute("""
-                INSERT INTO events (workflow_id, task_id, event_type, payload_json, timestamp)
-                VALUES (?, ?, ?, ?, ?);
-            """, (new_workflow_id, None, "workflow_forked", json.dumps({
-                "source_checkpoint_id": checkpoint_id,
-                "source_workflow_id": cp_row["workflow_id"],
-            }), now))
+            record_event({
+                "workflow_id": new_workflow_id,
+                "event_type": "workflow_forked",
+                "timestamp": now,
+                "payload": {
+                    "source_checkpoint_id": checkpoint_id,
+                    "source_workflow_id": cp_row["workflow_id"],
+                },
+                "source": "checkpoint_store",
+            }, conn=conn)
 
             conn.execute("COMMIT;")
         except Exception:

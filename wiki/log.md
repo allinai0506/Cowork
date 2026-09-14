@@ -412,4 +412,15 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
     3. **历史记录 Append-Only 防重复膨胀**：修复 `save_steering_data` 遍历旧历史全量二次插入 SQLite 的严重缺陷，确立 audit 事件严格单向 append-only，单次重试零膨胀，为 PR #26 Event Stream 扫清障碍；
   - **Wiki & Lessons**：`wiki/index.md`、`wiki/log.md`、`docs/lessons/lessons-learned.md §34` 全面同步。
 
-
+## [2026-09-14] feat | WorkflowEvent Stream Contract and First Producers
+- **统一 WorkflowEvent 存储契约 (`herdr/state_db.py`, `herdr/state_store.py`)**：
+  - 将 `events` 表扩展为统一运行时事件流骨架，标准字段包含 `workflow_id`、`node_id`、`task_id`、`agent_id`、`event_type`、`timestamp`、`payload_json` 与 `source`；
+  - 通过 `_ensure_event_columns()` 对既有 SQLite 库执行原地补列，保留旧 `workflow_id/task_id/event_type/payload_json/timestamp` 读写兼容；
+  - 新增 `record_event()` 与 `list_events()`，支持按 workflow/node/task/agent/type/source 查询并按 `timestamp, id` 稳定回放。
+- **现有事件源收敛到同一 Stream**：
+  - `record_steering_history()` 在保留 `steering_history` 兼容表的同时追加 `steering.<action>` 事件；
+  - `create_checkpoint()`、`restore_checkpoint()` 与 `fork_workflow_from_checkpoint()` 改为经由统一 `record_event()` 写入事件，保留既有 `checkpoint_created`、`checkpoint_restored`、`workflow_forked` 事件类型，避免破坏旧消费者。
+- **测试与知识沉淀**：
+  - 新增 `tests/test_state_db_v2.py::test_workflow_event_stream_records_full_context_and_filters` 与 `tests/test_state_store.py::test_state_store_records_and_lists_workflow_events`；
+  - 扩充 checkpoint/fork/steering history 断言，确保首批生产路径真实进入 WorkflowEvent Stream；
+  - 沉淀并归档通用工程教训 §35（先建立统一事件契约与首批生产者，Task/Workflow/Node 全生命周期事件化留作后续阶段）。
