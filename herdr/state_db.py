@@ -21,6 +21,14 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from herdr.transitions import (
+    ACTIVE_TASK_STATUSES,
+    COMPLETED_TASK_STATUSES,
+    InvalidTransitionError,
+    validate_task_transition,
+    validate_workflow_transition,
+)
+
 
 HOME = Path.home()
 CONTROLLER_DIR = HOME / ".herdr-controller"
@@ -973,6 +981,234 @@ def list_events(
         return results
     finally:
         conn.close()
+
+
+def transition_task(
+    task_id: str,
+    to_status: str,
+    reason: str,
+    source: str = "system",
+    metadata: Optional[Dict[str, Any]] = None,
+    force: bool = False,
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    """Atomically validate and transition a task status, appending a canonical WorkflowEvent."""
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+
+    try:
+        if should_close:
+            conn.execute("BEGIN IMMEDIATE;")
+
+        cur = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Task '{task_id}' not found")
+
+        old_status = row["status"]
+        if not force:
+            validate_task_transition(old_status, to_status)
+
+        now = time.time()
+        payload = json.loads(row["payload_json"] or "{}")
+        task_dict = dict(payload)
+        task_dict.update({
+            "task_id": row["task_id"],
+            "workflow_id": row["workflow_id"],
+            "node": row["node"],
+            "stage": row["stage"],
+            "agent": row["agent"],
+            "status": old_status,
+            "stage_verdict": row["stage_verdict"],
+            "stage_verdict_note": row["stage_verdict_note"],
+            "pane_id": row["pane_id"],
+            "goal": row["goal"],
+            "blocker": row["blocker"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        })
+
+        meta = dict(metadata or {})
+        if force:
+            meta["forced"] = True
+        for k, v in meta.items():
+            task_dict[k] = v
+
+        task_dict["status"] = to_status
+        task_dict["updated_at"] = now
+        task_dict["last_activity_at"] = now
+
+        if to_status in ACTIVE_TASK_STATUSES and not task_dict.get("started_at"):
+            task_dict["started_at"] = now
+
+        if to_status in COMPLETED_TASK_STATUSES and not task_dict.get("last_result"):
+            task_dict["last_result"] = to_status
+
+        # Append to status_history in payload
+        status_history = list(task_dict.get("status_history") or [])
+        status_history.append({
+            "from": old_status,
+            "to": to_status,
+            "reason": reason,
+            "source": source,
+            "timestamp": now,
+            **meta,
+        })
+        task_dict["status_history"] = status_history
+
+        save_task(task_dict, db_path=None, conn=conn)
+
+        event_payload = {
+            "from_status": old_status,
+            "to_status": to_status,
+            "reason": reason,
+            **meta,
+        }
+        event = record_event(
+            {
+                "workflow_id": task_dict.get("workflow_id"),
+                "node_id": task_dict.get("node") or task_dict.get("stage"),
+                "task_id": task_id,
+                "agent_id": task_dict.get("agent"),
+                "event_type": "task_transition",
+                "payload": event_payload,
+                "source": source,
+                "timestamp": now,
+            },
+            conn=conn,
+        )
+
+        if should_close:
+            conn.execute("COMMIT;")
+
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "workflow_id": task_dict.get("workflow_id"),
+            "old_status": old_status,
+            "new_status": to_status,
+            "reason": reason,
+            "source": source,
+            "event_id": event.get("id"),
+            "task": task_dict,
+        }
+    except Exception:
+        if should_close:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+        raise
+    finally:
+        if should_close:
+            conn.close()
+
+
+def transition_workflow(
+    workflow_id: str,
+    to_status: str,
+    reason: str,
+    source: str = "system",
+    metadata: Optional[Dict[str, Any]] = None,
+    force: bool = False,
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
+    """Atomically validate and transition a workflow status, appending a canonical WorkflowEvent."""
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+
+    try:
+        if should_close:
+            conn.execute("BEGIN IMMEDIATE;")
+
+        cur = conn.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Workflow '{workflow_id}' not found")
+
+        old_status = row["status"]
+        if not force:
+            validate_workflow_transition(old_status, to_status)
+
+        now = time.time()
+        meta = json.loads(row["metadata_json"] or "{}")
+        cfg = json.loads(row["config_json"] or "{}")
+
+        wf_dict = dict(meta)
+        wf_dict.update({
+            "workflow_id": row["workflow_id"],
+            "title": row["title"],
+            "status": old_status,
+            "template_name": row["template_name"],
+            "current_stage": row["current_stage"],
+            "config": cfg,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        })
+
+        user_meta = dict(metadata or {})
+        if force:
+            user_meta["forced"] = True
+        for k, v in user_meta.items():
+            wf_dict[k] = v
+
+        wf_dict["status"] = to_status
+        wf_dict["updated_at"] = now
+
+        if to_status == "completed":
+            wf_dict.setdefault("completed_at", now)
+
+        save_workflow(wf_dict, db_path=None, conn=conn)
+
+        event_payload = {
+            "from_status": old_status,
+            "to_status": to_status,
+            "reason": reason,
+            **user_meta,
+        }
+        event = record_event(
+            {
+                "workflow_id": workflow_id,
+                "node_id": user_meta.get("node_id") or wf_dict.get("current_stage"),
+                "task_id": None,
+                "agent_id": None,
+                "event_type": "workflow_transition",
+                "payload": event_payload,
+                "source": source,
+                "timestamp": now,
+            },
+            conn=conn,
+        )
+
+        if should_close:
+            conn.execute("COMMIT;")
+
+        return {
+            "ok": True,
+            "workflow_id": workflow_id,
+            "old_status": old_status,
+            "new_status": to_status,
+            "reason": reason,
+            "source": source,
+            "event_id": event.get("id"),
+            "workflow": wf_dict,
+        }
+    except Exception:
+        if should_close:
+            try:
+                conn.execute("ROLLBACK;")
+            except Exception:
+                pass
+        raise
+    finally:
+        if should_close:
+            conn.close()
 
 
 def create_checkpoint(

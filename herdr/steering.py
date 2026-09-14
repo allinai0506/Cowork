@@ -264,23 +264,37 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
     # Agent was physically halted by Ctrl-C; advance task to interrupted to prevent fact drift.
     if not delivery_ok and steer_result.get("interrupted"):
         if task:
-            task["status"] = "interrupted"
-            task["interrupt_reason"] = "urgent_steer_injection_failed"
-            task["interrupted_by"] = item.get("operator", "human")
-            task["interrupted_at"] = now
-            task["requires_attention"] = True
-            task["protocol"] = adapter.protocol_level
-            task["adapter"] = adapter.name
-            task.setdefault("status_history", []).append({
-                "from": old_status,
-                "to": "interrupted",
-                "reason": "urgent_steer_injection_failed",
-                "operator": item.get("operator", "human"),
+            tid = task.get("task_id")
+            meta = {
+                "interrupt_reason": "urgent_steer_injection_failed",
+                "interrupted_by": item.get("operator", "human"),
+                "interrupted_at": now,
+                "requires_attention": True,
                 "protocol": adapter.protocol_level,
                 "adapter": adapter.name,
-                "timestamp": now,
-            })
-            save_tasks_data(tasks_data)
+            }
+            try:
+                from herdr import kernel
+                kernel.transition_task(
+                    task_id=tid,
+                    to_status="interrupted",
+                    reason="urgent_steer_injection_failed",
+                    source="steering",
+                    metadata=meta,
+                )
+            except Exception:
+                task["status"] = "interrupted"
+                task.update(meta)
+                task.setdefault("status_history", []).append({
+                    "from": old_status,
+                    "to": "interrupted",
+                    "reason": "urgent_steer_injection_failed",
+                    "operator": item.get("operator", "human"),
+                    "protocol": adapter.protocol_level,
+                    "adapter": adapter.name,
+                    "timestamp": now,
+                })
+                save_tasks_data(tasks_data)
 
     # 4. Append-only record to StateStore audit history (zero duplication)
     store = get_state_store()
@@ -521,22 +535,35 @@ def halt_task(
         }
 
     # Interrupt succeeded: proceed to update task status
-    task["status"] = "interrupted"
-    task["interrupt_reason"] = reason
-    task["interrupted_by"] = operator
-    task["interrupted_at"] = now
-    task["protocol"] = adapter.protocol_level
-    task["adapter"] = adapter.name
-    task.setdefault("status_history", []).append({
-        "from": old_status,
-        "to": "interrupted",
-        "reason": reason,
-        "operator": operator,
+    meta = {
+        "interrupt_reason": reason,
+        "interrupted_by": operator,
+        "interrupted_at": now,
         "protocol": adapter.protocol_level,
         "adapter": adapter.name,
-        "timestamp": now,
-    })
-    save_tasks_data(tasks_data)
+    }
+    try:
+        from herdr import kernel
+        kernel.transition_task(
+            task_id=task_id,
+            to_status="interrupted",
+            reason=reason,
+            source="steering",
+            metadata=meta,
+        )
+    except Exception:
+        task["status"] = "interrupted"
+        task.update(meta)
+        task.setdefault("status_history", []).append({
+            "from": old_status,
+            "to": "interrupted",
+            "reason": reason,
+            "operator": operator,
+            "protocol": adapter.protocol_level,
+            "adapter": adapter.name,
+            "timestamp": now,
+        })
+        save_tasks_data(tasks_data)
 
     history_entry = {
         "action": "task_halted",

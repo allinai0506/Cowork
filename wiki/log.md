@@ -424,3 +424,25 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 新增 `tests/test_state_db_v2.py::test_workflow_event_stream_records_full_context_and_filters` 与 `tests/test_state_store.py::test_state_store_records_and_lists_workflow_events`；
   - 扩充 checkpoint/fork/steering history 断言，确保首批生产路径真实进入 WorkflowEvent Stream；
   - 沉淀并归档通用工程教训 §35（先建立统一事件契约与首批生产者，Task/Workflow/Node 全生命周期事件化留作后续阶段）。
+
+## [2026-09-14] feat | Kernel State Transition Contract & Gateway (Phase 1)
+- **函数式状态机核心 (`herdr/transitions.py`)**：
+  - 定义纯逻辑状态转移字典 `TASK_TRANSITIONS` 与 `WORKFLOW_TRANSITIONS`；
+  - 分类任务状态（`ACTIVE_TASK_STATUSES`, `COMPLETED_TASK_STATUSES`, `TERMINAL_TASK_STATUSES`）；
+  - 提供纯函数验证接口 `validate_task_transition(old_status, new_status)` 与 `validate_workflow_transition(old_status, new_status)`，无任何 I/O 与副作用；
+  - 允许同状态自流转（幂等操作），对非法状态跃迁抛出统一异常 `InvalidTransitionError`。
+- **单一事务状态变迁网关 (`herdr/state_db.py`, `herdr/state_store.py`, `herdr/kernel.py`)**：
+  - 在 `state_db.py` 中实现 `transition_task()` 与 `transition_workflow()`：统一在 SQLite `BEGIN IMMEDIATE` 强事务锁下执行当前状态检查、转移合法性校验、数据表实体更新与对应 `WorkflowEvent`（`event_type="task_transition"` / `"workflow_transition"`）的追加，保证原子性；
+  - 提供 `force=True` 管理员/运维逃生通道，在事件元数据中如实记录 `forced: True`；
+  - `herdr/kernel.py` 对外暴露 `transition_task` 与 `transition_workflow`，并在落库后自动将变更同步导出至 `tasks.json` / `workflows.json`。
+- **控制原语与调用方全面收敛**：
+  - `kernel.pause_workflow()`、`kernel.resume_workflow()`、`kernel.rollback_workflow()` 改造为通过网关推进；
+  - `bin/herdr-task`（`set_status`, `supersede_task`, `_mark_workflow_completed`, `reopen_workflow`）全量对接网关；
+  - `bin/herdr-factory`（`_update_workflow_status`）全量对接网关；
+  - `services/herdr-sentinel.py` 超时流转与 `herdr/steering.py` 紧急中断流转全量对接网关；
+  - 在过渡期兼容旧单元测试 monkeypatch 临时文件路径的场景，双向确保 StateStore 与文件句柄强一致。
+- **测试与知识沉淀**：
+  - 新增 `tests/test_state_transition_gateway.py`（14 项全新测试，100% 覆盖纯规则、非法拒绝、事务回滚、Admin 强制覆盖与 CLI 事件触发）；
+  - 全仓自动化回归测试达 404 项（100% 绿灯全部通过）；
+  - 沉淀并归档通用工程教训 §36。
+

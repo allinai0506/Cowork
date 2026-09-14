@@ -494,26 +494,13 @@ def _update_workflow_status(workflow_id, target_status, action_label):
         print(f"Workflow {workflow_id} not found")
         return 1
 
-    wf["status"] = target_status
-    store.save_workflow(wf)
-
-    wf_file = os.environ.get("WORKFLOWS_FILE") or os.path.expanduser("~/.herdr-controller/workflows.json")
-    try:
-        with open(wf_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        wfs = data.get("workflows", {})
-        if isinstance(wfs, dict) and workflow_id in wfs:
-            wfs[workflow_id]["status"] = target_status
-        elif isinstance(wfs, list):
-            for w in wfs:
-                if isinstance(w, dict) and w.get("workflow_id") == workflow_id:
-                    w["status"] = target_status
-        tmp = wf_file + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, wf_file)
-    except Exception:
-        pass
+    from herdr import kernel
+    kernel.transition_workflow(
+        workflow_id=workflow_id,
+        to_status=target_status,
+        reason=action_label,
+        source="herdr-factory",
+    )
 
     print(f"Workflow {workflow_id} {action_label}")
     return 0

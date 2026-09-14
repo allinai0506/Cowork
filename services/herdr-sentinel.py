@@ -108,10 +108,24 @@ def update_statuses(changes):
         if old_status not in ACTIVE:
             continue
 
-        task["status"] = new_status
-        task["sentinel_reason"] = reason
-        task["sentinel_updated_at"] = int(time.time())
-        changed = True
+        try:
+            from herdr import kernel
+            kernel.transition_task(
+                task_id=task_id,
+                to_status=new_status,
+                reason=reason,
+                source="herdr-sentinel",
+                metadata={
+                    "sentinel_reason": reason,
+                    "sentinel_updated_at": int(time.time()),
+                },
+            )
+            changed = True
+        except Exception:
+            task["status"] = new_status
+            task["sentinel_reason"] = reason
+            task["sentinel_updated_at"] = int(time.time())
+            changed = True
 
         print(
             f"[SENTINEL STATE] {task_id}: "

@@ -58,47 +58,56 @@ except Exception:
 
 KNOWN_AGENTS = [a for a in DEFAULT_ALLOWED if a]
 
-TRANSITIONS = {
-    "pending": {"dispatched", "failed"},
-    "dispatched": {"working", "blocked", "agent_done", "paused", "failed", "superseded", "interrupted"},
-    "working": {"blocked", "agent_done", "rework", "paused", "failed", "superseded", "interrupted"},
-    "blocked": {"working", "agent_done", "paused", "failed", "superseded", "interrupted"},
-    "paused": {"working", "rework", "agent_done", "failed", "superseded", "interrupted"},
-    "agent_done": {"completed", "rework", "failed", "superseded", "interrupted"},
-    "rework": {"working", "blocked", "agent_done", "paused", "failed", "superseded", "interrupted"},
-    "interrupted": {"working", "rework", "paused", "failed", "superseded"},
-    "completed": {"committed", "cleanup_ready"},
-    "committed": {"integrated"},
-    "integrated": {"cleanup_ready"},
-    "cleanup_ready": {"cleaned"},
-    "cleaned": {"superseded"},
-    "failed": {"superseded"},
-    "superseded": set(),
-}
+try:
+    from herdr.transitions import (
+        TASK_TRANSITIONS as TRANSITIONS,
+        ACTIVE_TASK_STATUSES,
+        COMPLETED_TASK_STATUSES,
+        TERMINAL_TASK_STATUSES as TERMINAL_STATUSES,
+        InvalidTransitionError,
+    )
+except ImportError:
+    TRANSITIONS = {
+        "pending": {"dispatched", "failed"},
+        "dispatched": {"working", "blocked", "agent_done", "paused", "failed", "superseded", "interrupted"},
+        "working": {"blocked", "agent_done", "rework", "paused", "failed", "superseded", "interrupted"},
+        "blocked": {"working", "agent_done", "paused", "failed", "superseded", "interrupted"},
+        "paused": {"working", "rework", "agent_done", "failed", "superseded", "interrupted"},
+        "agent_done": {"completed", "rework", "failed", "superseded", "interrupted"},
+        "rework": {"working", "blocked", "agent_done", "paused", "failed", "superseded", "interrupted"},
+        "interrupted": {"working", "rework", "paused", "failed", "superseded"},
+        "completed": {"committed", "cleanup_ready"},
+        "committed": {"integrated"},
+        "integrated": {"cleanup_ready"},
+        "cleanup_ready": {"cleaned"},
+        "cleaned": {"superseded"},
+        "failed": {"superseded"},
+        "superseded": set(),
+    }
 
-ACTIVE_TASK_STATUSES = {
-    "dispatched",
-    "working",
-    "blocked",
-    "agent_done",
-    "rework",
-    "paused",
-    "interrupted",
-}
+    ACTIVE_TASK_STATUSES = {
+        "dispatched",
+        "working",
+        "blocked",
+        "agent_done",
+        "rework",
+        "paused",
+        "interrupted",
+    }
 
-COMPLETED_TASK_STATUSES = {
-    "completed",
-    "committed",
-    "integrated",
-    "cleanup_ready",
-    "cleaned",
-}
+    COMPLETED_TASK_STATUSES = {
+        "completed",
+        "committed",
+        "integrated",
+        "cleanup_ready",
+        "cleaned",
+    }
 
-TERMINAL_STATUSES = {
-    *COMPLETED_TASK_STATUSES,
-    "failed",
-    "superseded",
-}
+    TERMINAL_STATUSES = {
+        *COMPLETED_TASK_STATUSES,
+        "failed",
+        "superseded",
+    }
 
 CONTROLLER_ROOT = os.path.expanduser("~/.herdr-controller")
 WORKFLOWS_FILE = os.path.join(CONTROLLER_ROOT, "workflows.json")
@@ -1179,6 +1188,26 @@ def set_status(task_id, new_status, verdict=None, note=None):
 
     if old_status == new_status:
         if new_status == "completed" and (verdict or note):
+            metadata = {}
+            if verdict:
+                metadata["stage_verdict"] = verdict
+            if note:
+                metadata["stage_verdict_note"] = note
+            try:
+                from herdr import kernel
+                store = _get_store()
+                if not store.get_task(task_id):
+                    store.save_task(task)
+                kernel.transition_task(
+                    task_id=task_id,
+                    to_status=new_status,
+                    reason="update_verdict_note",
+                    source="herdr-task",
+                    metadata=metadata,
+                )
+            except Exception:
+                pass
+            task.update(metadata)
             save_tasks(data)
             print(f"{task_id}: already {new_status}; verdict/note updated")
             return
@@ -1193,6 +1222,27 @@ def set_status(task_id, new_status, verdict=None, note=None):
         )
         sys.exit(2)
 
+    metadata = {}
+    if verdict:
+        metadata["stage_verdict"] = verdict
+    if note:
+        metadata["stage_verdict_note"] = note
+
+    try:
+        from herdr import kernel
+        store = _get_store()
+        if not store.get_task(task_id):
+            store.save_task(task)
+        kernel.transition_task(
+            task_id=task_id,
+            to_status=new_status,
+            reason="cli_set_status",
+            source="herdr-task",
+            metadata=metadata,
+        )
+    except Exception:
+        pass
+
     now = _now()
     _append_status_history(
         task,
@@ -1200,7 +1250,7 @@ def set_status(task_id, new_status, verdict=None, note=None):
         new_status,
         now,
     )
-
+    task.update(metadata)
     task["status"] = new_status
     task["updated_at"] = now
     task["last_activity_at"] = now
@@ -1208,13 +1258,13 @@ def set_status(task_id, new_status, verdict=None, note=None):
     if new_status in ACTIVE_TASK_STATUSES and not task.get("started_at"):
         task["started_at"] = now
 
-    if new_status in ACTIVE_TASK_STATUSES:
-        _clear_suppress_auto_close(task.get("workflow_id"))
-
     if new_status in COMPLETED_TASK_STATUSES and not task.get("last_result"):
         task["last_result"] = task.get("status")
 
     save_tasks(data)
+
+    if new_status in ACTIVE_TASK_STATUSES:
+        _clear_suppress_auto_close(task.get("workflow_id"))
 
     print(f"{task_id}: {old_status} -> {new_status}")
 
@@ -2701,13 +2751,36 @@ def _load_workflow_entry(workflow_id):
 def _mark_workflow_completed(workflow_id, outcome="delivered"):
     entry, entries = _load_workflow_entry(workflow_id)
     if entry is None:
-        print(f"[WORKFLOW RECORD] no entry for {workflow_id}; skip marking")
-        return
+        store = _get_store()
+        wf = store.get_workflow(workflow_id)
+        if wf is None:
+            print(f"[WORKFLOW RECORD] no entry for {workflow_id}; skip marking")
+            return
+        entry = dict(wf)
+        entries = {workflow_id: entry}
+
+    store = _get_store()
+    if not store.get_workflow(workflow_id):
+        wf_record = dict(entry)
+        wf_record.setdefault("workflow_id", workflow_id)
+        store.save_workflow(wf_record)
+
+    try:
+        from herdr import kernel
+        kernel.transition_workflow(
+            workflow_id=workflow_id,
+            to_status="completed",
+            reason=f"workflow_completed: {outcome}",
+            source="herdr-task",
+            metadata={"outcome": outcome, "completed_at": _now()},
+        )
+    except Exception:
+        pass
+
     entry["status"] = "completed"
     entry["outcome"] = outcome
     entry["completed_at"] = _now()
     entry.setdefault("workflow_id", workflow_id)
-    store = _get_store()
     store.save_workflow(entry)
 
     try:
@@ -3130,11 +3203,29 @@ def supersede_task(task_id, new_task_id=None, reason=None):
         )
         sys.exit(2)
 
-    task["status"] = "superseded"
+    meta = {}
     if new_task_id:
-        task["superseded_by"] = new_task_id
+        meta["superseded_by"] = new_task_id
     if reason:
-        task["supersede_reason"] = reason
+        meta["supersede_reason"] = reason
+
+    try:
+        from herdr import kernel
+        store = _get_store()
+        if not store.get_task(task_id):
+            store.save_task(task)
+        kernel.transition_task(
+            task_id=task_id,
+            to_status="superseded",
+            reason=reason or "superseded",
+            source="herdr-task",
+            metadata=meta,
+        )
+    except Exception:
+        pass
+
+    task["status"] = "superseded"
+    task.update(meta)
     save_tasks(data)
 
     msg = f"{task_id}: {old_status} -> superseded"
@@ -3254,14 +3345,36 @@ def reopen_workflow(workflow_id):
         )
         sys.exit(2)
 
+    store = _get_store()
+    if not store.get_workflow(workflow_id):
+        wf_record = dict(entry)
+        wf_record.setdefault("workflow_id", workflow_id)
+        store.save_workflow(wf_record)
+
+    try:
+        from herdr import kernel
+        kernel.transition_workflow(
+            workflow_id=workflow_id,
+            to_status="in_progress",
+            reason="workflow_reopened",
+            source="herdr-task",
+            metadata={"suppress_auto_close": True, "reopened_at": _now()},
+        )
+    except Exception:
+        pass
+
     entry["status"] = "in_progress"
     entry["suppress_auto_close"] = True
     entry["reopened_at"] = _now()
-
-    tmp = WORKFLOWS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, WORKFLOWS_FILE)
+    entry.setdefault("workflow_id", workflow_id)
+    store.save_workflow(entry)
+    try:
+        tmp = WORKFLOWS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, WORKFLOWS_FILE)
+    except Exception:
+        pass
 
     stage_reset(workflow_id)
 

@@ -29,7 +29,7 @@
 
 | 您的工作目标 | 必须优先阅读的页面 | 核心关联源码 |
 | :--- | :--- | :--- |
-| **修改任务状态流转或添加新状态** | [[task-lifecycle]] | `bin/herdr-task:TRANSITIONS` |
+| **修改任务状态流转或添加新状态** | [[task-lifecycle]] | `herdr/transitions.py`, `herdr/kernel.py:transition_task/workflow` |
 | **修改任务/工作流收尾、清理 pane 或 clone** | [[task-lifecycle]] §5 | `bin/herdr-task:finalize_task`, `close_workflow` |
 | **新增/调整工作流模板或 DAG 调度算法** | [[dag-workflow-engine]] | `herdr/workflow.py` |
 | **修改 Agent 分配算法、优先级或并发锁** | [[agent-routing-and-pools]] | `herdr/agent_router.py` |
@@ -41,7 +41,7 @@
 | **工位实时打断与插话纠偏 (Steering Mesh & AgentAdapter)** | [[task-lifecycle]] | `herdr/steering.py`, `herdr/agent_adapter.py`, `bin/herdr-task:steer/adapters` |
 | **白盒遥测、语义提炼与产物投影 (Projection Engine)** | [[task-lifecycle]] | `herdr/projection.py`, `console/herdr_factory_console.py` |
 | **通用配置驱动与受控 MCP 生态容器 (Dynamic Config & MCP Mesh)** | [[dag-workflow-engine]] | `herdr/mcp.py`, `herdr/workflow.py` |
-| **嵌入式状态引擎、统一事件流、检查点快照与时间旅行分叉 (StateStore, WorkflowEvent & Checkpoint Store V2)** | [[task-lifecycle]], [[domain-model]] | `herdr/state_store.py`, `herdr/state_db.py`, `herdr/kernel.py`, `bin/herdr-task` |
+| **状态流转网关、嵌入式状态引擎、统一事件流、检查点快照 (State Transition Gateway, StateStore, WorkflowEvent & Checkpoint Store)** | [[task-lifecycle]], [[domain-model]] | `herdr/transitions.py`, `herdr/kernel.py`, `herdr/state_store.py`, `herdr/state_db.py`, `bin/herdr-task` |
 | **更新或扩展 Wiki 本身** | [[WIKI]] / [[log]] | `wiki/WIKI.md` |
 
 ---

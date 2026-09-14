@@ -103,6 +103,58 @@ def collect_downstream_nodes(nodes_by_id: Dict[str, Dict[str, Any]], root_id: st
 
 
 # ============================================================
+# 0. State Transition Gateway
+# ============================================================
+
+def transition_task(
+    task_id: str,
+    to_status: str,
+    reason: str,
+    source: str = "system",
+    metadata: Optional[Dict[str, Any]] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """State Transition Gateway: Atomically transition task status and append WorkflowEvent."""
+    store = get_state_store()
+    res = store.transition_task(
+        task_id=task_id,
+        to_status=to_status,
+        reason=reason,
+        source=source,
+        metadata=metadata,
+        force=force,
+    )
+    tasks_file = get_tasks_file()
+    if tasks_file.parent.exists():
+        _atomic_write_json(tasks_file, store.export_tasks_json())
+    return res
+
+
+def transition_workflow(
+    workflow_id: str,
+    to_status: str,
+    reason: str,
+    source: str = "system",
+    metadata: Optional[Dict[str, Any]] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """State Transition Gateway: Atomically transition workflow status and append WorkflowEvent."""
+    store = get_state_store()
+    res = store.transition_workflow(
+        workflow_id=workflow_id,
+        to_status=to_status,
+        reason=reason,
+        source=source,
+        metadata=metadata,
+        force=force,
+    )
+    wf_file = get_workflows_file()
+    if wf_file.parent.exists():
+        _atomic_write_json(wf_file, store.export_workflows_json())
+    return res
+
+
+# ============================================================
 # 1. Pause & Resume Primitives
 # ============================================================
 
@@ -128,8 +180,12 @@ def pause_workflow(workflow_id: str, node_id: Optional[str] = None) -> Dict[str,
             "paused_nodes": paused_nodes,
         }
 
-    target["status"] = "paused"
-    save_workflows_data(data)
+    res = transition_workflow(
+        workflow_id=workflow_id,
+        to_status="paused",
+        reason="pause_workflow",
+        source="kernel",
+    )
     return {
         "ok": True,
         "workflow_id": workflow_id,
@@ -159,13 +215,18 @@ def resume_workflow(workflow_id: str, node_id: Optional[str] = None) -> Dict[str
             "paused_nodes": paused_nodes,
         }
 
-    target["status"] = "running"
-    save_workflows_data(data)
+    res = transition_workflow(
+        workflow_id=workflow_id,
+        to_status="running",
+        reason="resume_workflow",
+        source="kernel",
+    )
     return {
         "ok": True,
         "workflow_id": workflow_id,
         "status": "running",
     }
+
 
 
 # ============================================================
@@ -255,15 +316,16 @@ def rollback_workflow(
         task_node = task.get("node") or task.get("stage")
         if task_node not in affected_nodes:
             continue
-        if task.get("status") == "superseded":
-            continue
-
-        task["status"] = "superseded"
-        task["superseded_reason"] = f"rollback to {target_node_id}: {reason}"
-        task["updated_at"] = time.time()
-        invalidated.append(task.get("task_id"))
-
-    save_tasks_data(tasks_data)
+        tid = task.get("task_id")
+        transition_task(
+            task_id=tid,
+            to_status="superseded",
+            reason=f"rollback to {target_node_id}: {reason}",
+            source="kernel_rollback",
+            metadata={"superseded_reason": f"rollback to {target_node_id}: {reason}"},
+            force=True,
+        )
+        invalidated.append(tid)
 
     # Clean up stage advance locks in workflow entry and stage-state.json
     advances = dict(wf_entry.get("stage_advancing") or {})

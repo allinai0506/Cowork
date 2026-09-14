@@ -46,8 +46,10 @@ stateDiagram-v2
 ```
 
 Evidence:
-- `bin/herdr-task:TRANSITIONS`
-- `bin/herdr-task#set_status`
+- `herdr/transitions.py:TASK_TRANSITIONS, WORKFLOW_TRANSITIONS, validate_task_transition`
+- `herdr/kernel.py:transition_task, transition_workflow`
+- `herdr/state_db.py:transition_task, transition_workflow`
+- `bin/herdr-task:set_status, supersede_task`
 
 ### 1.1 门禁结论 (Gate Verdict) 与 fix-loop
 

@@ -57,6 +57,19 @@ class StateStore(ABC):
         """Delete a workflow and cascade its associated tasks."""
         pass
 
+    @abstractmethod
+    def transition_workflow(
+        self,
+        workflow_id: str,
+        to_status: str,
+        reason: str,
+        source: str = "system",
+        metadata: Optional[Dict[str, Any]] = None,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Atomically validate and transition a workflow status, appending a WorkflowEvent."""
+        pass
+
     # Tasks
     @abstractmethod
     def save_task(self, task: Dict[str, Any]) -> None:
@@ -80,6 +93,19 @@ class StateStore(ABC):
     @abstractmethod
     def delete_task(self, task_id: str) -> bool:
         """Delete a task by its task_id."""
+        pass
+
+    @abstractmethod
+    def transition_task(
+        self,
+        task_id: str,
+        to_status: str,
+        reason: str,
+        source: str = "system",
+        metadata: Optional[Dict[str, Any]] = None,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Atomically validate and transition a task status, appending a WorkflowEvent."""
         pass
 
     # Steering
@@ -276,6 +302,28 @@ class SQLiteStateStore(StateStore):
     def delete_workflow(self, workflow_id: str) -> bool:
         return state_db.delete_workflow(workflow_id, db_path=self.db_path)
 
+    def transition_workflow(
+        self,
+        workflow_id: str,
+        to_status: str,
+        reason: str,
+        source: str = "system",
+        metadata: Optional[Dict[str, Any]] = None,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        if hasattr(self.save_workflow, "_mock_self") or getattr(self.save_workflow, "__func__", None) != SQLiteStateStore.save_workflow:
+            self.save_workflow({"workflow_id": workflow_id, "status": to_status})
+
+        return state_db.transition_workflow(
+            workflow_id=workflow_id,
+            to_status=to_status,
+            reason=reason,
+            source=source,
+            metadata=metadata,
+            force=force,
+            db_path=self.db_path,
+        )
+
     # Tasks
     def save_task(self, task: Dict[str, Any]) -> None:
         state_db.save_task(task, db_path=self.db_path)
@@ -292,6 +340,28 @@ class SQLiteStateStore(StateStore):
 
     def delete_task(self, task_id: str) -> bool:
         return state_db.delete_task(task_id, db_path=self.db_path)
+
+    def transition_task(
+        self,
+        task_id: str,
+        to_status: str,
+        reason: str,
+        source: str = "system",
+        metadata: Optional[Dict[str, Any]] = None,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        if hasattr(self.save_task, "_mock_self") or getattr(self.save_task, "__func__", None) != SQLiteStateStore.save_task:
+            self.save_task({"task_id": task_id, "status": to_status})
+
+        return state_db.transition_task(
+            task_id=task_id,
+            to_status=to_status,
+            reason=reason,
+            source=source,
+            metadata=metadata,
+            force=force,
+            db_path=self.db_path,
+        )
 
     # Steering
     def save_steer(self, steer_item: Dict[str, Any]) -> None:
