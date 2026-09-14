@@ -707,5 +707,110 @@ class TestStateTransitionGateway:
         t_after_sentinel = store.get_task("t-fc-01")
         assert t_after_sentinel["status"] == "dispatched"
 
+    def test_close_workflow_fails_closed_on_pending_or_paused_without_force(self, clean_store):
+        store, db_path, tmp_path = clean_store
+        import importlib.machinery
+        import importlib.util
+        from herdr.transitions import InvalidTransitionError
+
+        def _load_src_module(name, path):
+            loader = importlib.machinery.SourceFileLoader(name, str(path))
+            spec = importlib.util.spec_from_loader(name, loader)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+
+        ht_path = Path(__file__).resolve().parent.parent / "bin" / "herdr-task"
+        ht_mod = _load_src_module("herdr_task_close_test", ht_path)
+        ht_mod.TASKS_FILE = str(tmp_path / "tasks.json")
+        ht_mod.WORKFLOWS_FILE = str(tmp_path / "workflows.json")
+
+        wf = {
+            "workflow_id": "wf-close-gate",
+            "project_id": "p-1",
+            "status": "pending",
+        }
+        store.save_workflow(wf)
+
+        # 1. Calling close_workflow without force on pending workflow MUST fail closed
+        with pytest.raises(InvalidTransitionError):
+            ht_mod.close_workflow("wf-close-gate", force=False)
+
+        assert store.get_workflow("wf-close-gate")["status"] == "pending"
+
+        # 2. Calling with force=True succeeds and marks completed
+        report = ht_mod.close_workflow("wf-close-gate", force=True)
+        assert report["workflow_id"] == "wf-close-gate"
+        assert store.get_workflow("wf-close-gate")["status"] == "completed"
+
+        events = store.list_events(workflow_id="wf-close-gate", event_type="workflow_transition")
+        assert len(events) == 1
+        assert events[0]["payload"]["forced"] is True
+        assert events[0]["payload"]["to_status"] == "completed"
+
+    def test_load_tasks_never_resurrects_deleted_tasks_from_json(self, clean_store):
+        store, db_path, tmp_path = clean_store
+        import importlib.machinery
+        import importlib.util
+
+        def _load_src_module(name, path):
+            loader = importlib.machinery.SourceFileLoader(name, str(path))
+            spec = importlib.util.spec_from_loader(name, loader)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+
+        ht_path = Path(__file__).resolve().parent.parent / "bin" / "herdr-task"
+        ht_mod = _load_src_module("herdr_task_resurrect_test", ht_path)
+        ht_mod.TASKS_FILE = str(tmp_path / "tasks.json")
+        ht_mod.WORKFLOWS_FILE = str(tmp_path / "workflows.json")
+
+        task = {
+            "task_id": "t-ghost",
+            "workflow_id": "wf-ghost",
+            "status": "completed",
+        }
+        store.save_task(task)
+
+        # Sync to json
+        ht_mod.save_tasks({"tasks": [task]})
+        assert (tmp_path / "tasks.json").exists()
+
+        # Delete from SQLite directly
+        store.delete_task("t-ghost")
+        assert store.get_task("t-ghost") is None
+
+        # load_tasks() MUST NOT resurrect t-ghost back into SQLite!
+        loaded = ht_mod.load_tasks()
+        assert loaded["tasks"] == []
+        assert store.get_task("t-ghost") is None
+
+    def test_projection_sync_locked_reexport(self, clean_store):
+        store, db_path, tmp_path = clean_store
+        from herdr.state_store import sync_tasks_projection, sync_workflows_projection
+
+        t_file = tmp_path / "tasks.json"
+        w_file = tmp_path / "workflows.json"
+
+        # Initially write items
+        store.save_task({"task_id": "t-lock-1", "workflow_id": "wf-lock", "status": "dispatched"})
+        store.save_workflow({"workflow_id": "wf-lock", "status": "running"})
+
+        sync_tasks_projection(store=store, tasks_file=t_file)
+        sync_workflows_projection(store=store, wf_file=w_file)
+
+        assert t_file.exists()
+        assert w_file.exists()
+        lock_t = tmp_path / ".tasks.json.lock"
+        lock_w = tmp_path / ".workflows.json.lock"
+        assert lock_t.exists()
+        assert lock_w.exists()
+
+        with open(t_file, "r", encoding="utf-8") as f:
+            t_data = json.load(f)
+        assert len(t_data["tasks"]) == 1
+        assert t_data["tasks"][0]["task_id"] == "t-lock-1"
+
+
 
 

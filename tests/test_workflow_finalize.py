@@ -63,6 +63,14 @@ class FinalizeTestBase(unittest.TestCase):
         ]
 
     def tearDown(self):
+        try:
+            store = _ht._get_store()
+            for t in store.list_tasks():
+                store.delete_task(t["task_id"])
+            for w in store.list_workflows():
+                store.delete_workflow(w["workflow_id"])
+        except Exception:
+            pass
         self.tmp.cleanup()
 
     # -- helpers ---------------------------------------------------------
@@ -70,16 +78,35 @@ class FinalizeTestBase(unittest.TestCase):
     def _write_tasks(self, tasks):
         with open(self.tasks_file, "w", encoding="utf-8") as f:
             json.dump({"tasks": tasks}, f)
+        store = _ht._get_store()
+        for t in store.list_tasks():
+            store.delete_task(t["task_id"])
+        for t in tasks:
+            store.save_task(t)
 
     def _read_tasks(self):
+        store = _ht._get_store()
+        tasks = store.list_tasks()
+        if tasks:
+            return tasks
         with open(self.tasks_file, "r", encoding="utf-8") as f:
             return json.load(f)["tasks"]
 
     def _write_workflows(self, entries):
+        for wid, entry in entries.items():
+            entry.setdefault("workflow_id", wid)
+            entry.setdefault("status", "running")
         with open(self.workflows_file, "w", encoding="utf-8") as f:
             json.dump({"workflows": entries}, f)
+        store = _ht._get_store()
+        for wid, entry in entries.items():
+            store.save_workflow(entry)
 
     def _read_workflows(self):
+        store = _ht._get_store()
+        wfs = {w["workflow_id"]: w for w in store.list_workflows()}
+        if wfs:
+            return wfs
         with open(self.workflows_file, "r", encoding="utf-8") as f:
             return json.load(f)["workflows"]
 
@@ -330,7 +357,7 @@ class TestCloseWorkflow(FinalizeTestBase):
         self.assertEqual(ctx.exception.code, 2)
         self._assert_no_herdr_calls()
         self.assertEqual(
-            self._read_workflows()["wf-test"].get("status"), None)
+            self._read_workflows()["wf-test"].get("status"), "running")
 
     def test_full_close_retains_failed_and_never_touches_coordinator(self):
         tasks = [
@@ -398,7 +425,7 @@ class TestCloseWorkflow(FinalizeTestBase):
             [],
         )
         self.assertEqual(
-            self._read_workflows()["wf-test"].get("status"), None)
+            self._read_workflows()["wf-test"].get("status"), "running")
         with open(self.stage_state_file, "r", encoding="utf-8") as f:
             state = json.load(f)
         self.assertIn("wf-test:requirements", state)

@@ -27,7 +27,11 @@ try:
     from herdr.workflow import find_node, normalize_workflow
     from herdr.topology import ensure_stage_topology
     from herdr.agent_binary import resolve_binary
-    from herdr.state_store import get_state_store
+    from herdr.state_store import (
+        get_state_store,
+        sync_tasks_projection,
+        sync_workflows_projection,
+    )
 except ImportError:
     from herdr_pane_pool import acquire_pane_for_task
     from herdr_agent_router import choose_agent, release_agent_reservation
@@ -42,7 +46,11 @@ except ImportError:
     from herdr_workflow import find_node, normalize_workflow
     from herdr_topology import ensure_stage_topology
     from herdr_agent_binary import resolve_binary
-    from herdr_state_store import get_state_store
+    from herdr_state_store import (
+        get_state_store,
+        sync_tasks_projection,
+        sync_workflows_projection,
+    )
 
 TASKS_FILE = os.environ.get("TASKS_FILE") or os.path.expanduser("~/.herdr-controller/tasks.json")
 WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE") or os.path.expanduser("~/.herdr-controller/workflow.json")
@@ -1073,21 +1081,7 @@ def _get_store():
 
 def load_tasks():
     store = _get_store()
-    tasks = store.list_tasks()
-    if not tasks:
-        t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
-        if t_file and os.path.exists(t_file):
-            try:
-                with open(t_file, "r", encoding="utf-8") as f:
-                    file_tasks = json.load(f).get("tasks", [])
-                if file_tasks:
-                    for t in file_tasks:
-                        if t.get("task_id"):
-                            store.save_task(t)
-                    tasks = store.list_tasks()
-            except Exception:
-                pass
-    return {"tasks": tasks}
+    return {"tasks": store.list_tasks()}
 
 
 def save_tasks(data):
@@ -1097,21 +1091,8 @@ def save_tasks(data):
             store.save_task(t)
 
     # Sync backward-compatible JSON mirror (SQLite -> JSON only)
-    try:
-        tasks_dir = os.path.dirname(TASKS_FILE)
-        if tasks_dir and not os.path.exists(tasks_dir):
-            os.makedirs(tasks_dir, exist_ok=True)
-        tmp = TASKS_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(
-                data,
-                f,
-                ensure_ascii=False,
-                indent=2
-            )
-        os.replace(tmp, TASKS_FILE)
-    except OSError:
-        pass
+    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+    sync_tasks_projection(store=store, tasks_file=Path(t_file) if t_file else None)
 
 
 def find_task(data, task_id):
@@ -1214,8 +1195,6 @@ def set_status(task_id, new_status, verdict=None, note=None):
             if note:
                 metadata["stage_verdict_note"] = note
             store = _get_store()
-            if not store.get_task(task_id):
-                store.save_task(task)
             try:
                 from herdr import kernel
                 kernel.transition_task(
@@ -1231,14 +1210,7 @@ def set_status(task_id, new_status, verdict=None, note=None):
                 sys.exit(2)
 
             t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
-            if t_file:
-                try:
-                    tmp = str(t_file) + ".tmp"
-                    with open(tmp, "w", encoding="utf-8") as f:
-                        json.dump(store.export_tasks_json(), f, ensure_ascii=False, indent=2)
-                    os.replace(tmp, str(t_file))
-                except Exception:
-                    pass
+            sync_tasks_projection(store=store, tasks_file=Path(t_file) if t_file else None)
 
             print(f"{task_id}: already {new_status}; verdict/note updated")
             return
@@ -1260,9 +1232,6 @@ def set_status(task_id, new_status, verdict=None, note=None):
         metadata["stage_verdict_note"] = note
 
     store = _get_store()
-    if not store.get_task(task_id):
-        store.save_task(task)
-
     try:
         from herdr import kernel
         res = kernel.transition_task(
@@ -1278,14 +1247,7 @@ def set_status(task_id, new_status, verdict=None, note=None):
         sys.exit(2)
 
     t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
-    if t_file:
-        try:
-            tmp = str(t_file) + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(store.export_tasks_json(), f, ensure_ascii=False, indent=2)
-            os.replace(tmp, str(t_file))
-        except Exception:
-            pass
+    sync_tasks_projection(store=store, tasks_file=Path(t_file) if t_file else None)
 
     if new_status in ACTIVE_TASK_STATUSES:
         _clear_suppress_auto_close(task.get("workflow_id") or res.get("workflow_id"))
@@ -2762,45 +2724,18 @@ def finalize_task(task_id, force=False, purge_clones=False):
 
 
 def _load_workflow_entry(workflow_id):
-    wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE
     store = _get_store()
     wf = store.get_workflow(workflow_id)
-    if wf:
-        return wf, {workflow_id: wf}
-    if not os.path.exists(wf_file):
-        return None, {}
-    try:
-        with open(wf_file, "r", encoding="utf-8") as f:
-            entries = json.load(f).get("workflows", {})
-    except (json.JSONDecodeError, OSError):
-        return None, {}
-    entry = entries.get(workflow_id)
-    if entry:
-        rec = dict(entry)
-        rec.setdefault("workflow_id", workflow_id)
-        store.save_workflow(rec)
-    return entry, entries
+    all_wfs = {w["workflow_id"]: w for w in store.list_workflows() if w.get("workflow_id")}
+    return wf, all_wfs
 
 
-def _mark_workflow_completed(workflow_id, outcome="delivered"):
+def _mark_workflow_completed(workflow_id, outcome="delivered", force=False):
     store = _get_store()
-    entry, entries = _load_workflow_entry(workflow_id)
+    entry, _ = _load_workflow_entry(workflow_id)
     if entry is None:
-        wf = store.get_workflow(workflow_id)
-        if wf is None:
-            print(f"[WORKFLOW RECORD] no entry for {workflow_id}; skip marking")
-            return
-        entry = dict(wf)
-        entries = {workflow_id: entry}
-
-    if not store.get_workflow(workflow_id):
-        wf_record = dict(entry)
-        wf_record.setdefault("workflow_id", workflow_id)
-        store.save_workflow(wf_record)
-
-    cur_wf = store.get_workflow(workflow_id)
-    cur_status = cur_wf.get("status") if cur_wf else (entry or {}).get("status")
-    force_transition = cur_status not in ("running", "in_progress")
+        print(f"[WORKFLOW RECORD] no entry for {workflow_id}; skip marking")
+        return
 
     try:
         from herdr import kernel
@@ -2810,7 +2745,7 @@ def _mark_workflow_completed(workflow_id, outcome="delivered"):
             reason=f"workflow_completed: {outcome}",
             source="herdr-task",
             metadata={"outcome": outcome, "completed_at": _now()},
-            force=force_transition,
+            force=force,
             store=store,
         )
     except Exception as exc:
@@ -2818,14 +2753,7 @@ def _mark_workflow_completed(workflow_id, outcome="delivered"):
         raise
 
     wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE
-    if wf_file:
-        try:
-            tmp = str(wf_file) + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(store.export_workflows_json(), f, ensure_ascii=False, indent=2)
-            os.replace(tmp, str(wf_file))
-        except Exception:
-            pass
+    sync_workflows_projection(store=store, wf_file=Path(wf_file) if wf_file else None)
 
 
 def _workflow_stage_tabs(workflow_id, tasks):
@@ -2958,6 +2886,7 @@ def close_workflow(
     purge_clones=False,
     dry_run=False,
     abandon=False,
+    force=False,
 ):
     data = load_tasks()
     tasks = [
@@ -2974,7 +2903,7 @@ def close_workflow(
         # 视为平凡完成,仅做登记与状态清理。
         print(f"[CLOSE REPORT] workflow={workflow_id} (no tasks)")
         if not dry_run:
-            _mark_workflow_completed(workflow_id)
+            _mark_workflow_completed(workflow_id, force=force)
             stage_reset(workflow_id)
             print(f"[WORKFLOW CLOSED] {workflow_id}")
         else:
@@ -3075,6 +3004,7 @@ def close_workflow(
         _mark_workflow_completed(
             workflow_id,
             outcome="abandoned" if abandon else "delivered",
+            force=force,
         )
         stage_reset(workflow_id)
 
@@ -3246,9 +3176,6 @@ def supersede_task(task_id, new_task_id=None, reason=None):
         meta["supersede_reason"] = reason
 
     store = _get_store()
-    if not store.get_task(task_id):
-        store.save_task(task)
-
     try:
         from herdr import kernel
         kernel.transition_task(
@@ -3264,14 +3191,7 @@ def supersede_task(task_id, new_task_id=None, reason=None):
         sys.exit(2)
 
     t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
-    if t_file:
-        try:
-            tmp = str(t_file) + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(store.export_tasks_json(), f, ensure_ascii=False, indent=2)
-            os.replace(tmp, str(t_file))
-        except Exception:
-            pass
+    sync_tasks_projection(store=store, tasks_file=Path(t_file) if t_file else None)
 
     msg = f"{task_id}: {old_status} -> superseded"
     if new_task_id:
@@ -3321,17 +3241,16 @@ def _clear_suppress_auto_close(workflow_id):
     if not workflow_id:
         return
 
-    entry, entries = _load_workflow_entry(workflow_id)
-
+    store = _get_store()
+    entry = store.get_workflow(workflow_id)
     if entry is None or not entry.get("suppress_auto_close"):
         return
 
     entry.pop("suppress_auto_close", None)
+    store.save_workflow(entry)
 
-    tmp = WORKFLOWS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, WORKFLOWS_FILE)
+    wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE
+    sync_workflows_projection(store=store, wf_file=Path(wf_file) if wf_file else None)
 
     print(f"[AUTO-CLOSE LATCH CLEARED] workflow={workflow_id}")
 
@@ -3391,11 +3310,6 @@ def reopen_workflow(workflow_id):
         sys.exit(2)
 
     store = _get_store()
-    if not store.get_workflow(workflow_id):
-        wf_record = dict(entry)
-        wf_record.setdefault("workflow_id", workflow_id)
-        store.save_workflow(wf_record)
-
     try:
         from herdr import kernel
         kernel.transition_workflow(
@@ -3411,14 +3325,7 @@ def reopen_workflow(workflow_id):
         sys.exit(2)
 
     wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE
-    if wf_file:
-        try:
-            tmp = str(wf_file) + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(store.export_workflows_json(), f, ensure_ascii=False, indent=2)
-            os.replace(tmp, str(wf_file))
-        except Exception:
-            pass
+    sync_workflows_projection(store=store, wf_file=Path(wf_file) if wf_file else None)
 
     stage_reset(workflow_id)
 
@@ -3658,6 +3565,11 @@ def main():
         help="explicitly abandon a workflow whose gate verdicts are blocked "
              "(records outcome=abandoned; never triggered automatically)",
     )
+    close_wf.add_argument(
+        "--force",
+        action="store_true",
+        help="force close workflow bypassing normal status transition checks",
+    )
 
     reopen_wf = sub.add_parser("reopen-workflow")
     reopen_wf.add_argument("workflow_id")
@@ -3826,6 +3738,7 @@ def main():
             purge_clones=args.purge_clones,
             dry_run=args.dry_run,
             abandon=args.abandon,
+            force=args.force,
         )
 
     elif args.command == "reopen-workflow":

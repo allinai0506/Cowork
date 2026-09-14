@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import fcntl
 from . import state_db
 
 
@@ -31,6 +32,57 @@ def _atomic_write_json(file_path: Path, data: Any) -> None:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp_path, file_path)
+
+
+def _sync_projection_locked(file_path: Path, export_fn) -> None:
+    if not file_path.parent.exists():
+        try:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
+    lock_path = file_path.parent / f".{file_path.name}.lock"
+    try:
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                # Re-export strictly AFTER acquiring lock to guarantee snapshot freshness
+                data = export_fn()
+                _atomic_write_json(file_path, data)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+    except Exception:
+        pass
+
+
+def sync_tasks_projection(store: Optional["StateStore"] = None, tasks_file: Optional[Path] = None) -> None:
+    """Safely synchronize SQLite tasks into tasks.json under cross-process lock."""
+    s = store or get_state_store()
+    target_file = (
+        Path(tasks_file)
+        if tasks_file
+        else (getattr(s, "db_path", None).parent / "tasks.json" if getattr(s, "db_path", None) else None)
+    )
+    if not target_file:
+        env_file = os.environ.get("TASKS_FILE")
+        target_file = Path(env_file) if env_file else state_db.CONTROLLER_DIR / "tasks.json"
+    _sync_projection_locked(target_file, s.export_tasks_json)
+
+
+def sync_workflows_projection(store: Optional["StateStore"] = None, wf_file: Optional[Path] = None) -> None:
+    """Safely synchronize SQLite workflows into workflows.json under cross-process lock."""
+    s = store or get_state_store()
+    target_file = (
+        Path(wf_file)
+        if wf_file
+        else (getattr(s, "db_path", None).parent / "workflows.json" if getattr(s, "db_path", None) else None)
+    )
+    if not target_file:
+        env_file = os.environ.get("WORKFLOWS_FILE")
+        target_file = Path(env_file) if env_file else state_db.CONTROLLER_DIR / "workflows.json"
+    _sync_projection_locked(target_file, s.export_workflows_json)
 
 
 class StateStore(ABC):

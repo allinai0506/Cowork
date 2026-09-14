@@ -1583,14 +1583,14 @@ pytest -q
 
 ---
 
-## 36. Kernel State Transition Gateway：状态变迁与事件流的单一事务收敛，及过渡期文件 Mock 的双向同步保障
+## 36. Kernel State Transition Gateway：状态变迁与事件流的单一事务收敛，及单向投影与严格单一事实源原则
 
 ### 问题背景
 
 在引入控制原语与 StateStore 统一事实源后，运行时仍有多处组件（`herdr-task` CLI、`herdr-factory`、`services/herdr-sentinel.py`、`herdr/steering.py`）直接修改 `task["status"]` 或 `workflow["status"]`。这种分散的状态突变导致：
 1. 状态跃迁不受约束，非法跃迁（如从 `pending` 跳跃至 `completed`）无法被统一拦截；
 2. 状态变迁与 `WorkflowEvent` 事件流脱节，事件审计流遗漏了最核心的生命周期事件；
-3. 在由文件投影向 SQLite 迁移的过渡期中，部分历史测试用例通过 monkeypatch 仅 mock 了 `_ht.WORKFLOWS_FILE` 或 `TASKS_FILE` 的临时 JSON 文件，未预置 SQLite 记录。若 Gateway 仅操作 SQLite 而忽略了旧文件投影的动态重写，会导致测试出现观测断层与裂脑断言失败。
+3. 过渡期曾试图在运行时保留 JSON 反向倒灌 SQLite 以适配未初始化 DB 的旧测试，破坏了 SQLite 作为唯一事实源（Single Source of Truth）的原则，并引发跨进程写覆盖竞态。
 
 ### 经验教训
 
@@ -1598,9 +1598,9 @@ pytest -q
 |---|---|---|
 | **状态修改入口分散且缺乏约束** | 状态机逻辑若散落在各 CLI 与守护进程中，规则修改极易遗漏，非法跳转无法自证 | 建立 Functional Core（`herdr/transitions.py`）集中管理状态矩阵与纯校验逻辑，严禁各模块手写内联 transitions 字典 |
 | **状态落库与事件追加脱节** | 状态写完了但事件写入失败，或者事件写入成功但状态未持久化，导致状态快照与事件重放流不一致 | 在 `state_db.py` 中将状态持久化与 `record_event(..., conn=conn)` 收敛在同一个 SQLite `BEGIN IMMEDIATE` 事务内，强保原子性 |
-| **幂等自流转与管理员逃生口缺失** | 真实业务常有重复 set 同一状态（如补传 verdict note）或紧急故障逃生需求，若一律死板抛出非法转移会卡死生产运维 | 转移矩阵显式允许 `old_status == new_status` 幂等通过；提供 `force=True` 参数，且在 WorkflowEvent 元数据中显式记录 `forced: True` |
-| **单向写 SQLite 导致测试 Mock 文件断层** | 过渡期测试直接检查 mock 后的 `workflows.json`，若 Gateway 成功更新 SQLite 但跳过了 mock 文件同步，测试会报旧状态未变 | 在 CLI 与 Gateway 适配层中，先将文件 mock 中的孤立记录同步至 StateStore，并在事务成功后双向同步更新当前活跃的文件句柄 |
-| **异常静默吞没隐藏真实根因** | 在调用 Gateway 时若随意 `except Exception: pass` 吞掉合法性校验错误，会掩盖非法转移并继续执行旧的非法逻辑 | 非法转移（`InvalidTransitionError`）必须坚决抛出或在 CLI 明确打印并以约定退出码（exit 2）退出；仅在特定兼容 fallback 下容错底层存储不可用 |
+| **严格单一事实源与防止测试倒灌生产** | 曾试图在生产读取代码中保留 JSON 倒灌 SQLite 以适应未初始化 DB 的旧测试，导致幽灵任务复活与事实源裂脑 | 绝不因为测试 fixture 遗留而在生产代码中开 JSON 倒灌口；测试必须显式通过 StateStore 预置基准；JSON 投影由 `sync_*_projection` 基于 `fcntl.flock` 跨进程锁单向覆写 |
+| **正常业务逻辑严禁滥用 `force=True`** | 在完成工作流等正常操作中曾盲目使用 `force=True` 绕过状态机，导致 `pending`/`paused` 等非运行态非法跳到 `completed` | 业务流转必须走合法路径（`running`/`in_progress` -> `completed`）；`force=True` 仅保留给管理员显式指定 `--force` 参数以逃生故障 |
+| **异常静默吞没隐藏真实根因** | 在调用 Gateway 时若随意 `except Exception: pass` 吞掉合法性校验错误，会掩盖非法转移并继续执行旧的非法逻辑 | 非法转移（`InvalidTransitionError`）必须坚决抛出或在 CLI 明确打印并以约定退出码（exit 2）退出；严禁捕获异常后继续执行旧有旁路覆写 |
 
 ### 操作规范
 
@@ -1612,17 +1612,19 @@ pytest -q
 3. **全量上游与控制原语改造**：
    - `kernel.pause_workflow()`、`kernel.resume_workflow()`、`kernel.rollback_workflow()` 统一通过 Gateway 推进状态；
    - `bin/herdr-task`（`set`、`supersede`、`_mark_workflow_completed`、`reopen_workflow`）、`bin/herdr-factory`（`_update_workflow_status`）、`services/herdr-sentinel.py`（看门狗超时）、`herdr/steering.py`（紧急中断与 halt）全量收敛至 Gateway。
-4. **CLI 行为与兼容性 100% 保持**：
+4. **单向跨进程锁定投影同步**：
+   - 所有兼容性 JSON 导出（`tasks.json` / `workflows.json`）通过 `sync_tasks_projection` / `sync_workflows_projection` 统一在 `.{filename}.lock` 排他锁内从 SQLite 最新状态重导出后原子写入，杜绝旧快照覆盖更新。
+5. **CLI 行为与门禁自闭环**：
    - `herdr-task set <task> <status>` 遇未知任务/状态保持 exit 1，遇非法转移保持 exit 2；
-   - 历史文件投影（`tasks.json` / `workflows.json`）在网关每次更新后原子性同步导出。
+   - `herdr-task close-workflow` 默认只允许 `running`/`in_progress` 正常流转至 `completed`，非运行态必须显式加 `--force` 才能完成。
 
 ### 验证命令 / 证据
 
 ```bash
-# 1. Gateway 契约测试（14 项：纯规则、非法拒绝、事务回滚、Admin force、事件流产生、CLI 集成）
+# 1. Gateway 契约与对抗性测试（22 项：规则、非法拒绝、事务回滚、Admin force、事件流、Fail-Closed、防倒灌、投影锁）
 pytest tests/test_state_transition_gateway.py -v
 
-# 2. 全仓 404 项自动化测试全量回归
+# 2. 全仓 409 项自动化测试全量回归
 pytest -q
 
 # 3. 生产服务体检

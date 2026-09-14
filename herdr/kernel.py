@@ -18,7 +18,12 @@ from typing import Any, Dict, List, Optional, Set
 
 from . import workflow
 from . import state_db
-from .state_store import get_state_store, StateStore
+from .state_store import (
+    get_state_store,
+    StateStore,
+    sync_tasks_projection,
+    sync_workflows_projection,
+)
 
 
 HOME = Path.home()
@@ -82,8 +87,7 @@ def save_workflows_data(data: Dict[str, Any], store: Optional[StateStore] = None
         wf.setdefault("workflow_id", wid)
         s.save_workflow(wf)
     wf_file = getattr(s, "db_path", None).parent / "workflows.json" if getattr(s, "db_path", None) else get_workflows_file()
-    if wf_file.parent.exists():
-        _atomic_write_json(wf_file, data)
+    sync_workflows_projection(store=s, wf_file=wf_file)
 
 
 def load_tasks_data(store: Optional[StateStore] = None) -> Dict[str, Any]:
@@ -99,8 +103,7 @@ def save_tasks_data(data: Dict[str, Any], store: Optional[StateStore] = None) ->
         if t.get("task_id") and t.get("workflow_id"):
             s.save_task(t)
     tasks_file = getattr(s, "db_path", None).parent / "tasks.json" if getattr(s, "db_path", None) else get_tasks_file()
-    if tasks_file.parent.exists():
-        _atomic_write_json(tasks_file, data)
+    sync_tasks_projection(store=s, tasks_file=tasks_file)
 
 
 
@@ -145,16 +148,8 @@ def transition_task(
         metadata=metadata,
         force=force,
     )
-    try:
-        tasks_file = (
-            getattr(s, "db_path", None).parent / "tasks.json"
-            if getattr(s, "db_path", None)
-            else get_tasks_file()
-        )
-        if tasks_file.parent.exists():
-            _atomic_write_json(tasks_file, s.export_tasks_json())
-    except Exception:
-        pass
+    tasks_file = getattr(s, "db_path", None).parent / "tasks.json" if getattr(s, "db_path", None) else get_tasks_file()
+    sync_tasks_projection(store=s, tasks_file=tasks_file)
     return res
 
 
@@ -177,16 +172,8 @@ def transition_workflow(
         metadata=metadata,
         force=force,
     )
-    try:
-        wf_file = (
-            getattr(s, "db_path", None).parent / "workflows.json"
-            if getattr(s, "db_path", None)
-            else get_workflows_file()
-        )
-        if wf_file.parent.exists():
-            _atomic_write_json(wf_file, s.export_workflows_json())
-    except Exception:
-        pass
+    wf_file = getattr(s, "db_path", None).parent / "workflows.json" if getattr(s, "db_path", None) else get_workflows_file()
+    sync_workflows_projection(store=s, wf_file=wf_file)
     return res
 
 
@@ -404,7 +391,7 @@ def rollback_workflow(
         "timestamp": time.time(),
     })
     wf_entry["history"] = history
-    save_workflows_data(wf_data)
+    save_workflows_data(wf_data, store=store)
 
     return {
         "ok": True,
