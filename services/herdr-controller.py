@@ -66,34 +66,8 @@ def _get_store():
     return get_state_store()
 
 
-def _sync_missing_workflows_into_store(store):
-    try:
-        wf_file = Path(globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE)
-        if wf_file.exists():
-            with open(wf_file, "r", encoding="utf-8") as f:
-                disk_data = json.load(f)
-            if isinstance(disk_data, dict):
-                raw = disk_data.get("workflows", {})
-                if isinstance(raw, dict):
-                    items = list(raw.items())
-                elif isinstance(raw, list):
-                    items = [(w.get("workflow_id"), w) for w in raw if isinstance(w, dict) and w.get("workflow_id")]
-                else:
-                    items = []
-                for wid, wf in items:
-                    if isinstance(wf, dict):
-                        wf.setdefault("workflow_id", wid)
-                        existing = store.get_workflow(wid)
-                        is_placeholder = bool(existing and existing.get("status") == "unknown" and not existing.get("project_id"))
-                        if not existing or is_placeholder:
-                            store.save_workflow(wf)
-    except Exception:
-        pass
-
-
 def _workflow_entry(workflow_id):
     store = _get_store()
-    _sync_missing_workflows_into_store(store)
     wf = store.get_workflow(workflow_id)
     if wf:
         return wf
@@ -474,32 +448,12 @@ def _workflow_dispatch_lock(workflow_id: str) -> threading.Lock:
 
 def load_tasks():
     store = _get_store()
-    if os.path.exists(TASKS_FILE):
-        try:
-            with open(TASKS_FILE, "r", encoding="utf-8") as f:
-                disk_data = json.load(f)
-            if isinstance(disk_data, dict):
-                for t in disk_data.get("tasks", []):
-                    tid = t.get("task_id")
-                    if tid and not store.get_task(tid):
-                        store.save_task(t)
-        except Exception:
-            pass
     return store.list_tasks()
 
 
 def get_task(task_id):
-    try:
-        store = _get_store()
-        t = store.get_task(task_id)
-        if t:
-            return t
-    except Exception:
-        pass
-    for task in load_tasks():
-        if task.get("task_id") == task_id:
-            return task
-    return None
+    store = _get_store()
+    return store.get_task(task_id)
 
 
 def set_task_status(task_id, status):
@@ -938,25 +892,10 @@ def check_workflow_stage_advance(workflow_id):
 def active_registered_workflows():
     workflows = set()
     store = _get_store()
-    _sync_missing_workflows_into_store(store)
     for wf in store.list_workflows():
         wid = wf.get("workflow_id")
         if wid and wf.get("status") != "completed":
             workflows.add(wid)
-
-    proj_path = Path(os.path.expanduser("~/.herdr-controller/projects.json"))
-    if proj_path.exists():
-        try:
-            p_data = json.loads(proj_path.read_text(encoding="utf-8"))
-            for p in p_data.get("projects", {}).values():
-                wf = p.get("workflow_id")
-                if wf:
-                    rec = store.get_workflow(wf)
-                    if not rec or rec.get("status") != "completed":
-                        workflows.add(wf)
-        except Exception:
-            pass
-
     return workflows
 
 

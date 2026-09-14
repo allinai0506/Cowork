@@ -124,26 +124,8 @@ def _sync_missing_tasks_into_store(store):
         pass
 
 
-def _sync_missing_workflows_into_store(store):
-    try:
-        wf_file = Path(globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE)
-        if wf_file.exists():
-            disk_data = _load(wf_file, {})
-            if isinstance(disk_data, dict):
-                for wid, wf in disk_data.get("workflows", {}).items():
-                    if isinstance(wf, dict):
-                        wf.setdefault("workflow_id", wid)
-                        existing = store.get_workflow(wid)
-                        is_placeholder = bool(existing and existing.get("status") == "unknown" and not existing.get("project_id"))
-                        if not existing or is_placeholder:
-                            store.save_workflow(wf)
-    except Exception:
-        pass
-
-
 def workflow_record(workflow_id):
     store = _get_store()
-    _sync_missing_workflows_into_store(store)
     wf = store.get_workflow(workflow_id)
     if wf and not (wf.get("status") == "unknown" and not wf.get("project_id")):
         return wf
@@ -152,7 +134,6 @@ def workflow_record(workflow_id):
 
 def set_workflow_agent_override(workflow_id, agent):
     store = _get_store()
-    _sync_missing_workflows_into_store(store)
     record = store.get_workflow(workflow_id)
     if not record:
         return
@@ -252,10 +233,16 @@ def choose_agent(
     requested="auto",
     reservation_key=None,
 ):
-    record = workflow_record(workflow_id)
-    project_id = record.get("project_id")
-
-    if not project_id:
+    if workflow_id:
+        record = workflow_record(workflow_id)
+        project_id = record.get("project_id")
+        if not project_id:
+            raise RuntimeError(
+                f"Workflow not found in authoritative StateStore: {workflow_id}"
+            )
+    else:
+        record = {}
+        project_id = None
         return requested if requested and requested != "auto" else "opencode"
 
     node_policy = {}

@@ -170,26 +170,8 @@ def _get_store():
     return get_state_store()
 
 
-def _sync_missing_workflows_into_store(store):
-    try:
-        wf_file = Path(globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE)
-        if wf_file.exists():
-            disk_data = _load(wf_file, {})
-            if isinstance(disk_data, dict):
-                for wid, wf in disk_data.get("workflows", {}).items():
-                    if isinstance(wf, dict):
-                        wf.setdefault("workflow_id", wid)
-                        existing = store.get_workflow(wid)
-                        is_placeholder = bool(existing and existing.get("status") == "unknown" and not existing.get("project_id"))
-                        if not existing or is_placeholder:
-                            store.save_workflow(wf)
-    except Exception:
-        pass
-
-
 def load_workflows():
     store = _get_store()
-    _sync_missing_workflows_into_store(store)
     return store.export_workflows_json()
 
 
@@ -207,7 +189,6 @@ TERMINAL_WORKFLOW_STATUSES = {"completed"}
 def active_workflows_for_project(project_id):
     """Registry entries of project_id that have not reached a terminal status."""
     store = _get_store()
-    _sync_missing_workflows_into_store(store)
     return [
         entry
         for entry in store.list_workflows()
@@ -218,7 +199,6 @@ def active_workflows_for_project(project_id):
 
 def non_terminal_workflow_ids():
     store = _get_store()
-    _sync_missing_workflows_into_store(store)
     return {
         entry["workflow_id"]
         for entry in store.list_workflows()
@@ -260,7 +240,6 @@ def project_by_root(root):
 
 def project_for_workflow(workflow_id):
     store = _get_store()
-    _sync_missing_workflows_into_store(store)
     record = store.get_workflow(workflow_id)
     if record and not (record.get("status") == "unknown" and not record.get("project_id")):
         return record
@@ -336,7 +315,6 @@ def generate_workflow_id(project, prefix="wf", now=None):
     # Scan existing workflows in registry to find next sequence number
     existing_seqs = []
     store = _get_store()
-    _sync_missing_workflows_into_store(store)
     workflows = {w["workflow_id"]: w for w in store.list_workflows() if w.get("workflow_id")}
     for wid in workflows:
         if wid.startswith(expected_prefix):

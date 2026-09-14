@@ -141,6 +141,13 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     """)
 
     # Indexes for fast lookup and DAG queries
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+    """)
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_wf ON tasks(workflow_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_wf_created ON checkpoints(workflow_id, created_at DESC);")
@@ -148,6 +155,56 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_wf ON events(workflow_id, timestamp);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_task ON steering_items(task_id, status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_hist_task ON steering_history(task_id, timestamp);")
+
+    # One-time bootstrap migration if initializing an empty DB where legacy JSON exists
+    cur = conn.execute("SELECT value FROM schema_meta WHERE key = 'v1_migration_done';")
+    if not cur.fetchone():
+        try:
+            target_dir = Path(path_key).parent
+            wf_file = target_dir / "workflows.json"
+            tasks_file = target_dir / "tasks.json"
+            st_file = target_dir / "steering.json"
+
+            if wf_file.exists():
+                try:
+                    data = json.loads(wf_file.read_text(encoding="utf-8"))
+                    for wid, wf_obj in data.get("workflows", {}).items():
+                        if isinstance(wf_obj, dict):
+                            wf_obj.setdefault("workflow_id", wid)
+                            save_workflow(wf_obj, db_path=None, conn=conn)
+                except Exception:
+                    pass
+
+            if tasks_file.exists():
+                try:
+                    data = json.loads(tasks_file.read_text(encoding="utf-8"))
+                    for t_obj in data.get("tasks", []):
+                        if isinstance(t_obj, dict) and t_obj.get("task_id"):
+                            save_task(t_obj, db_path=None, conn=conn)
+                except Exception:
+                    pass
+
+            if st_file.exists():
+                try:
+                    s_data = json.loads(st_file.read_text(encoding="utf-8"))
+                    for tid, q in s_data.get("steering_queues", {}).items():
+                        for s_item in q:
+                            s_item.setdefault("task_id", tid)
+                            save_steer(s_item, conn=conn)
+                    for h in s_data.get("history", []):
+                        record_steering_history(h, conn=conn)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            conn.execute("""
+                INSERT INTO schema_meta (key, value) VALUES ('v1_migration_done', '1')
+                ON CONFLICT(key) DO UPDATE SET value = '1';
+            """)
+        except Exception:
+            pass
 
     _INITIALIZED_DBS.add(path_key)
 
@@ -614,9 +671,13 @@ def update_steer_status(
 def record_steering_history(
     record: Dict[str, Any],
     db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> None:
     """Record a steering audit/action entry."""
-    conn = get_db_connection(db_path)
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
     try:
         now = float(record.get("timestamp") or time.time())
         action = record.get("action", "unknown")
@@ -637,7 +698,8 @@ def record_steering_history(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
         """, (action, task_id, steer_id, instruction, operator, urgent, reason, now, payload_json))
     finally:
-        conn.close()
+        if should_close:
+            conn.close()
 
 
 def list_steering_history(

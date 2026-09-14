@@ -355,11 +355,18 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 沉淀并归档通用工程教训 §31（工作流抗停滞自愈、CoW沙盒纯净隔离与总指挥主动干预）；
   - 全仓自动化回归测试通过。
 
-## [2026-09-14] feat | Critical Control Reads Fail Closed & Read Fallback Elimination
-- **核心控制读取链路 Fail-Closed 终极收口**：
-  - **路由决策收口 (`herdr/agent_router.py`)**：`workflow_record()`、`_clean_reservations()` 与 `_active_agent_loads()` 彻底废除对 `workflows.json` 与 `tasks.json` 的异常降级读取，底层 StateStore 异常直接抛出阻断，杜绝陈旧数据导致错误调度；
-  - **项目与生命周期收口 (`herdr/projects.py`)**：`load_workflows()`、`active_workflows_for_project()`、`non_terminal_workflow_ids()`、`project_for_workflow()` 与 `generate_workflow_id()` 严禁吞异常回退到 `workflows.json`，彻底切断已结案工作流在读取故障时被陈旧 JSON 复活的幽灵推进链路；
-  - **调度协调看门狗收口 (`services/herdr-controller.py`)**：`_workflow_entry()` 与 `active_registered_workflows()` 全面基于 StateStore 读取，移除对 `WORKFLOWS_FILE` 的直接 open 回退；
-  - **新增专项对抗测试套件 (`tests/test_critical_reads_fail_closed.py`)**：9 项测试覆盖 StateStore 模拟抛出 `sqlite3.OperationalError` 时所有核心控制读取函数均 Fail Closed 抛出异常；
-  - **沉淀并归档通用工程教训 §32**（核心控制读取 Fail-Closed 铁律）；
-  - 全仓自动化回归测试达 360 项（100% 绿灯全部通过）。
+## [2026-09-14] feat | Critical Control Reads Fail Closed & Authoritative StateStore Freeze
+- **核心控制读取链路 Fail-Closed 终极收口与事实源彻底冻结**：
+  - **根除自动冷导入导致的工作流“起死回生” (`herdr/agent_router.py`, `herdr/projects.py`, `services/herdr-controller.py`, `herdr/state_db.py`)**：
+    - 彻底废除 `workflow_record()`、`active_workflows_for_project()`、`_workflow_entry()`、`load_workflows()` 等读链路上的 `_sync_missing_workflows_into_store` 旁路扫描；
+    - 数据库底层在 `_ensure_schema` 中引入 `schema_meta` (`v1_migration_done`) 表，仅在空库初建时执行一次性 bootstrap 导入遗留文件，正常运行时永远只读写 SQLite；严禁被删除或不存在的 Workflow 被旧 JSON 重新写回 SQLite；
+  - **路由决策未注册工作流 Fail-Closed (`herdr/agent_router.py`)**：
+    - `choose_agent()` 显式增加对 `workflow_id` 的存在性校验：当指定了 `workflow_id` 但在 StateStore 查无记录时，立即抛出 `RuntimeError("Workflow not found in authoritative StateStore: ...")`，杜绝静默兜底到 `"opencode"` 绕过项目池黑名单、健康准入与并发预占；仅限未指定 `workflow_id` 的独立任务走默认代理；
+    - `_clean_reservations()` 与 `_active_agent_loads()` 彻底废除对 `workflows.json` 与 `tasks.json` 的异常降级读取，底层 StateStore 异常直接抛出阻断；
+  - **调度协调看门狗与事实源纯化 (`services/herdr-controller.py`)**：
+    - `_workflow_entry()` 仅查询 StateStore，移除任何磁盘扫描；
+    - `active_registered_workflows()` 100% 仅源自 `store.list_workflows()`，彻底移除从 `~/.herdr-controller/projects.json` 注入 `wf` 的逻辑，杜绝 Ghost Workflow；
+  - **新增专项对抗测试套件 (`tests/test_critical_reads_fail_closed.py`)**：
+    - 13 项测试全面覆盖：9 项模拟 `sqlite3.OperationalError` 时的 Fail-Closed 异常阻断，Test A 验证陈旧 JSON 绝不复活已删除/不存在的 Workflow，Test B 验证未注册 Workflow 调用 `choose_agent` 抛出 `RuntimeError`，Test C 验证 `projects.json` 注入的 Ghost 工作流被 100% 过滤，Test D 验证一次性 bootstrap 迁移与后续持久隔离；
+  - **沉淀并归档通用工程教训 §32**（核心控制读取 Fail-Closed 铁律与单事实源冻结）；
+  - 全仓自动化回归测试达 364 项（100% 绿灯全部通过）。

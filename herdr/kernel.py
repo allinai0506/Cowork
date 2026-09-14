@@ -49,22 +49,21 @@ def _atomic_write_json(file_path: Path, data: Any) -> None:
     os.replace(tmp_path, file_path)
 
 
-def _import_missing_workflows_from_disk(store: StateStore) -> None:
+def load_workflows_data() -> Dict[str, Any]:
+    """Load workflows via StateStore (single source of truth)."""
+    store = get_state_store()
+    return store.export_workflows_json()
+
+
+def save_workflows_data(data: Dict[str, Any]) -> None:
+    """Save workflows into StateStore and sync compatibility JSON."""
+    store = get_state_store()
+    for wid, wf in (data.get("workflows") or {}).items():
+        wf.setdefault("workflow_id", wid)
+        store.save_workflow(wf)
     wf_file = get_workflows_file()
-    if wf_file.exists():
-        try:
-            with open(wf_file, "r", encoding="utf-8") as f:
-                disk_data = json.load(f)
-            if isinstance(disk_data, dict):
-                for wid, wf in disk_data.get("workflows", {}).items():
-                    wf.setdefault("workflow_id", wid)
-                    existing = store.get_workflow(wid)
-                    is_placeholder = bool(existing and existing.get("status") == "unknown" and not existing.get("project_id"))
-                    if not existing or is_placeholder:
-                        # Import missing workflows or replace auto-generated FK stubs; true SQLite records are authoritative
-                        store.save_workflow(wf)
-        except Exception:
-            pass
+    if wf_file.parent.exists():
+        _atomic_write_json(wf_file, data)
 
 
 def _import_missing_tasks_from_disk(store: StateStore) -> None:
@@ -81,24 +80,6 @@ def _import_missing_tasks_from_disk(store: StateStore) -> None:
                         store.save_task(t)
         except Exception:
             pass
-
-
-def load_workflows_data() -> Dict[str, Any]:
-    """Load workflows via StateStore (single source of truth)."""
-    store = get_state_store()
-    _import_missing_workflows_from_disk(store)
-    return store.export_workflows_json()
-
-
-def save_workflows_data(data: Dict[str, Any]) -> None:
-    """Save workflows into StateStore and sync compatibility JSON."""
-    store = get_state_store()
-    for wid, wf in (data.get("workflows") or {}).items():
-        wf.setdefault("workflow_id", wid)
-        store.save_workflow(wf)
-    wf_file = get_workflows_file()
-    if wf_file.parent.exists():
-        _atomic_write_json(wf_file, data)
 
 
 def load_tasks_data() -> Dict[str, Any]:
@@ -423,8 +404,6 @@ def create_checkpoint(
 ) -> Dict[str, Any]:
     """Capture a durable point-in-time snapshot of the workflow and its tasks via StateStore."""
     store = get_state_store()
-    _import_missing_workflows_from_disk(store)
-    _import_missing_tasks_from_disk(store)
 
     wf_entry = store.get_workflow(workflow_id)
     if not wf_entry:
