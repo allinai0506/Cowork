@@ -77,7 +77,7 @@ herdr/
    - 重启并热加载后台守护进程，保证 Controller、Sentinel、Notifier 正常运转。
 
 4. **规范标准配置文件**
-   - 建立 [pyproject.toml](file:///Users/user/herdr/pyproject.toml)，配置包元数据与 `pytest` 自动发现规则。
+   - 建立 [pyproject.toml](file:///Users/user/HAFlow/pyproject.toml)，配置包元数据与 `pytest` 自动发现规则。
    - 规整 `.gitignore`，将历史临时备份文件统一归置在 `backups/` 目录下，根目录保持极致清爽。
 
 ---

@@ -23,7 +23,7 @@ class EvaluatorTest(unittest.TestCase):
     def test_parse_pytest_output_success(self):
         output = """
 ============================= test session starts ==============================
-rootdir: /Users/user/herdr
+rootdir: /Users/user/HAFlow
 collected 5 items
 
 test_sample.py .....                                                     [100%]

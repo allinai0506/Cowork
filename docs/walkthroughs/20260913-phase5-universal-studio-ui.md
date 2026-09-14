@@ -6,13 +6,13 @@
 
 | 能力 / 组件 | 实现位置 | 接口形态 (CLI / API / UI) | 验证状态 |
 |------------|---------|--------------------------|---------|
-| **注意力中枢与告警横幅 (Attention Hub)** | [`console/herdr_factory_console.py`](file:///Users/user/herdr/console/herdr_factory_console.py) | `#attentionHub`<br>聚合待拍板、需关注与执行中状态，降噪 90% | ✅ 100% 通过 |
-| **任务四态认知减负过滤器 (Task Filters)** | [`console/herdr_factory_console.py`](file:///Users/user/herdr/console/herdr_factory_console.py) | `#taskFilters` (`#fAll`, `#fDecision`, `#fAttention`, `#fActive`)<br>`setTaskFilter` 动态过滤 | ✅ 100% 通过 |
-| **成果会签后端服务接口 (Signoff API)** | [`console/herdr_factory_console.py`](file:///Users/user/herdr/console/herdr_factory_console.py) | `POST /api/task/signoff`<br>联动 `force_pass_gate` 与 `rollback_workflow` | ✅ 100% 通过 |
-| **沉浸式成果会签室 (Signoff Chamber)** | [`console/herdr_factory_console.py`](file:///Users/user/herdr/console/herdr_factory_console.py) | `openSignoffChamber`<br>产物清单审阅、一键批准、结构化意见驳回 | ✅ 100% 通过 |
-| **折叠式物理抽屉 (Deep Drawer)** | [`console/herdr_factory_console.py`](file:///Users/user/herdr/console/herdr_factory_console.py) | `#deepDrawer`<br>底部常驻收纳条、实时终端、控制器日志、遥测投影 | ✅ 100% 通过 |
-| **端到端测试与质量门禁** | [`tests/test_console_signoff_api.py`](file:///Users/user/herdr/tests/test_console_signoff_api.py)<br>[`tests/test_console_frontend_syntax.py`](file:///Users/user/herdr/tests/test_console_frontend_syntax.py) | 单元与集成测试、Node 脚本编译校验、WCAG 无障碍契约 | ✅ 100% 通过 |
-| **控制台生产环境同步部署** | [`scripts/install-herdr-console.sh`](file:///Users/user/herdr/scripts/install-herdr-console.sh) | 同步部署至 `~/.herdr-console` | ✅ 100% 通过 |
+| **注意力中枢与告警横幅 (Attention Hub)** | [`console/herdr_factory_console.py`](file:///Users/user/HAFlow/console/herdr_factory_console.py) | `#attentionHub`<br>聚合待拍板、需关注与执行中状态，降噪 90% | ✅ 100% 通过 |
+| **任务四态认知减负过滤器 (Task Filters)** | [`console/herdr_factory_console.py`](file:///Users/user/HAFlow/console/herdr_factory_console.py) | `#taskFilters` (`#fAll`, `#fDecision`, `#fAttention`, `#fActive`)<br>`setTaskFilter` 动态过滤 | ✅ 100% 通过 |
+| **成果会签后端服务接口 (Signoff API)** | [`console/herdr_factory_console.py`](file:///Users/user/HAFlow/console/herdr_factory_console.py) | `POST /api/task/signoff`<br>联动 `force_pass_gate` 与 `rollback_workflow` | ✅ 100% 通过 |
+| **沉浸式成果会签室 (Signoff Chamber)** | [`console/herdr_factory_console.py`](file:///Users/user/HAFlow/console/herdr_factory_console.py) | `openSignoffChamber`<br>产物清单审阅、一键批准、结构化意见驳回 | ✅ 100% 通过 |
+| **折叠式物理抽屉 (Deep Drawer)** | [`console/herdr_factory_console.py`](file:///Users/user/HAFlow/console/herdr_factory_console.py) | `#deepDrawer`<br>底部常驻收纳条、实时终端、控制器日志、遥测投影 | ✅ 100% 通过 |
+| **端到端测试与质量门禁** | [`tests/test_console_signoff_api.py`](file:///Users/user/HAFlow/tests/test_console_signoff_api.py)<br>[`tests/test_console_frontend_syntax.py`](file:///Users/user/HAFlow/tests/test_console_frontend_syntax.py) | 单元与集成测试、Node 脚本编译校验、WCAG 无障碍契约 | ✅ 100% 通过 |
+| **控制台生产环境同步部署** | [`scripts/install-herdr-console.sh`](file:///Users/user/HAFlow/scripts/install-herdr-console.sh) | 同步部署至 `~/.herdr-console` | ✅ 100% 通过 |
 
 ---
 

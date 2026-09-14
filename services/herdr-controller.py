@@ -18,7 +18,7 @@ if str(HERDR_ROOT) not in sys.path:
 SOCKET_PATH = os.path.expanduser("~/.config/herdr/herdr.sock")
 TASKS_FILE = os.environ.get("TASKS_FILE") or os.path.expanduser("~/.herdr-controller/tasks.json")
 _task_bin = HERDR_ROOT / "bin" / "herdr-task"
-TASK_MANAGER = str(_task_bin) if _task_bin.exists() else os.path.expanduser("~/herdr/bin/herdr-task")
+TASK_MANAGER = str(_task_bin) if _task_bin.exists() else os.path.expanduser("~/HAFlow/bin/herdr-task")
 try:
     from herdr.projects import (
         project_for_workflow,
@@ -1015,8 +1015,8 @@ Agent 本轮执行已经结束。
 1. 使用 Herdr 读取 {task['pane_id']} 的最终输出。
 
 2. 必须执行基线验证与量化指标核验：
-   ~/herdr/bin/herdr-task verify-baseline {task_id}
-   ~/herdr/bin/herdr-task verify-metrics {task_id} --if-present
+   ~/HAFlow/bin/herdr-task verify-baseline {task_id}
+   ~/HAFlow/bin/herdr-task verify-metrics {task_id} --if-present
 
 3. `verify-baseline` 是判断当前 Task 文件变化的唯一事实来源：
 
@@ -1029,23 +1029,23 @@ Agent 本轮执行已经结束。
 4. 验收决策指引（严禁混淆）：
 
    A. 验收通过（所有标准满足、测试绿灯）：
-      ~/herdr/bin/herdr-task set {task_id} completed --verdict pass
+      ~/HAFlow/bin/herdr-task set {task_id} completed --verdict pass
 
    B. 发现代码缺陷需回炉（特别是 test / review 阶段查出问题）：
       **严禁对评审/测试任务执行 set rework！**
       必须以 blocked 结论闭环，Controller 会自动触发跨阶段回流并作废受影响链条：
-      ~/herdr/bin/herdr-task set {task_id} completed --verdict blocked --note "<blocker 清单与修复指引>"
+      ~/HAFlow/bin/herdr-task set {task_id} completed --verdict blocked --note "<blocker 清单与修复指引>"
 
    C. 仅当当前任务自身未完成（如实现中途卡死、需在同一工位继续补全）：
-      ~/herdr/bin/herdr-task set {task_id} rework
+      ~/HAFlow/bin/herdr-task set {task_id} rework
       然后使用 herdr agent prompt 继续下发指令。
 
    D. 如果任务发生不可恢复的崩溃：
-      ~/herdr/bin/herdr-task set {task_id} failed
+      ~/HAFlow/bin/herdr-task set {task_id} failed
 
 阶段推进前必须执行：
 
-~/herdr/bin/herdr-task list --workflow-id {workflow_id}
+~/HAFlow/bin/herdr-task list --workflow-id {workflow_id}
 
 只能检查当前 workflow_id 下的任务。
 禁止使用其他 Workflow 或历史 Task 判断当前阶段门禁。
@@ -1150,7 +1150,7 @@ agent: {task.get('agent', 'unknown')}
 1. 读取 Task Registry。
 2. 读取 Agent 最终输出。
 3. 执行：
-   ~/herdr/bin/herdr-task verify-baseline {task_id}
+   ~/HAFlow/bin/herdr-task verify-baseline {task_id}
 4. 根据任务目标和验收标准完成正式验收。
 5. 必须将 Task 状态更新为以下之一：
    - completed（门禁阶段必须带 --verdict pass|blocked，blocked 另附 --note）
@@ -1428,7 +1428,7 @@ Blocker 清单(blocked 结论与修复指引):
 
 你现在只需派发修复 Task(禁止新建 workflow、禁止放弃本 workflow):
 
-~/herdr/bin/herdr-task launch --workflow-id {workflow_id} --stage {retry_node} \\
+~/HAFlow/bin/herdr-task launch --workflow-id {workflow_id} --stage {retry_node} \\
   {onto_flag}--agent auto --task-type fix \\
   --goal "修复 gate {gate_stage} 的阻断项" \\
   --acceptance "<逐条对应 Blocker 清单>" \\
@@ -1674,7 +1674,7 @@ task_type:
 
 1. 首先执行：
 
-   ~/herdr/bin/herdr-task list --workflow-id {workflow_id}
+   ~/HAFlow/bin/herdr-task list --workflow-id {workflow_id}
 
    阅读当前 Workflow 已完成节点的真实成果。
 
@@ -1698,7 +1698,7 @@ task_type:
 
 5. 创建 Task 必须使用：
 
-   ~/herdr/bin/herdr-task launch
+   ~/HAFlow/bin/herdr-task launch
 
    并指定：
 

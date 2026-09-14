@@ -485,7 +485,7 @@ Qoder 产品目录** `~/.qoder`（其二进制 strings 仅含 `.qoder`，无 `.q
 2. QoderCN 的 herdr 集成以 `~/.qoder-cn` 为准；任何人再跑
    `herdr integration install qodercli` 会装回 `~/.qoder`，必须重做迁移
    （步骤见 walkthrough）。
-3. 验证钩子必须在受信任目录内起真实 agent（`--cwd ~/herdr` 或
+3. 验证钩子必须在受信任目录内起真实 agent（`--cwd ~/HAFlow` 或
    `~/.herdr-controller/clones/*`），以
    `herdr agent list` 中 `agent_session.source=="herdr:qodercli"` 为准。
 4. 检测别名收敛用本地覆盖 `~/.config/herdr/agent-detection/qodercli.toml`
@@ -887,9 +887,9 @@ python3 services/herdr-notifier.py --test
 
 ### 相关文档 / 关联证据
 
-- 实现文件：[`services/herdr-notifier.py`](file:///Users/user/herdr/services/herdr-notifier.py)、[`console/herdr_factory_console.py`](file:///Users/user/herdr/console/herdr_factory_console.py)
-- 测试文件：[`tests/test_herdr_notifier.py`](file:///Users/user/herdr/tests/test_herdr_notifier.py)、[`tests/test_console_deep_link.py`](file:///Users/user/herdr/tests/test_console_deep_link.py)
-- 知识库演进记录：[`wiki/architecture.md`](file:///Users/user/herdr/wiki/architecture.md)、[`wiki/log.md`](file:///Users/user/herdr/wiki/log.md)
+- 实现文件：[`services/herdr-notifier.py`](file:///Users/user/HAFlow/services/herdr-notifier.py)、[`console/herdr_factory_console.py`](file:///Users/user/HAFlow/console/herdr_factory_console.py)
+- 测试文件：[`tests/test_herdr_notifier.py`](file:///Users/user/HAFlow/tests/test_herdr_notifier.py)、[`tests/test_console_deep_link.py`](file:///Users/user/HAFlow/tests/test_console_deep_link.py)
+- 知识库演进记录：[`wiki/architecture.md`](file:///Users/user/HAFlow/wiki/architecture.md)、[`wiki/log.md`](file:///Users/user/HAFlow/wiki/log.md)
 
 ---
 

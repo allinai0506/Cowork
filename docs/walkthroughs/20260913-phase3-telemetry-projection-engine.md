@@ -6,13 +6,13 @@
 
 | 能力 / 机制 | 实现位置 | 接口形态 (CLI / API / UI) | 验证状态 |
 |------------|---------|--------------------------|---------|
-| **终端噪声清洗 (ANSI Stripper)** | [`herdr/projection.py`](file:///Users/user/herdr/herdr/projection.py) | `strip_ansi_codes`<br>纯标准库正则流式过滤 CSI/OSC/光标 | ✅ 100% 通过 |
-| **高阶意图跟踪 (Intent Tracking)** | [`herdr/projection.py`](file:///Users/user/herdr/herdr/projection.py) | `extract_task_intent`<br>4 级优雅降级策略提炼语义意图 | ✅ 100% 通过 |
-| **动态路标进度 (Milestones)** | [`herdr/projection.py`](file:///Users/user/herdr/herdr/projection.py) | `extract_task_milestones`<br>4 阶段生命周期路标与状态投影 | ✅ 100% 通过 |
-| **交付产物第一公民 (Artifacts)** | [`herdr/projection.py`](file:///Users/user/herdr/herdr/projection.py) | `collect_task_artifacts`<br>自动归集 Git 变更、评分报告与设计文档 | ✅ 100% 通过 |
-| **卡点求助告警 (Blockers)** | [`herdr/projection.py`](file:///Users/user/herdr/herdr/projection.py) | `extract_task_blockers`<br>智能模式匹配编译错误与依赖缺失 | ✅ 100% 通过 |
-| **CLI 投射子命令** | [`bin/herdr-task`](file:///Users/user/herdr/bin/herdr-task) | `herdr-task project <id>`<br>`herdr-task artifacts <id>` | ✅ 100% 通过 |
-| **控制台白盒简报卡片与 REST API** | [`console/herdr_factory_console.py`](file:///Users/user/herdr/console/herdr_factory_console.py) | `GET /api/task/projection`<br>`GET /api/workflow/projection`<br>任务详情白盒弹窗 | ✅ 100% 通过 |
+| **终端噪声清洗 (ANSI Stripper)** | [`herdr/projection.py`](file:///Users/user/HAFlow/herdr/projection.py) | `strip_ansi_codes`<br>纯标准库正则流式过滤 CSI/OSC/光标 | ✅ 100% 通过 |
+| **高阶意图跟踪 (Intent Tracking)** | [`herdr/projection.py`](file:///Users/user/HAFlow/herdr/projection.py) | `extract_task_intent`<br>4 级优雅降级策略提炼语义意图 | ✅ 100% 通过 |
+| **动态路标进度 (Milestones)** | [`herdr/projection.py`](file:///Users/user/HAFlow/herdr/projection.py) | `extract_task_milestones`<br>4 阶段生命周期路标与状态投影 | ✅ 100% 通过 |
+| **交付产物第一公民 (Artifacts)** | [`herdr/projection.py`](file:///Users/user/HAFlow/herdr/projection.py) | `collect_task_artifacts`<br>自动归集 Git 变更、评分报告与设计文档 | ✅ 100% 通过 |
+| **卡点求助告警 (Blockers)** | [`herdr/projection.py`](file:///Users/user/HAFlow/herdr/projection.py) | `extract_task_blockers`<br>智能模式匹配编译错误与依赖缺失 | ✅ 100% 通过 |
+| **CLI 投射子命令** | [`bin/herdr-task`](file:///Users/user/HAFlow/bin/herdr-task) | `herdr-task project <id>`<br>`herdr-task artifacts <id>` | ✅ 100% 通过 |
+| **控制台白盒简报卡片与 REST API** | [`console/herdr_factory_console.py`](file:///Users/user/HAFlow/console/herdr_factory_console.py) | `GET /api/task/projection`<br>`GET /api/workflow/projection`<br>任务详情白盒弹窗 | ✅ 100% 通过 |
 
 ---
 

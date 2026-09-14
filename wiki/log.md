@@ -305,7 +305,7 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 
 ## [2026-09-13] docs | Upgraded Project Standard Workflow to /unified-dev-flow (S0–S8)
 - **废除旧四阶段作业法，全面拥抱 `/unified-dev-flow` 统一研发流程**：
-  - 在 [`RULES.md`](file:///Users/user/herdr/RULES.md) §1 正式确立策略驱动的 S0–S8 全生命周期研发规范；
+  - 在 [`RULES.md`](file:///Users/user/HAFlow/RULES.md) §1 正式确立策略驱动的 S0–S8 全生命周期研发规范；
   - 明确九大核心不变量（断点优先、读懂再写、意图定基线、复杂度定规划、风险度定质检、单一控制权、改动即失效、无铁证不宣称完成、交付不越权）；
   - 强化 S0 启动前置门禁：远端代码拉取同步与 CoW (Copy-on-Write) 沙盒隔离建支（一等公民准则）；
   - 规范 S6 审查修复闭环（S6 ➔ S4 ➔ S5 ➔ S6，3 轮熔断机制）与 S8 知识沉淀机制。

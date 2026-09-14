@@ -58,7 +58,7 @@ qodercli agent 从上线起就没有 `agent_session` 上报；同时 herdr 检�
 - `herdr agent explain wA:p2A`：manifest 指向本地覆盖文件；
 - 上报链路：对已注册 agent 的 pane 手动触发钩子 →
   `agent_session.source="herdr:qodercli"` 立即出现；
-- **端到端**：在受信任目录（`--cwd /Users/user/herdr`）按工厂同款命令
+- **端到端**：在受信任目录（`--cwd /Users/user/HAFlow`）按工厂同款命令
   `herdr agent start --kind qodercli -- --dangerously-skip-permissions` 起真实
   agent → `agent_session.value="012cff74-…"`（真实 CN CLI 会话 id），修复前该字段
   对 qodercli 从未出现过。pane 终端标题 `◇ Qoder CLI CN | Ready` 亦确认产品正确。

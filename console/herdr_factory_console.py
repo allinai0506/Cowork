@@ -12,9 +12,8 @@ def _resolve_herdr_root():
     candidate = Path(__file__).resolve().parent.parent
     if (candidate / "herdr" / "__init__.py").exists() and (candidate / "bin").is_dir():
         return candidate
-    for p in [HOME / "HAFlow", HOME / "herdr"]:
-        if (p / "herdr" / "__init__.py").exists() and (p / "bin").is_dir():
-            return p
+    if (HOME / "HAFlow" / "herdr" / "__init__.py").exists() and (HOME / "HAFlow" / "bin").is_dir():
+        return HOME / "HAFlow"
     return candidate
 HERDR_ROOT=_resolve_herdr_root(); ROOT=HOME/'.herdr-controller'
 sys.path.insert(0, str(HERDR_ROOT))
@@ -445,7 +444,7 @@ def manual_advance(wid):
         else:break
     if not done or not nxt:raise RuntimeError('当前没有可手工推进的下一阶段')
     w=d['workflow']; p=d['project']; c=w.get('coordinator_pane_id')
-    msg=f'''HERDR_FACTORY_CONSOLE_STAGE_ADVANCE\n\nworkflow_id: {wid}\nproject_name: {p.get('project_name')}\nproject_root: {p.get('project_root')}\ncompleted_stage: {done}\nnext_stage: {nxt}\nbase_branch: {w.get('base_branch',p.get('base_branch',''))}\n\n用户点击“进入下一阶段”。请先检查门禁；满足后用 ~/herdr-task.py launch 创建 {nxt} Task，参数必须包含 --workflow-id {wid} --stage {nxt} --source {p.get('project_root')} --agent auto。优先复用 Persistent Pane；不要删除 Tab、Pane、Clone。'''
+    msg=f'''HERDR_FACTORY_CONSOLE_STAGE_ADVANCE\n\nworkflow_id: {wid}\nproject_name: {p.get('project_name')}\nproject_root: {p.get('project_root')}\ncompleted_stage: {done}\nnext_stage: {nxt}\nbase_branch: {w.get('base_branch',p.get('base_branch',''))}\n\n用户点击“进入下一阶段”。请先检查门禁；满足后用 ~/HAFlow/bin/herdr-task launch 创建 {nxt} Task，参数必须包含 --workflow-id {wid} --stage {nxt} --source {p.get('project_root')} --agent auto。优先复用 Persistent Pane；不要删除 Tab、Pane、Clone。'''
     r=run(['herdr','agent','prompt',c,msg,'--wait','--timeout','600000'],620)
     if r.returncode!=0:raise RuntimeError(r.stderr.strip() or r.stdout.strip())
     return {'completed_stage':done,'next_stage':nxt}

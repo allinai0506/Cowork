@@ -125,7 +125,7 @@ Controller  = 后台调度器
 所有自研运行脚本已经统一迁移到：
 
 ```text
-/Users/user/herdr/
+/Users/user/HAFlow/
 ```
 
 这是当前正式 Runtime 目录。
@@ -133,7 +133,7 @@ Controller  = 后台调度器
 主要文件：
 
 ```text
-/Users/user/herdr/
+/Users/user/HAFlow/
 ├── herdr-controller.py
 ├── herdr-notifier.py
 ├── herdr-sentinel.py
@@ -150,14 +150,14 @@ Controller  = 后台调度器
 统一 CLI 入口仍然是：
 
 ```text
-/Users/user/herdr-factory
+/Users/user/HAFlow-factory
 ```
 
 ---
 
 # 4. Git 基线
 
-`/Users/user/herdr` 已经正式 Git 化。
+`/Users/user/HAFlow` 已经正式 Git 化。
 
 当前稳定基线：
 
@@ -364,7 +364,7 @@ com.user.herdr-factory-console
 运行脚本已统一指向：
 
 ```text
-/Users/user/herdr/
+/Users/user/HAFlow/
 ```
 
 验证：
@@ -384,7 +384,7 @@ launchctl print gui/$(id -u)/com.user.herdr-sentinel
 ```bash
 cd /path/to/project
 
-~/herdr-factory run "自然语言需求"
+~/HAFlow-factory run "自然语言需求"
 ```
 
 例如：
@@ -392,31 +392,31 @@ cd /path/to/project
 ```bash
 cd /Users/user/xiyu/xiyu-bid-poc
 
-~/herdr-factory run "分析当前评分标准解析问题并修复最优先的问题"
+~/HAFlow-factory run "分析当前评分标准解析问题并修复最优先的问题"
 ```
 
 查看 Workflow：
 
 ```bash
-~/herdr-factory status <workflow-id>
+~/HAFlow-factory status <workflow-id>
 ```
 
 查看项目：
 
 ```bash
-~/herdr-factory projects
+~/HAFlow-factory projects
 ```
 
 查看 Agent Pool：
 
 ```bash
-~/herdr-factory agents
+~/HAFlow-factory agents
 ```
 
 查看 Persistent Pane：
 
 ```bash
-~/herdr-factory slots
+~/HAFlow-factory slots
 ```
 
 ---
@@ -546,7 +546,7 @@ Task 注册后释放 reservation。
 文件：
 
 ```text
-~/herdr/herdr_preflight.py
+~/HAFlow/bin/herdr-preflight
 ```
 
 检查：
@@ -562,13 +562,13 @@ disabled_agents
 
 ```bash
 cd /Users/user/xiyu/xiyu-bid-poc
-~/herdr/herdr_preflight.py
+~/HAFlow/bin/herdr-preflight
 ```
 
 可以人为禁用 Agent：
 
 ```bash
-~/herdr/herdr_preflight.py --disable pi
+~/HAFlow/bin/herdr-preflight --disable pi
 ```
 
 当前 xiyu-bid-poc：
@@ -586,7 +586,7 @@ pi = DISABLED
 文件：
 
 ```text
-~/herdr/herdr_deep_preflight.py
+~/HAFlow/bin/herdr-deep-preflight
 ```
 
 Deep Preflight 会做真实最小模型调用。
@@ -624,7 +624,7 @@ Agy
 执行：
 
 ```bash
-~/herdr/herdr_deep_preflight.py --deep
+~/HAFlow/bin/herdr-deep-preflight --deep
 ```
 
 可能状态：
@@ -712,7 +712,7 @@ Clone      默认长期保留
 只有显式：
 
 ```bash
-~/herdr/herdr-task.py purge <task-id>
+~/HAFlow/bin/herdr-task purge <task-id>
 ```
 
 才做物理清理。
@@ -863,7 +863,7 @@ untracked files
 验收：
 
 ```bash
-~/herdr/herdr-task.py verify-baseline <task-id>
+~/HAFlow/bin/herdr-task verify-baseline <task-id>
 ```
 
 结果：
@@ -975,7 +975,7 @@ failed
 文件：
 
 ```text
-~/herdr/herdr-sentinel.py
+~/HAFlow/services/herdr-sentinel.py
 ```
 
 用途：
@@ -998,7 +998,7 @@ Sentinel 是异常兜底层。
 文件：
 
 ```text
-~/herdr/herdr-notifier.py
+~/HAFlow/services/herdr-notifier.py
 ```
 
 用于系统级通知：

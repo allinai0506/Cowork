@@ -6,13 +6,13 @@
 
 | 能力 / 机制 | 实现位置 | 接口形态 (CLI / API / UI) | 验证状态 |
 |------------|---------|--------------------------|---------|
-| **动态输入与参数透传 (`inputs`)** | [`herdr/workflow.py`](file:///Users/user/herdr/herdr/workflow.py) | `normalize_workflow`<br>`validate_workflow_dag`<br>支持静态与动态引用 `nodes.<id>` | ✅ 100% 通过 |
-| **Worker 策略与权限沙盒 (`worker_policy`)** | [`herdr/workflow.py`](file:///Users/user/herdr/herdr/workflow.py)<br>[`herdr/mcp.py`](file:///Users/user/herdr/herdr/mcp.py) | 声明 `capabilities` 与 `permissions`<br>`resolve_node_mcp` / `check_node_permissions` | ✅ 100% 通过 |
-| **混合门禁与回退目标 (`gate`)** | [`herdr/workflow.py`](file:///Users/user/herdr/herdr/workflow.py) | `gate: {type, rules, retry_target}`<br>拓扑完整性与回退目标存在性强校验 | ✅ 100% 通过 |
-| **受控 MCP 插件注册与生命周期** | [`herdr/mcp.py`](file:///Users/user/herdr/herdr/mcp.py) | `register_mcp_server`<br>`unregister_mcp_server`<br>`list_mcp_servers` / `get_mcp_server` | ✅ 100% 通过 |
-| **开箱即用内置 MCP 工具集** | [`herdr/mcp.py`](file:///Users/user/herdr/herdr/mcp.py) | 内置 `web_search`, `data_extraction`, `file_system`, `git_tools`, `human_signoff` | ✅ 100% 通过 |
-| **跨领域商业研报模板实操** | [`workflow_templates/business-research-v1.yaml`](file:///Users/user/herdr/workflow_templates/business-research-v1.yaml) | 4 节点跨领域实战编排模板<br>覆盖商业调研全生命周期 | ✅ 100% 通过 |
-| **控制台模板可视化元数据增强** | [`console/herdr_factory_console.py`](file:///Users/user/herdr/console/herdr_factory_console.py) | `showTemplateDAG`<br>展示 Gate 门禁类型与 Policy 权限范围标签 | ✅ 100% 通过 |
+| **动态输入与参数透传 (`inputs`)** | [`herdr/workflow.py`](file:///Users/user/HAFlow/herdr/workflow.py) | `normalize_workflow`<br>`validate_workflow_dag`<br>支持静态与动态引用 `nodes.<id>` | ✅ 100% 通过 |
+| **Worker 策略与权限沙盒 (`worker_policy`)** | [`herdr/workflow.py`](file:///Users/user/HAFlow/herdr/workflow.py)<br>[`herdr/mcp.py`](file:///Users/user/HAFlow/herdr/mcp.py) | 声明 `capabilities` 与 `permissions`<br>`resolve_node_mcp` / `check_node_permissions` | ✅ 100% 通过 |
+| **混合门禁与回退目标 (`gate`)** | [`herdr/workflow.py`](file:///Users/user/HAFlow/herdr/workflow.py) | `gate: {type, rules, retry_target}`<br>拓扑完整性与回退目标存在性强校验 | ✅ 100% 通过 |
+| **受控 MCP 插件注册与生命周期** | [`herdr/mcp.py`](file:///Users/user/HAFlow/herdr/mcp.py) | `register_mcp_server`<br>`unregister_mcp_server`<br>`list_mcp_servers` / `get_mcp_server` | ✅ 100% 通过 |
+| **开箱即用内置 MCP 工具集** | [`herdr/mcp.py`](file:///Users/user/HAFlow/herdr/mcp.py) | 内置 `web_search`, `data_extraction`, `file_system`, `git_tools`, `human_signoff` | ✅ 100% 通过 |
+| **跨领域商业研报模板实操** | [`workflow_templates/business-research-v1.yaml`](file:///Users/user/HAFlow/workflow_templates/business-research-v1.yaml) | 4 节点跨领域实战编排模板<br>覆盖商业调研全生命周期 | ✅ 100% 通过 |
+| **控制台模板可视化元数据增强** | [`console/herdr_factory_console.py`](file:///Users/user/HAFlow/console/herdr_factory_console.py) | `showTemplateDAG`<br>展示 Gate 门禁类型与 Policy 权限范围标签 | ✅ 100% 通过 |
 
 ---
 

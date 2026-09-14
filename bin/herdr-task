@@ -1419,7 +1419,7 @@ def launch_task(args):
     # 1. 创建 Clone + Pane + Agent
     worker_script = HERDR_ROOT / "services" / "herdr-worker.py"
     if not worker_script.exists():
-        worker_script = Path(os.path.expanduser("~/herdr/services/herdr-worker.py"))
+        worker_script = Path(os.path.expanduser("~/HAFlow/services/herdr-worker.py"))
 
     worker_cmd = [
         str(worker_script),
@@ -1587,7 +1587,7 @@ def dispatch_task(task_id, prompt):
             + "【正常完成流程】\n"
             + "1. 阅读 .herdr-loop/GOAL.md 了解目标契约与验收标准；\n"
             + "2. 实现或修改代码；\n"
-            + "3. 运行自检评估：~/herdr/bin/herdr-loop eval\n"
+            + "3. 运行自检评估：~/HAFlow/bin/herdr-loop eval\n"
             + "   → 查看 .herdr-loop/EVALUATION.md 了解失败原因；\n"
             + "4. 若自检未通过（得分 < 100.0），继续就地修改，回到步骤 2；\n"
             + "5. 自检 100% 通过后，方可输出完成标记。\n\n"
@@ -1597,7 +1597,7 @@ def dispatch_task(task_id, prompt):
             + "❌ 严禁向上层汇报局部问题（如单个语法错误）—— 工位负责就地解决；\n\n"
             + "【熔断求助流程（连续自愈失败≥3次）】\n"
             + "若遇到外部依赖或环境障碍导致连续 3 次自愈仍未通过，执行以下步骤：\n"
-            + "1. 运行 ~/herdr/bin/herdr-loop eval 更新最终评分；\n"
+            + "1. 运行 ~/HAFlow/bin/herdr-loop eval 更新最终评分；\n"
             + "2. 检查 .herdr-loop/STATE.md，若 status=exhausted，说明已达上限；\n"
             + "3. 在终端输出求助总结（包含复现路径与阻碍点）；\n"
             + "4. 在终端单独输出一行：HERDR_TASK_BLOCKER:" + task_id + "\n"

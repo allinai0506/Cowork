@@ -248,7 +248,7 @@ herdr-task ensure-runtime --workflow-id <workflow_id> --node <node_id>
 你可以为任何业务场景定义自己的 Workflow 模板。
 
 ### 6.1 模板存放位置（二选一）
-1. **项目或内置目录**：`/Users/user/herdr/workflow_templates/<template_name>.yaml`
+1. **项目或内置目录**：`/Users/user/HAFlow/workflow_templates/<template_name>.yaml`
 2. **个人用户目录**：`~/.herdr-controller/templates/<template_name>.yaml`
 
 系统会自动扫描并识别这两个目录下的 `.yaml`, `.yml`, `.json` 文件。
