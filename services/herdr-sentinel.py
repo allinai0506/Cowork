@@ -90,6 +90,19 @@ def nudge_enter(pane_id):
         return False
 
 
+def _get_store():
+    from herdr.state_store import get_state_store
+    if os.environ.get("HERDR_STATE_DB"):
+        return get_state_store(Path(os.environ["HERDR_STATE_DB"]))
+    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+    if t_file:
+        p = Path(t_file)
+        db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    return get_state_store()
+
+
 def update_statuses(changes):
     if not changes:
         return False
@@ -110,6 +123,9 @@ def update_statuses(changes):
 
         try:
             from herdr import kernel
+            store = _get_store()
+            if not store.get_task(task_id):
+                store.save_task(task)
             kernel.transition_task(
                 task_id=task_id,
                 to_status=new_status,
@@ -119,22 +135,20 @@ def update_statuses(changes):
                     "sentinel_reason": reason,
                     "sentinel_updated_at": int(time.time()),
                 },
+                store=store,
             )
             changed = True
-        except Exception:
-            task["status"] = new_status
-            task["sentinel_reason"] = reason
-            task["sentinel_updated_at"] = int(time.time())
-            changed = True
-
-        print(
-            f"[SENTINEL STATE] {task_id}: "
-            f"{old_status} -> {new_status} ({reason})",
-            flush=True,
-        )
-
-    if changed:
-        save_json_atomic(TASKS_FILE, data)
+            print(
+                f"[SENTINEL STATE] {task_id}: "
+                f"{old_status} -> {new_status} ({reason})",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"[SENTINEL ERROR] transition failed for {task_id}: {exc}; task status preserved as {old_status}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     return changed
 

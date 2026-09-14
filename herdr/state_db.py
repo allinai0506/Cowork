@@ -983,6 +983,25 @@ def list_events(
         conn.close()
 
 
+PROTECTED_TASK_METADATA_FIELDS = {
+    "task_id",
+    "workflow_id",
+    "node",
+    "stage",
+    "agent",
+    "status",
+    "created_at",
+    "updated_at",
+}
+
+PROTECTED_WORKFLOW_METADATA_FIELDS = {
+    "workflow_id",
+    "status",
+    "created_at",
+    "updated_at",
+}
+
+
 def transition_task(
     task_id: str,
     to_status: str,
@@ -1009,8 +1028,12 @@ def transition_task(
             raise ValueError(f"Task '{task_id}' not found")
 
         old_status = row["status"]
-        if not force:
-            validate_task_transition(old_status, to_status)
+        validate_task_transition(old_status, to_status, force=force)
+
+        meta = dict(metadata or {})
+        forbidden = set(meta.keys()) & PROTECTED_TASK_METADATA_FIELDS
+        if forbidden:
+            raise ValueError(f"Cannot overwrite protected task fields via metadata: {sorted(forbidden)}")
 
         now = time.time()
         payload = json.loads(row["payload_json"] or "{}")
@@ -1031,7 +1054,6 @@ def transition_task(
             "updated_at": row["updated_at"],
         })
 
-        meta = dict(metadata or {})
         if force:
             meta["forced"] = True
         for k, v in meta.items():
@@ -1133,8 +1155,12 @@ def transition_workflow(
             raise ValueError(f"Workflow '{workflow_id}' not found")
 
         old_status = row["status"]
-        if not force:
-            validate_workflow_transition(old_status, to_status)
+        validate_workflow_transition(old_status, to_status, force=force)
+
+        user_meta = dict(metadata or {})
+        forbidden = set(user_meta.keys()) & PROTECTED_WORKFLOW_METADATA_FIELDS
+        if forbidden:
+            raise ValueError(f"Cannot overwrite protected workflow fields via metadata: {sorted(forbidden)}")
 
         now = time.time()
         meta = json.loads(row["metadata_json"] or "{}")
@@ -1152,7 +1178,6 @@ def transition_workflow(
             "updated_at": row["updated_at"],
         })
 
-        user_meta = dict(metadata or {})
         if force:
             user_meta["forced"] = True
         for k, v in user_meta.items():

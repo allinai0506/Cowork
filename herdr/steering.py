@@ -275,26 +275,20 @@ def dispatch_steer_now(task_id: str, steer_id: str) -> Dict[str, Any]:
             }
             try:
                 from herdr import kernel
+                store = get_state_store()
+                if not store.get_task(tid):
+                    store.save_task(task)
                 kernel.transition_task(
                     task_id=tid,
                     to_status="interrupted",
                     reason="urgent_steer_injection_failed",
                     source="steering",
                     metadata=meta,
+                    store=store,
                 )
-            except Exception:
-                task["status"] = "interrupted"
-                task.update(meta)
-                task.setdefault("status_history", []).append({
-                    "from": old_status,
-                    "to": "interrupted",
-                    "reason": "urgent_steer_injection_failed",
-                    "operator": item.get("operator", "human"),
-                    "protocol": adapter.protocol_level,
-                    "adapter": adapter.name,
-                    "timestamp": now,
-                })
-                save_tasks_data(tasks_data)
+            except Exception as exc:
+                item["transition_error"] = str(exc)
+                # Fail-closed: do NOT directly mutate task status or call save_tasks_data
 
     # 4. Append-only record to StateStore audit history (zero duplication)
     store = get_state_store()
@@ -544,26 +538,29 @@ def halt_task(
     }
     try:
         from herdr import kernel
+        store = get_state_store()
+        if not store.get_task(task_id):
+            store.save_task(task)
         kernel.transition_task(
             task_id=task_id,
             to_status="interrupted",
             reason=reason,
             source="steering",
             metadata=meta,
+            store=store,
         )
-    except Exception:
-        task["status"] = "interrupted"
-        task.update(meta)
-        task.setdefault("status_history", []).append({
-            "from": old_status,
-            "to": "interrupted",
+    except Exception as exc:
+        return {
+            "ok": False,
+            "task_id": task_id,
+            "status": old_status,
+            "error": f"transition_task_failed: {exc}",
             "reason": reason,
             "operator": operator,
             "protocol": adapter.protocol_level,
             "adapter": adapter.name,
             "timestamp": now,
-        })
-        save_tasks_data(tasks_data)
+        }
 
     history_entry = {
         "action": "task_halted",

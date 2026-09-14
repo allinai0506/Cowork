@@ -1062,12 +1062,32 @@ def _get_store():
         db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
         if db_path.parent.exists():
             return get_state_store(db_path=db_path)
+    wf_file = globals().get("WORKFLOW_FILE") or globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOW_FILE") or os.environ.get("WORKFLOWS_FILE")
+    if wf_file:
+        p = Path(wf_file)
+        db_path = p.parent / "state.db" if p.name in ("workflows.json", "workflow.json") else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
     return get_state_store()
 
 
 def load_tasks():
     store = _get_store()
-    return {"tasks": store.list_tasks()}
+    tasks = store.list_tasks()
+    if not tasks:
+        t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+        if t_file and os.path.exists(t_file):
+            try:
+                with open(t_file, "r", encoding="utf-8") as f:
+                    file_tasks = json.load(f).get("tasks", [])
+                if file_tasks:
+                    for t in file_tasks:
+                        if t.get("task_id"):
+                            store.save_task(t)
+                    tasks = store.list_tasks()
+            except Exception:
+                pass
+    return {"tasks": tasks}
 
 
 def save_tasks(data):
@@ -1193,22 +1213,33 @@ def set_status(task_id, new_status, verdict=None, note=None):
                 metadata["stage_verdict"] = verdict
             if note:
                 metadata["stage_verdict_note"] = note
+            store = _get_store()
+            if not store.get_task(task_id):
+                store.save_task(task)
             try:
                 from herdr import kernel
-                store = _get_store()
-                if not store.get_task(task_id):
-                    store.save_task(task)
                 kernel.transition_task(
                     task_id=task_id,
                     to_status=new_status,
                     reason="update_verdict_note",
                     source="herdr-task",
                     metadata=metadata,
+                    store=store,
                 )
-            except Exception:
-                pass
-            task.update(metadata)
-            save_tasks(data)
+            except Exception as exc:
+                print(f"Error updating task {task_id}: {exc}", file=sys.stderr)
+                sys.exit(2)
+
+            t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+            if t_file:
+                try:
+                    tmp = str(t_file) + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(store.export_tasks_json(), f, ensure_ascii=False, indent=2)
+                    os.replace(tmp, str(t_file))
+                except Exception:
+                    pass
+
             print(f"{task_id}: already {new_status}; verdict/note updated")
             return
 
@@ -1228,43 +1259,36 @@ def set_status(task_id, new_status, verdict=None, note=None):
     if note:
         metadata["stage_verdict_note"] = note
 
+    store = _get_store()
+    if not store.get_task(task_id):
+        store.save_task(task)
+
     try:
         from herdr import kernel
-        store = _get_store()
-        if not store.get_task(task_id):
-            store.save_task(task)
-        kernel.transition_task(
+        res = kernel.transition_task(
             task_id=task_id,
             to_status=new_status,
             reason="cli_set_status",
             source="herdr-task",
             metadata=metadata,
+            store=store,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"Error transitioning task {task_id}: {exc}", file=sys.stderr)
+        sys.exit(2)
 
-    now = _now()
-    _append_status_history(
-        task,
-        old_status,
-        new_status,
-        now,
-    )
-    task.update(metadata)
-    task["status"] = new_status
-    task["updated_at"] = now
-    task["last_activity_at"] = now
-
-    if new_status in ACTIVE_TASK_STATUSES and not task.get("started_at"):
-        task["started_at"] = now
-
-    if new_status in COMPLETED_TASK_STATUSES and not task.get("last_result"):
-        task["last_result"] = task.get("status")
-
-    save_tasks(data)
+    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+    if t_file:
+        try:
+            tmp = str(t_file) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(store.export_tasks_json(), f, ensure_ascii=False, indent=2)
+            os.replace(tmp, str(t_file))
+        except Exception:
+            pass
 
     if new_status in ACTIVE_TASK_STATUSES:
-        _clear_suppress_auto_close(task.get("workflow_id"))
+        _clear_suppress_auto_close(task.get("workflow_id") or res.get("workflow_id"))
 
     print(f"{task_id}: {old_status} -> {new_status}")
 
@@ -2738,20 +2762,30 @@ def finalize_task(task_id, force=False, purge_clones=False):
 
 
 def _load_workflow_entry(workflow_id):
-    if not os.path.exists(WORKFLOWS_FILE):
+    wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE
+    store = _get_store()
+    wf = store.get_workflow(workflow_id)
+    if wf:
+        return wf, {workflow_id: wf}
+    if not os.path.exists(wf_file):
         return None, {}
     try:
-        with open(WORKFLOWS_FILE, "r", encoding="utf-8") as f:
+        with open(wf_file, "r", encoding="utf-8") as f:
             entries = json.load(f).get("workflows", {})
     except (json.JSONDecodeError, OSError):
         return None, {}
-    return entries.get(workflow_id), entries
+    entry = entries.get(workflow_id)
+    if entry:
+        rec = dict(entry)
+        rec.setdefault("workflow_id", workflow_id)
+        store.save_workflow(rec)
+    return entry, entries
 
 
 def _mark_workflow_completed(workflow_id, outcome="delivered"):
+    store = _get_store()
     entry, entries = _load_workflow_entry(workflow_id)
     if entry is None:
-        store = _get_store()
         wf = store.get_workflow(workflow_id)
         if wf is None:
             print(f"[WORKFLOW RECORD] no entry for {workflow_id}; skip marking")
@@ -2759,11 +2793,14 @@ def _mark_workflow_completed(workflow_id, outcome="delivered"):
         entry = dict(wf)
         entries = {workflow_id: entry}
 
-    store = _get_store()
     if not store.get_workflow(workflow_id):
         wf_record = dict(entry)
         wf_record.setdefault("workflow_id", workflow_id)
         store.save_workflow(wf_record)
+
+    cur_wf = store.get_workflow(workflow_id)
+    cur_status = cur_wf.get("status") if cur_wf else (entry or {}).get("status")
+    force_transition = cur_status not in ("running", "in_progress")
 
     try:
         from herdr import kernel
@@ -2773,23 +2810,22 @@ def _mark_workflow_completed(workflow_id, outcome="delivered"):
             reason=f"workflow_completed: {outcome}",
             source="herdr-task",
             metadata={"outcome": outcome, "completed_at": _now()},
+            force=force_transition,
+            store=store,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"Error marking workflow {workflow_id} completed: {exc}", file=sys.stderr)
+        raise
 
-    entry["status"] = "completed"
-    entry["outcome"] = outcome
-    entry["completed_at"] = _now()
-    entry.setdefault("workflow_id", workflow_id)
-    store.save_workflow(entry)
-
-    try:
-        tmp = WORKFLOWS_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, WORKFLOWS_FILE)
-    except Exception:
-        pass
+    wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE
+    if wf_file:
+        try:
+            tmp = str(wf_file) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(store.export_workflows_json(), f, ensure_ascii=False, indent=2)
+            os.replace(tmp, str(wf_file))
+        except Exception:
+            pass
 
 
 def _workflow_stage_tabs(workflow_id, tasks):
@@ -3209,24 +3245,33 @@ def supersede_task(task_id, new_task_id=None, reason=None):
     if reason:
         meta["supersede_reason"] = reason
 
+    store = _get_store()
+    if not store.get_task(task_id):
+        store.save_task(task)
+
     try:
         from herdr import kernel
-        store = _get_store()
-        if not store.get_task(task_id):
-            store.save_task(task)
         kernel.transition_task(
             task_id=task_id,
             to_status="superseded",
             reason=reason or "superseded",
             source="herdr-task",
             metadata=meta,
+            store=store,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"Error superseding task {task_id}: {exc}", file=sys.stderr)
+        sys.exit(2)
 
-    task["status"] = "superseded"
-    task.update(meta)
-    save_tasks(data)
+    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+    if t_file:
+        try:
+            tmp = str(t_file) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(store.export_tasks_json(), f, ensure_ascii=False, indent=2)
+            os.replace(tmp, str(t_file))
+        except Exception:
+            pass
 
     msg = f"{task_id}: {old_status} -> superseded"
     if new_task_id:
@@ -3359,22 +3404,21 @@ def reopen_workflow(workflow_id):
             reason="workflow_reopened",
             source="herdr-task",
             metadata={"suppress_auto_close": True, "reopened_at": _now()},
+            store=store,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"Error reopening workflow {workflow_id}: {exc}", file=sys.stderr)
+        sys.exit(2)
 
-    entry["status"] = "in_progress"
-    entry["suppress_auto_close"] = True
-    entry["reopened_at"] = _now()
-    entry.setdefault("workflow_id", workflow_id)
-    store.save_workflow(entry)
-    try:
-        tmp = WORKFLOWS_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, WORKFLOWS_FILE)
-    except Exception:
-        pass
+    wf_file = globals().get("WORKFLOWS_FILE") or os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE
+    if wf_file:
+        try:
+            tmp = str(wf_file) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(store.export_workflows_json(), f, ensure_ascii=False, indent=2)
+            os.replace(tmp, str(wf_file))
+        except Exception:
+            pass
 
     stage_reset(workflow_id)
 

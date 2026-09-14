@@ -49,36 +49,56 @@ def _atomic_write_json(file_path: Path, data: Any) -> None:
     os.replace(tmp_path, file_path)
 
 
-def load_workflows_data() -> Dict[str, Any]:
+def _get_store(store: Optional[StateStore] = None) -> StateStore:
+    if store is not None:
+        return store
+    if os.environ.get("HERDR_STATE_DB"):
+        return get_state_store(Path(os.environ["HERDR_STATE_DB"]))
+    tasks_file = os.environ.get("TASKS_FILE")
+    if tasks_file:
+        p = Path(tasks_file)
+        db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    workflows_file = os.environ.get("WORKFLOWS_FILE")
+    if workflows_file:
+        p = Path(workflows_file)
+        db_path = p.parent / "state.db" if p.name == "workflows.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    return get_state_store()
+
+
+def load_workflows_data(store: Optional[StateStore] = None) -> Dict[str, Any]:
     """Load workflows via StateStore (single source of truth)."""
-    store = get_state_store()
-    return store.export_workflows_json()
+    s = _get_store(store)
+    return s.export_workflows_json()
 
 
-def save_workflows_data(data: Dict[str, Any]) -> None:
+def save_workflows_data(data: Dict[str, Any], store: Optional[StateStore] = None) -> None:
     """Save workflows into StateStore and sync compatibility JSON."""
-    store = get_state_store()
+    s = _get_store(store)
     for wid, wf in (data.get("workflows") or {}).items():
         wf.setdefault("workflow_id", wid)
-        store.save_workflow(wf)
-    wf_file = get_workflows_file()
+        s.save_workflow(wf)
+    wf_file = getattr(s, "db_path", None).parent / "workflows.json" if getattr(s, "db_path", None) else get_workflows_file()
     if wf_file.parent.exists():
         _atomic_write_json(wf_file, data)
 
 
-def load_tasks_data() -> Dict[str, Any]:
+def load_tasks_data(store: Optional[StateStore] = None) -> Dict[str, Any]:
     """Load tasks via StateStore (single source of truth)."""
-    store = get_state_store()
-    return store.export_tasks_json()
+    s = _get_store(store)
+    return s.export_tasks_json()
 
 
-def save_tasks_data(data: Dict[str, Any]) -> None:
+def save_tasks_data(data: Dict[str, Any], store: Optional[StateStore] = None) -> None:
     """Save tasks into StateStore and sync compatibility JSON."""
-    store = get_state_store()
+    s = _get_store(store)
     for t in data.get("tasks", []):
         if t.get("task_id") and t.get("workflow_id"):
-            store.save_task(t)
-    tasks_file = get_tasks_file()
+            s.save_task(t)
+    tasks_file = getattr(s, "db_path", None).parent / "tasks.json" if getattr(s, "db_path", None) else get_tasks_file()
     if tasks_file.parent.exists():
         _atomic_write_json(tasks_file, data)
 
@@ -113,10 +133,11 @@ def transition_task(
     source: str = "system",
     metadata: Optional[Dict[str, Any]] = None,
     force: bool = False,
+    store: Optional[StateStore] = None,
 ) -> Dict[str, Any]:
     """State Transition Gateway: Atomically transition task status and append WorkflowEvent."""
-    store = get_state_store()
-    res = store.transition_task(
+    s = _get_store(store)
+    res = s.transition_task(
         task_id=task_id,
         to_status=to_status,
         reason=reason,
@@ -124,9 +145,16 @@ def transition_task(
         metadata=metadata,
         force=force,
     )
-    tasks_file = get_tasks_file()
-    if tasks_file.parent.exists():
-        _atomic_write_json(tasks_file, store.export_tasks_json())
+    try:
+        tasks_file = (
+            getattr(s, "db_path", None).parent / "tasks.json"
+            if getattr(s, "db_path", None)
+            else get_tasks_file()
+        )
+        if tasks_file.parent.exists():
+            _atomic_write_json(tasks_file, s.export_tasks_json())
+    except Exception:
+        pass
     return res
 
 
@@ -137,10 +165,11 @@ def transition_workflow(
     source: str = "system",
     metadata: Optional[Dict[str, Any]] = None,
     force: bool = False,
+    store: Optional[StateStore] = None,
 ) -> Dict[str, Any]:
     """State Transition Gateway: Atomically transition workflow status and append WorkflowEvent."""
-    store = get_state_store()
-    res = store.transition_workflow(
+    s = _get_store(store)
+    res = s.transition_workflow(
         workflow_id=workflow_id,
         to_status=to_status,
         reason=reason,
@@ -148,9 +177,16 @@ def transition_workflow(
         metadata=metadata,
         force=force,
     )
-    wf_file = get_workflows_file()
-    if wf_file.parent.exists():
-        _atomic_write_json(wf_file, store.export_workflows_json())
+    try:
+        wf_file = (
+            getattr(s, "db_path", None).parent / "workflows.json"
+            if getattr(s, "db_path", None)
+            else get_workflows_file()
+        )
+        if wf_file.parent.exists():
+            _atomic_write_json(wf_file, s.export_workflows_json())
+    except Exception:
+        pass
     return res
 
 
@@ -158,9 +194,9 @@ def transition_workflow(
 # 1. Pause & Resume Primitives
 # ============================================================
 
-def pause_workflow(workflow_id: str, node_id: Optional[str] = None) -> Dict[str, Any]:
+def pause_workflow(workflow_id: str, node_id: Optional[str] = None, store: Optional[StateStore] = None) -> Dict[str, Any]:
     """Pause automatic workflow progression globally or hold a specific node."""
-    data = load_workflows_data()
+    data = load_workflows_data(store=store)
     wfs = data.get("workflows", {})
     if workflow_id not in wfs:
         raise ValueError(f"Workflow '{workflow_id}' not found")
@@ -171,7 +207,7 @@ def pause_workflow(workflow_id: str, node_id: Optional[str] = None) -> Dict[str,
         if node_id not in paused_nodes:
             paused_nodes.append(node_id)
         target["paused_nodes"] = paused_nodes
-        save_workflows_data(data)
+        save_workflows_data(data, store=store)
         return {
             "ok": True,
             "workflow_id": workflow_id,
@@ -185,6 +221,7 @@ def pause_workflow(workflow_id: str, node_id: Optional[str] = None) -> Dict[str,
         to_status="paused",
         reason="pause_workflow",
         source="kernel",
+        store=store,
     )
     return {
         "ok": True,
@@ -193,9 +230,9 @@ def pause_workflow(workflow_id: str, node_id: Optional[str] = None) -> Dict[str,
     }
 
 
-def resume_workflow(workflow_id: str, node_id: Optional[str] = None) -> Dict[str, Any]:
+def resume_workflow(workflow_id: str, node_id: Optional[str] = None, store: Optional[StateStore] = None) -> Dict[str, Any]:
     """Resume automatic workflow progression globally or unpause a specific node."""
-    data = load_workflows_data()
+    data = load_workflows_data(store=store)
     wfs = data.get("workflows", {})
     if workflow_id not in wfs:
         raise ValueError(f"Workflow '{workflow_id}' not found")
@@ -206,7 +243,7 @@ def resume_workflow(workflow_id: str, node_id: Optional[str] = None) -> Dict[str
         if node_id in paused_nodes:
             paused_nodes.remove(node_id)
         target["paused_nodes"] = paused_nodes
-        save_workflows_data(data)
+        save_workflows_data(data, store=store)
         return {
             "ok": True,
             "workflow_id": workflow_id,
@@ -220,6 +257,7 @@ def resume_workflow(workflow_id: str, node_id: Optional[str] = None) -> Dict[str
         to_status="running",
         reason="resume_workflow",
         source="kernel",
+        store=store,
     )
     return {
         "ok": True,
@@ -238,9 +276,10 @@ def force_pass_gate(
     gate_node_id: str,
     note: str = "human forced pass",
     operator: str = "human",
+    store: Optional[StateStore] = None,
 ) -> Dict[str, Any]:
     """Forcibly mark a gate node verdict as passed/approved with an audit note."""
-    tasks_data = load_tasks_data()
+    tasks_data = load_tasks_data(store=store)
     updated_tasks = []
 
     for task in tasks_data.get("tasks", []):
@@ -256,10 +295,10 @@ def force_pass_gate(
         task["updated_at"] = time.time()
         updated_tasks.append(task.get("task_id"))
 
-    save_tasks_data(tasks_data)
+    save_tasks_data(tasks_data, store=store)
 
     # Also record in workflow entry gate_overrides
-    wf_data = load_workflows_data()
+    wf_data = load_workflows_data(store=store)
     if workflow_id in wf_data.get("workflows", {}):
         wf_entry = wf_data["workflows"][workflow_id]
         overrides = dict(wf_entry.get("gate_overrides") or {})
@@ -270,7 +309,7 @@ def force_pass_gate(
             "timestamp": time.time(),
         }
         wf_entry["gate_overrides"] = overrides
-        save_workflows_data(wf_data)
+        save_workflows_data(wf_data, store=store)
 
     return {
         "ok": True,
@@ -288,9 +327,10 @@ def rollback_workflow(
     workflow_id: str,
     target_node_id: str,
     reason: str = "manual_rollback",
+    store: Optional[StateStore] = None,
 ) -> Dict[str, Any]:
     """Roll back workflow execution to target_node_id, invalidating downstream tasks and locks."""
-    wf_data = load_workflows_data()
+    wf_data = load_workflows_data(store=store)
     wf_entry = wf_data.get("workflows", {}).get(workflow_id)
     if not wf_entry:
         raise ValueError(f"Workflow '{workflow_id}' not found")
@@ -307,7 +347,7 @@ def rollback_workflow(
 
     affected_nodes = collect_downstream_nodes(nodes_by_id, target_node_id)
 
-    tasks_data = load_tasks_data()
+    tasks_data = load_tasks_data(store=store)
     invalidated = []
 
     for task in tasks_data.get("tasks", []):
@@ -315,6 +355,8 @@ def rollback_workflow(
             continue
         task_node = task.get("node") or task.get("stage")
         if task_node not in affected_nodes:
+            continue
+        if task.get("status") == "superseded":
             continue
         tid = task.get("task_id")
         transition_task(
@@ -324,6 +366,7 @@ def rollback_workflow(
             source="kernel_rollback",
             metadata={"superseded_reason": f"rollback to {target_node_id}: {reason}"},
             force=True,
+            store=store,
         )
         invalidated.append(tid)
 

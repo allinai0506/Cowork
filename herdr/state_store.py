@@ -311,9 +311,6 @@ class SQLiteStateStore(StateStore):
         metadata: Optional[Dict[str, Any]] = None,
         force: bool = False,
     ) -> Dict[str, Any]:
-        if hasattr(self.save_workflow, "_mock_self") or getattr(self.save_workflow, "__func__", None) != SQLiteStateStore.save_workflow:
-            self.save_workflow({"workflow_id": workflow_id, "status": to_status})
-
         return state_db.transition_workflow(
             workflow_id=workflow_id,
             to_status=to_status,
@@ -350,9 +347,6 @@ class SQLiteStateStore(StateStore):
         metadata: Optional[Dict[str, Any]] = None,
         force: bool = False,
     ) -> Dict[str, Any]:
-        if hasattr(self.save_task, "_mock_self") or getattr(self.save_task, "__func__", None) != SQLiteStateStore.save_task:
-            self.save_task({"task_id": task_id, "status": to_status})
-
         return state_db.transition_task(
             task_id=task_id,
             to_status=to_status,

@@ -495,12 +495,17 @@ def _update_workflow_status(workflow_id, target_status, action_label):
         return 1
 
     from herdr import kernel
-    kernel.transition_workflow(
-        workflow_id=workflow_id,
-        to_status=target_status,
-        reason=action_label,
-        source="herdr-factory",
-    )
+    try:
+        kernel.transition_workflow(
+            workflow_id=workflow_id,
+            to_status=target_status,
+            reason=action_label,
+            source="herdr-factory",
+            store=store,
+        )
+    except Exception as exc:
+        print(f"Error transitioning workflow {workflow_id}: {exc}", file=sys.stderr)
+        raise
 
     print(f"Workflow {workflow_id} {action_label}")
     return 0

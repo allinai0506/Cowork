@@ -484,4 +484,228 @@ class TestStateTransitionGateway:
         assert events2[1]["payload"]["to_status"] == "in_progress"
         assert events2[1]["payload"]["suppress_auto_close"] is True
 
+    def test_force_with_unknown_status_rejected(self, clean_store):
+        store, db_path, _ = clean_store
+
+        task = {
+            "task_id": "t-gw-force-unk",
+            "workflow_id": "wf-gw-01",
+            "node": "code",
+            "status": "pending",
+        }
+        store.save_task(task)
+
+        # Unknown task status with force=True MUST be rejected
+        with pytest.raises(InvalidTransitionError, match="Invalid target task status"):
+            kernel.transition_task(
+                task_id="t-gw-force-unk",
+                to_status="banana",
+                reason="illegal unknown status",
+                force=True,
+            )
+
+        wf = {
+            "workflow_id": "wf-gw-force-unk",
+            "title": "Force Unknown Test",
+            "status": "pending",
+        }
+        store.save_workflow(wf)
+
+        # Unknown workflow status with force=True MUST be rejected
+        with pytest.raises(InvalidTransitionError, match="Invalid target workflow status"):
+            kernel.transition_workflow(
+                workflow_id="wf-gw-force-unk",
+                to_status="banana",
+                reason="illegal unknown status",
+                force=True,
+            )
+
+    def test_force_with_illegal_edge_allowed(self, clean_store):
+        store, db_path, _ = clean_store
+
+        # 1. Task: pending -> superseded normally illegal, but allowed with force=True
+        task = {
+            "task_id": "t-gw-force-edge",
+            "workflow_id": "wf-gw-01",
+            "node": "code",
+            "status": "pending",
+        }
+        store.save_task(task)
+
+        res_task = kernel.transition_task(
+            task_id="t-gw-force-edge",
+            to_status="superseded",
+            reason="admin override edge",
+            force=True,
+        )
+        assert res_task["ok"] is True
+        assert res_task["new_status"] == "superseded"
+        t = store.get_task("t-gw-force-edge")
+        assert t["status"] == "superseded"
+        t_events = store.list_events(task_id="t-gw-force-edge")
+        assert t_events[0]["payload"]["forced"] is True
+
+        # 2. Workflow: paused -> completed normally illegal, but allowed with force=True
+        wf = {
+            "workflow_id": "wf-gw-force-edge",
+            "title": "Force Edge Test",
+            "status": "paused",
+        }
+        store.save_workflow(wf)
+
+        res_wf = kernel.transition_workflow(
+            workflow_id="wf-gw-force-edge",
+            to_status="completed",
+            reason="admin override edge",
+            force=True,
+        )
+        assert res_wf["ok"] is True
+        assert res_wf["new_status"] == "completed"
+        w = store.get_workflow("wf-gw-force-edge")
+        assert w["status"] == "completed"
+        w_events = store.list_events(workflow_id="wf-gw-force-edge")
+        assert w_events[0]["payload"]["forced"] is True
+
+    def test_metadata_cannot_modify_protected_fields(self, clean_store):
+        store, db_path, _ = clean_store
+
+        task = {
+            "task_id": "t-gw-prot",
+            "workflow_id": "wf-gw-01",
+            "node": "code",
+            "status": "pending",
+        }
+        store.save_task(task)
+
+        for protected_field in ["task_id", "workflow_id", "status", "created_at", "updated_at"]:
+            with pytest.raises(ValueError, match="Cannot overwrite protected task fields via metadata"):
+                kernel.transition_task(
+                    task_id="t-gw-prot",
+                    to_status="dispatched",
+                    reason="metadata exploit attempt",
+                    metadata={protected_field: "malicious_override"},
+                )
+
+        wf = {
+            "workflow_id": "wf-gw-prot",
+            "title": "Protected Fields Test",
+            "status": "pending",
+        }
+        store.save_workflow(wf)
+
+        for protected_field in ["workflow_id", "status", "created_at", "updated_at"]:
+            with pytest.raises(ValueError, match="Cannot overwrite protected workflow fields via metadata"):
+                kernel.transition_workflow(
+                    workflow_id="wf-gw-prot",
+                    to_status="running",
+                    reason="metadata exploit attempt",
+                    metadata={protected_field: "malicious_override"},
+                )
+
+    def test_rollback_skips_already_superseded_task(self, clean_store):
+        store, db_path, _ = clean_store
+
+        wf = {
+            "workflow_id": "wf-rb-skip",
+            "title": "Rollback Skip Test",
+            "status": "running",
+            "config": {
+                "nodes": [
+                    {"id": "step1", "label": "Step 1"},
+                    {"id": "step2", "label": "Step 2", "depends_on": ["step1"]},
+                ]
+            },
+        }
+        store.save_workflow(wf)
+
+        t1 = {
+            "task_id": "t-rb-s1",
+            "workflow_id": "wf-rb-skip",
+            "node": "step2",
+            "status": "working",
+        }
+        store.save_task(t1)
+
+        # First rollback: supersedes task
+        res1 = kernel.rollback_workflow("wf-rb-skip", target_node_id="step2", reason="rb 1")
+        assert "t-rb-s1" in res1["invalidated_tasks"]
+        events1 = store.list_events(task_id="t-rb-s1")
+        assert len(events1) == 1
+
+        # Second rollback: task is already superseded, must be SKIPPED!
+        res2 = kernel.rollback_workflow("wf-rb-skip", target_node_id="step2", reason="rb 2")
+        assert "t-rb-s1" not in res2["invalidated_tasks"]
+        events2 = store.list_events(task_id="t-rb-s1")
+        assert len(events2) == 1  # No duplicate event!
+
+    def test_caller_fail_closed_when_gateway_fails(self, clean_store, monkeypatch):
+        store, db_path, tmp_path = clean_store
+
+        task = {
+            "task_id": "t-fc-01",
+            "workflow_id": "wf-fc-01",
+            "node": "step1",
+            "stage": "step1",
+            "pane_id": "pane-101",
+            "status": "dispatched",
+        }
+        store.save_task(task)
+
+        # 1. Simulate disk / SQLite failure during record_event
+        original_record_event = state_db.record_event
+
+        def failing_record_event(*args, **kwargs):
+            raise sqlite3.OperationalError("Simulated disk I/O error during event append")
+
+        monkeypatch.setattr(state_db, "record_event", failing_record_event)
+
+        # A. CLI set_status must exit non-zero (code 2) and NOT mutate status
+        import importlib.machinery
+        import importlib.util
+
+        def _load_src_module(name, path):
+            loader = importlib.machinery.SourceFileLoader(name, str(path))
+            spec = importlib.util.spec_from_loader(name, loader)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+
+        ht_path = Path(__file__).resolve().parent.parent / "bin" / "herdr-task"
+        ht_mod = _load_src_module("herdr_task_fc_test", ht_path)
+        ht_mod.TASKS_FILE = str(tmp_path / "tasks.json")
+        ht_mod.WORKFLOWS_FILE = str(tmp_path / "workflows.json")
+
+        with pytest.raises(SystemExit) as exc_info:
+            ht_mod.set_status("t-fc-01", "working")
+        assert exc_info.value.code == 2, f"Expected exit code 2 on failure, got {exc_info.value.code}"
+        # Task in DB MUST remain dispatched (NOT changed to working!)
+        t = store.get_task("t-fc-01")
+        assert t["status"] == "dispatched"
+
+        # B. Steering halt_task must return ok=False and NOT mutate status
+        from herdr import steering
+        # Mock adapter to succeed physically so we test Gateway failure
+        from unittest.mock import patch, MagicMock
+        mock_adapter = MagicMock()
+        mock_adapter.protocol_level = "prototype"
+        mock_adapter.name = "mock"
+        mock_adapter.interrupt.return_value = {"ok": True}
+        with patch.object(steering, "get_agent_adapter", return_value=mock_adapter):
+            halt_res = steering.halt_task("t-fc-01", reason="test abort")
+            assert halt_res["ok"] is False
+            assert "transition_task_failed" in halt_res["error"]
+            t_after_halt = store.get_task("t-fc-01")
+            assert t_after_halt["status"] == "dispatched"
+
+        # C. Sentinel update_statuses must NOT mutate status
+        sentinel_path = Path(__file__).resolve().parent.parent / "services" / "herdr-sentinel.py"
+        sentinel_mod = _load_src_module("herdr_sentinel_test", sentinel_path)
+        sentinel_mod.TASKS_FILE = str(tmp_path / "tasks.json")
+
+        sentinel_changed = sentinel_mod.update_statuses({"t-fc-01": ("failed", "sentinel timeout")})
+        assert sentinel_changed is False
+        t_after_sentinel = store.get_task("t-fc-01")
+        assert t_after_sentinel["status"] == "dispatched"
+
+
 

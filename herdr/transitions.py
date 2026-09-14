@@ -59,17 +59,19 @@ TERMINAL_TASK_STATUSES: Set[str] = {
 }
 
 
-def validate_task_transition(old_status: str, new_status: str) -> bool:
+def validate_task_transition(old_status: str, new_status: str, force: bool = False) -> bool:
     """Validate whether task transition old_status -> new_status is legal.
 
+    If force is True, edge legality (old_status -> new_status) is bypassed,
+    but new_status MUST still be a recognized, valid task status.
     Returns True if valid (including idempotent self-transitions).
     Raises InvalidTransitionError if target status is unknown or transition is illegal.
     """
-    if old_status == new_status:
-        return True
-
     if new_status not in TASK_TRANSITIONS:
         raise InvalidTransitionError(f"Invalid target task status: '{new_status}'")
+
+    if old_status == new_status or force:
+        return True
 
     allowed = TASK_TRANSITIONS.get(old_status, set())
     if new_status not in allowed:
@@ -105,17 +107,19 @@ TERMINAL_WORKFLOW_STATUSES: Set[str] = {
 }
 
 
-def validate_workflow_transition(old_status: str, new_status: str) -> bool:
+def validate_workflow_transition(old_status: str, new_status: str, force: bool = False) -> bool:
     """Validate whether workflow transition old_status -> new_status is legal.
 
+    If force is True, edge legality (old_status -> new_status) is bypassed,
+    but new_status MUST still be a recognized, valid workflow status.
     Returns True if valid (including idempotent self-transitions).
     Raises InvalidTransitionError if target status is unknown or transition is illegal.
     """
-    if old_status == new_status:
-        return True
-
     if new_status not in WORKFLOW_TRANSITIONS:
         raise InvalidTransitionError(f"Invalid target workflow status: '{new_status}'")
+
+    if old_status == new_status or force:
+        return True
 
     allowed = WORKFLOW_TRANSITIONS.get(old_status, set())
     if new_status not in allowed:
