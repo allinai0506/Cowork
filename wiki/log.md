@@ -473,4 +473,13 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 同步更新文档内文件跳转超链接，适配新根路径 `/Users/user/HAFlow`；
   - 同步更新 Web 控制台（`console/herdr_factory_console.py`）中的 `PRODUCT_NAME='HAFlow'` 与 `PRODUCT_TAGLINE='让人和多个 AI Agent 一起把事情做完'` 常量，实现产品名称前后端一致注入。
 
+## [2026-09-15] fix | Purge all legacy herdr references and enhance console root resolution
+- **根除 `/Users/user/herdr` 旧路径残留并加固控制台根目录探针**：
+  - 彻底解决 Web 控制台「执行者自检」报 `Deep Preflight 未安装: /Users/user/herdr/herdr/deep_preflight.py` 的路径断裂问题；
+  - 重构 `console/herdr_factory_console.py` 中的 `_resolve_herdr_root()`：采用复合特征指纹探针 `(candidate / "herdr" / "__init__.py").exists() and (candidate / "bin").is_dir()`，杜绝因旧软链接或子目录误判导致的根目录定位错误；
+  - 彻底移除临时兼容软链接 `/Users/user/herdr`，全盘清剿全仓代码、文档、CLI 脚本、LaunchAgents plist、`~/.zshrc` 与 `~/.herdr-controller/projects.json` 中的旧路径引用；
+  - 执行 `scripts/install-herdr-console.sh` 部署并热重载 LaunchAgent 守护进程，通过端到端 Deep Preflight API 验证；
+  - 全仓自动化回归测试 422 passed + 12 subtests 全部绿灯通过；
+  - 沉淀并归档通用工程教训 §37（仓库根目录重命名与品牌迁移后的运行时路径断裂陷阱）。
+
 

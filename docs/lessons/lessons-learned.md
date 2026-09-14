@@ -1650,3 +1650,55 @@ pytest -q
 ./bin/herdr-factory doctor
 ```
 
+---
+
+## 37. 仓库根目录重命名与品牌迁移后的运行时路径断裂陷阱：特征指纹定位原则与彻底根除假象兼容
+
+### 问题背景
+
+在品牌统一升级为 HAFlow 并将本地代码主目录从 `~/herdr` 重命名为 `~/HAFlow` 后，Web 控制台点击「执行者自检」报错：
+`Deep Preflight 未安装: /Users/user/herdr/herdr/deep_preflight.py`。
+排查发现：
+1. **控制台根目录解析失效**：`console/herdr_factory_console.py` 中的 `_resolve_herdr_root()` 仅检测 `(candidate / "herdr").is_dir()`。因 Python 顶层包目录就叫 `herdr`，当用户在家目录下存在旧目录或兼容软链接 `/Users/user/herdr` 时，候选路径命中 `/Users/user`，导致计算出的路径为 `/Users/user/herdr/deep_preflight.py` 而非实际源码树 `/Users/user/HAFlow/herdr/deep_preflight.py`；
+2. **软链接掩盖真实根因（兼容假象）**：此前建立的 `/Users/user/herdr -> ~/HAFlow` 软链接掩盖了路径迁移不彻底的事实，导致多处守护进程（LaunchAgents）、CLI 脚本（`bin/herdr-task`、`bin/herdr-factory`）、服务（`services/herdr-controller.py`）以及持久化配置（`projects.json` / `workflow.json`）继续引用旧路径，系统处于严重的路径裂脑状态；
+3. **常驻守护进程脱离源码树**：控制台守护进程运行于 `~/.herdr-console/`，仅修改代码仓库文件而不执行 `install-herdr-console.sh` 不会生效。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| **单层目录名判定导致根路径误判** | 仅按 `(candidate / "herdr").is_dir()` 检测极易被父目录下的同名包子目录或软链接欺骗 | 采用复合特征指纹校验：必须同时满足 `(candidate / "herdr" / "__init__.py").exists()` 且 `(candidate / "bin").is_dir()`，严格锁定源码根 |
+| **软链接制造虚假兼容性** | 临时软链接虽能解燃眉之急，但会导致配置与日志中陈旧路径持续蔓延与沉淀 | 重构/改名必须物理彻底断开旧路径，全盘清理（Grep-Purge）并移除所有软链接拐杖，迫使所有组件面向新标准路径或动态探针自愈 |
+| **多环境常驻进程分发落后** | 部署于用户主目录或系统级 LaunchAgents 的服务脱离 Git 工作区，直接改动仓库代码不会自动热加载 | 服务脚本修改后必须前置重新分发（如执行 `./scripts/install-herdr-console.sh` 并 `launchctl kickstart -k`），且需建立自检闭环 |
+| **持久化状态路径漂移** | JSON 数据库与任务状态文件中固化了绝对路径，换目录后可能成为暗雷 | 运行时配置中的路径尽量采用相对项目根或动态通过项目名重新解析，防止母体移动后子工位引用悬空 |
+
+### 操作规范
+
+1. **精准特征指纹探针**：
+   在 `console/herdr_factory_console.py` 中重构 `_resolve_herdr_root()`：
+   优先级：`os.environ.get("HERDR_ROOT")` -> 逐级向上回溯判定 `(p / "herdr" / "__init__.py").exists() and (p / "bin").is_dir()` -> 优先扫描已知标准目录 `Path.home() / "HAFlow"` -> 备选 `Path.home() / "herdr"`。
+2. **全系统硬编码旧路径清剿**：
+   - 彻底删除 `/Users/user/herdr` 软链接；
+   - 全盘将 `bin/herdr-task`、`bin/herdr-factory`、`services/herdr-controller.py` 中的 `~/herdr` 替换为 `~/HAFlow`；
+   - 同步更新 LaunchAgents plist 文件（`com.user.herdr-controller`, `notifier`, `sentinel`）；
+   - 更新 `~/.zshrc` 中的 `PATH` 指向 `/Users/user/HAFlow/bin`；
+   - 更新持久化元数据（`~/.herdr-controller/projects.json`、`workflow.json`）中的 `project_root`。
+3. **控制台服务部署与重启契约**：
+   涉及 `console/` 任何改动，必须显式调用 `./scripts/install-herdr-console.sh`，确保二进制同步部署至 `~/.herdr-console` 并热重载 launchd。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 验证全仓再无旧绝对路径残留
+grep -rn "/Users/user/herdr" .  # 期望输出为空
+
+# 2. 控制台动态解析单元与语法回归
+pytest tests/test_console*.py -v
+
+# 3. 全仓回归测试（422 项全绿通过）
+pytest -q
+
+# 4. 执行者自检功能端到端验证
+curl -s http://127.0.0.1:8765/api/preflight/deep | grep '"installed": true'
+```
+
