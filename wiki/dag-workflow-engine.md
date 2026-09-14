@@ -1,5 +1,10 @@
 # DAG 工作流引擎与调度算法 (dag-workflow-engine.md)
 
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
 > **模板规范、Kahn 拓扑校验算法、双向归一化与就绪推进**  
 > 关联索引: [[index]] | [[domain-model]] | [[task-lifecycle]] | [[architecture]]
 
@@ -7,7 +12,7 @@
 
 ## 1. 模板体系与加载发现
 
-Herdr 支持声明式 YAML 与 JSON 工作流模板。
+HAFlow 支持声明式 YAML 与 JSON 工作流模板。
 
 ### 1.1 模板扫描顺序
 `FACT` 引擎通过 `herdr/workflow.py#list_templates` 自动发现模版：

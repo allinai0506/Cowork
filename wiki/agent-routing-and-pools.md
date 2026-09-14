@@ -1,5 +1,10 @@
 # 异构 Agent 路由策略与并发锁 (agent-routing-and-pools.md)
 
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
 > **多 Agent 调度、优先级评分、负载均衡与 Reservation 预占锁**  
 > 关联索引: [[index]] | [[domain-model]] | [[preflight-and-health]] | [[task-lifecycle]]
 

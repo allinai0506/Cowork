@@ -1,5 +1,10 @@
 # 运行架构与进程拓扑 (architecture.md)
 
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
 > **进程体系、通信机制与后台守护**  
 > 关联索引: [[index]] | [[system-overview]] | [[task-lifecycle]] | [[tab-node-model]]
 
@@ -7,7 +12,7 @@
 
 ## 1. 进程拓扑与角色分层
 
-Herdr 系统的运行时由三种生命周期的进程构成：**CLI 工具链**、**常驻 LaunchAgent 守护进程**与**瞬时 Worker 任务进程**。
+HAFlow 系统的运行时由三种生命周期的进程构成：**CLI 工具链**、**常驻 LaunchAgent 守护进程**与**瞬时 Worker 任务进程**。
 
 ```mermaid
 graph TD
@@ -28,13 +33,13 @@ graph TD
         AgentProcess["Agent CLI (Claude / Codex / OpenCode ...)"]
     end
 
-    subgraph Herdr_Multiplexer [Herdr 终端核心服务]
-        HerdrDaemon["Herdr Multiplexer (~/.config/herdr/herdr.sock)"]
+    subgraph Terminal_Multiplexer [终端多路复用核心服务]
+        TerminalDaemon["Terminal Multiplexer (~/.config/herdr/herdr.sock)"]
     end
 
     User_Space -->|调用| Worker
     Worker -->|启动并重定向| AgentProcess
-    Controller -->|Unix Socket 监听| HerdrDaemon
+    Controller -->|Unix Socket 监听| TerminalDaemon
     Controller -->|读取/更新| FileStorage[(~/.herdr-controller/*.json)]
     Sentinel -->|定时巡检| FileStorage
     Sentinel -->|必要时重启| Controller

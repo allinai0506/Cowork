@@ -1,5 +1,10 @@
 # 空间现场模型与动态自愈机制 (tab-node-model.md)
 
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
 > **Tab = Node 空间现场、Anchor 母体机制与任务派发前拓扑自动自愈**  
 > 关联索引: [[index]] | [[system-overview]] | [[domain-model]] | [[task-lifecycle]]
 
@@ -9,11 +14,11 @@
 
 在早期的硬编码设计中，系统将步骤固化为 `requirements` ➔ `plan` ➔ `implementation` 等固定 6 个阶段，导致无法编排非研发类流程，且一旦用户误关终端窗格，整个调度直接崩溃。
 
-现代 Herdr 确立了根本性解耦原则：
-> `FACT` **Workflow 拓扑定义是逻辑事实；Herdr 的 Tab ID 与 Pane ID 仅仅是易失的运行时现场缓存。**
+现代 HAFlow 确立了根本性解耦原则：
+> `FACT` **Workflow 拓扑定义是逻辑事实；终端的 Tab ID 与 Pane ID 仅仅是易失的运行时现场缓存。**
 
 ```text
-Herdr Workspace (项目全局空间，如 w9)
+Workspace (项目全局空间，如 w9)
   │
   ├── Tab 1: Coordinator (总指挥大脑)
   │     └── Pane 1: 总指挥 Agent (交互式总指挥，接收 Controller 指令)

@@ -14,7 +14,7 @@ from herdr import projection as herdr_projection
 from herdr.agent_binary import resolve_agent_binary
 PROJECTS_FILE=ROOT/'projects.json'; WORKFLOWS_FILE=ROOT/'workflows.json'; TASKS_FILE=ROOT/'tasks.json'; POOLS_FILE=ROOT/'agent-pools.json'; SLOTS_FILE=ROOT/'pane-slots.json'; LOG_DIR=ROOT/'logs'
 HOST='127.0.0.1'; PORT=int(os.environ.get('HERDR_CONSOLE_PORT','8765'))
-PRODUCT_NAME='共事工厂'; PRODUCT_TAGLINE='本地 AI 软件工厂'
+PRODUCT_NAME='HAFlow'; PRODUCT_TAGLINE='让人和多个 AI Agent 一起把事情做完'
 HERDR_TASK=HERDR_ROOT/'bin'/'herdr-task'
 RUN_JOBS={}
 RUN_JOBS_LOCK=threading.Lock()

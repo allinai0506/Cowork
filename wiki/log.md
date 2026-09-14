@@ -1,6 +1,11 @@
 # Wiki Evolution Log (log.md)
 
-> 本文件为 Herdr 知识层的 Append-Only 演进记录。  
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
+> 本文件为 HAFlow 知识层的 Append-Only 演进记录。  
 > 仅记录 Wiki 结构与知识库发生实质性变更的原因与概要，不记录细碎的代码提交流水。
 
 ---
@@ -455,4 +460,17 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 新增 `tests/test_state_transition_gateway.py`（32 项高覆盖专项测试，覆盖纯规则、非法拒绝、事务回滚、Admin 强制覆盖、Fail-Closed、防倒灌、投影锁、Teardown 门禁前置、并发元数据防踩踏、closing 状态防 TOCTOU、投影路径优先级、保留字段防伪、Sentinel 启动 bootstrap、同状态纯元数据更新、父工作流 pending 状态）；
   - 全仓自动化回归测试达 422 项 + 12 subtests（100% 绿灯全部通过）；
   - 沉淀并归档通用工程教训 §36。
+
+## [2026-09-14] brand | Official brand name HAFlow unification
+- **产品官方品牌体系正式确定与统一**：
+  - 公司：上海共事智能科技有限公司
+  - 品牌：共事
+  - 产品：HAFlow
+  - 一句话口号：让人和多个 AI Agent 一起把事情做完
+  - 英文对应：HAFlow (Human + Agent, in Flow)
+- **文档与元数据去陈旧化**：
+  - 在全仓核心文档（`README.md`、`CLAUDE.md`、`AGENTS.md`、`RULES.md`、`console/README.md`、`docs/`、`wiki/`）中全面替换旧产品名称（"Herdr" / "共事工厂"），确立以 **HAFlow** 为核心的正式品牌标识；
+  - 同步更新文档内文件跳转超链接，适配新根路径 `/Users/user/HAFlow`；
+  - 同步更新 Web 控制台（`console/herdr_factory_console.py`）中的 `PRODUCT_NAME='HAFlow'` 与 `PRODUCT_TAGLINE='让人和多个 AI Agent 一起把事情做完'` 常量，实现产品名称前后端一致注入。
+
 

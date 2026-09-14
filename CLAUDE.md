@@ -1,5 +1,7 @@
 # Claude 开发与执行指引 (CLAUDE.md)
 
+> **上海共事智能科技有限公司 · 共事 · HAFlow**  
+> *让人和多个 AI Agent 一起把事情做完 (Human + Agent, in Flow)*  
 > 本文件为 Claude / AI Assistant 在本仓库工作时的**核心执行入口**。  
 > 涵盖关键路径、日常开发调试命令、变更验收清单与高频环境避坑指南。
 
@@ -8,7 +10,7 @@
 ## 1. 关键系统路径 (Key Paths & Layout)
 
 ```text
-/Users/user/herdr/
+/Users/user/HAFlow/
 ├── bin/                          # CLI 执行入口 (herdr-factory, herdr-task, preflight)
 ├── services/                     # LaunchAgent 后台服务脚本 (controller, sentinel, notifier, worker)
 ├── herdr/                        # 核心业务包 (workflow, agent_router, pane_pool, projects, topology)
@@ -56,7 +58,7 @@ pytest -v tests/test_workflow_engine.py
 
 ### 2.3 后台服务管理 (macOS LaunchAgent)
 ```bash
-# 查看所有 Herdr 后台服务运行状态
+# 查看所有后台常驻服务运行状态
 launchctl list | grep herdr
 
 # 热重启 Controller 调度进程 (代码修改后必须执行)
@@ -109,9 +111,9 @@ python3 -m compileall herdr/ services/ bin/ tests/
 - **正解**：严禁使用裸 `git status`！必须使用 `./bin/herdr-task verify-baseline <task-id>`，以系统打下的 Git Tree 快照为准，只有列在 `TASK_CHANGED` 下的文件才是当前 Task 的真实产出。
 
 ### ⚠️ 坑点 3：Tab 与 Anchor Pane 误关与易失性
-- **现象**：在 Herdr UI 中误关了某个阶段的 Tab 或 Anchor 终端，担心任务崩溃或找不到工位。
+- **现象**：在多工位终端现场中误关了某个阶段的 Tab 或 Anchor 终端，担心任务崩溃或找不到工位。
 - **原因**：Tab ID 和 Pane ID 只是动态的运行时缓存，真正的逻辑身份是 Node ID / Label。
-- **正解**：Herdr 在任务派发前具备自动检测并自愈能力。只要触发任务派发或调用 `ensure_node_runtime`，系统会自动发现并重新创建对应 Tab 和 Anchor Pane，无需手动重建。
+- **正解**：HAFlow 在任务派发前具备自动检测并自愈能力。只要触发任务派发或调用 `ensure_node_runtime`，系统会自动发现并重新创建对应 Tab 和 Anchor Pane，无需手动重建。
 
 ### ⚠️ 坑点 4：`No READY Agent found` 路由阻断
 - **现象**：启动工作流或派发任务时，提示找不到可用 Agent。

@@ -1,12 +1,17 @@
 # 工作流模板编写进阶实战指南 (Template Authoring Guide)
 
-> 本文档指导开发者如何从零构建、调试和发布自定义的 Herdr Workflow 模板。
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
+> 本文档指导开发者如何从零构建、调试和发布自定义的 HAFlow Workflow 模板。
 
 ---
 
 ## 1. 模板存放规范
 
-Herdr 支持在以下两级路径加载工作流模板：
+HAFlow 支持在以下两级路径加载工作流模板：
 1. **全局/用户模板目录**：`~/.herdr-controller/templates/<name>.yaml`
 2. **仓库/内置模板目录**：`workflow_templates/<name>.yaml`
 

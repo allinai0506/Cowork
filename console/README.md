@@ -1,10 +1,14 @@
-# 共事工厂控制台（Herdr Factory Console）
+# HAFlow 控制台 (HAFlow Console)
 
-**产品名称：共事工厂**，产品标语：本地 AI 软件工厂。
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **标语：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
 
 产品名与标语以 `console/herdr_factory_console.py` 顶部的 `PRODUCT_NAME` / `PRODUCT_TAGLINE` 常量为唯一事实来源（first-class citizen）：页面标题、侧边栏品牌区均由该常量注入，禁止在 HTML/JS 中散落硬编码。前端界面文案统一使用纯中文，领域名词按用户确认的映射翻译：**Tab=工作流节点/阶段、Pane=智能体工位、Agent=执行者、Task=任务、Workspace=项目空间、Workflow=工作流**（顶部指标卡固定为「项目空间」、「活跃工作流」；紧凑场景允许短形"工位/节点"）；`auto`、Router、agent 名称（opencode/codex/claude 等）与后端状态枚举及 API 协议字段保持原样。
 
-这里是共事工厂控制台的仓库内 canonical source。此前 Console 只有部署副本 `~/.herdr-console/herdr_factory_console.py`，导致前端改动无法随仓库审查、同步和回滚。
+这里是 HAFlow 控制台的仓库内 canonical source。此前 Console 只有部署副本 `~/.herdr-console/herdr_factory_console.py`，导致前端改动无法随仓库审查、同步和回滚。
 
 ## 技术栈
 

@@ -1,5 +1,10 @@
 # 系统定位与业务全景 (system-overview.md)
 
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
 > **系统概览与业务边界**  
 > 关联索引: [[index]] | [[architecture]] | [[domain-model]] | [[tab-node-model]]
 
@@ -7,16 +12,15 @@
 
 ## 1. 核心定位与解决的问题
 
-`FACT` **Herdr** 是基于 macOS 与 Herdr 终端多任务工作区的**本地 Multi-Agent Workflow Runtime 与 AI 研发工厂编排平台**。
+`FACT` **HAFlow** 是基于 macOS 与终端多任务工作区的**本地 Multi-Agent Workflow Runtime 与人机协同流编排平台**。
 
 系统解决的核心业务问题是：
 > 如何让多种异构的 AI Coding CLI（如 Claude Code, Codex, OpenCode, QoderCLI, Agy, Pi）在本地真实项目中，按照声明式的组织结构与 DAG 工作流，在**环境安全隔离**、**现场可自愈**、**可审计验收**与**无人值守守护**的前提下协同完成端到端研发任务。
 
 Evidence:
-- `pyproject.toml:description` ("Herdr Multi-Agent Workflow Platform")
+- `docs/architecture/architecture-overview.md`
 - `bin/herdr-factory`
 - `services/herdr-controller.py`
-- `docs/architecture/architecture-overview.md`
 
 ---
 
@@ -25,12 +29,12 @@ Evidence:
 ```mermaid
 graph TB
     subgraph External_Tools [外部执行与交互层]
-        HerdrServer["Herdr Server (~/.config/herdr/herdr.sock)"]
+        TerminalServer["终端底座服务 (~/.config/herdr/herdr.sock)"]
         AgentCLIs["Agent CLIs (claude, codex, opencode, qodercn, agy, pi)"]
         MacOS["macOS 系统设施 (launchd, APFS cp -cR, osascript)"]
     end
 
-    subgraph Herdr_Core [Herdr 控制与编排核心]
+    subgraph HAFlow_Core [HAFlow 控制与编排核心]
         CLI_Entry["CLI 入口 (herdr-factory, herdr-task, herdr-preflight)"]
         Services["LaunchAgent 常驻守护 (herdr-controller, herdr-sentinel, herdr-notifier)"]
         CoreLib["核心引擎 (workflow.py, agent_router.py, projects.py, topology.py)"]
@@ -45,8 +49,8 @@ graph TB
     Services --> CoreLib
     CoreLib --> StateFiles
     CoreLib --> CoWClones
-    CoreLib --> HerdrServer
-    Services --> HerdrServer
+    CoreLib --> TerminalServer
+    Services --> TerminalServer
     Services --> MacOS
     CoreLib --> AgentCLIs
 ```
@@ -59,7 +63,7 @@ graph TB
 - **策略路由层**: `herdr/agent_router.py` 负责健康准入门禁、Node 级策略匹配与带 TTL 的 Reservation 锁。
 
 ### 2.2 边界外依赖 (External System)
-- `FACT` **Herdr 终端服务**: 底层依赖外部启动的 `herdr status: running` 及其 Unix Domain Socket (`~/.config/herdr/herdr.sock`)。若 Herdr 未运行，大部分现场创建指令会失败。
+- `FACT` **终端底座服务**: 底层依赖外部启动的终端多工位底座及其 Unix Domain Socket (`~/.config/herdr/herdr.sock`)。若底层服务未运行，大部分现场创建指令会失败。
 - `FACT` **Agent CLI 二进制**: 本地必须安装对应的 CLI 工具并登录有效凭据（如 `~/.claude.json`, `~/.codex/auth.json`）。
 - `FACT` **macOS Launchd**: 服务常驻依赖 `launchctl` 管理的 LaunchAgents (`com.user.herdr-controller` 等)。
 
@@ -89,7 +93,7 @@ Evidence:
 
 ## 4. 关键认知与推论
 
-- `INFERENCE` Herdr 的架构本质是一个“针对 AI Agent 的分布式作业调度操作系统”，将终端口视作物理工位，将 Agent 视作劳动力进程，将 DAG 视作业务生产管线。
+- `INFERENCE` HAFlow 的架构本质是一个“让人和多个 AI Agent 一起把事情做完”的人机协同流编排平台，将终端视作物理工位，将 Agent 视作劳动力进程，将 DAG 视作业务生产管线。
 - `UNKNOWN` 目前代码中 `services/herdr-controller.py` 顶部写死了默认的 `COORDINATOR_PANE = "w6:p1H"`，但在动态运行时会优先通过 `coordinator_pane_for_workflow` 获取真实项目 Pane。该写死值属于历史遗留或 fallback，需要关注是否在某些无 workflow_id 场景触发。
 
 Evidence:

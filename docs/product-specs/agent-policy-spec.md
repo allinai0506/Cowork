@@ -1,12 +1,17 @@
 # Agent 路由与策略规范 (Agent Policy & Routing Spec)
 
-> 本文档规范定义 Herdr 系统中 Agent 的选择、健康准入、Node 策略继承与并发预占 (Reservation) 机制。
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
+> 本文档规范定义 HAFlow 系统中 Agent 的选择、健康准入、Node 策略继承与并发预占 (Reservation) 机制。
 
 ---
 
 ## 1. 概念与角色
 
-Herdr 支持多种不同特性的执行 Agent：
+HAFlow 支持多种不同特性的执行 Agent：
 - `claude` (Claude Code)：逻辑推理强，适合架构、评审与全局把关；
 - `codex` (Codex CLI)：代码能力强，适合实现与精细重构；
 - `opencode` (OpenCode Interpreter)：执行与终端互动强，通用性高；

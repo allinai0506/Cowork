@@ -1,6 +1,11 @@
-# Herdr 通用 Agent 编排系统使用指南 (Tab = Workflow Node)
+# HAFlow 通用 Agent 编排系统使用指南 (Tab = Workflow Node)
 
-> 本文档详细介绍 Herdr “Tab 作为工作流节点、Pane 作为 Agent 工位、Agent 作为执行者”的通用多 Agent 编排系统的使用方法、模板开发与运维自愈机制。
+> **公司：上海共事智能科技有限公司**  
+> **品牌：共事**  
+> **产品：HAFlow**  
+> **一句话：让人和多个 AI Agent 一起把事情做完**  
+> *Human + Agent, in Flow*  
+> 本文档详细介绍 HAFlow “Tab 作为工作流节点、Pane 作为 Agent 工位、Agent 作为执行者”的通用多 Agent 编排系统的使用方法、模板开发与运维自愈机制。
 
 ---
 
@@ -20,7 +25,7 @@
 
 ## 1. 核心概念与模型映射
 
-Herdr 通用编排系统打破了过去“固定 6 阶段软件开发”的硬编码限制，将业务领域（研发、标书、客服、法务、内容等）全面抽象为通用的 **DAG 工作流模型**：
+HAFlow 通用编排系统打破了过去“固定 6 阶段软件开发”的硬编码限制，将业务领域（研发、标书、客服、法务、内容等）全面抽象为通用的 **DAG 工作流模型**：
 
 ```text
 Project (项目 / 业务空间)
@@ -30,11 +35,11 @@ Project (项目 / 业务空间)
                     └── Agent (执行工单的 AI 或程序)
 ```
 
-在 Herdr 终端中，这套模型与界面元素形成严格的一对一映射：
+在终端工作区现场中，这套模型与界面元素形成严格的一对一映射：
 
-| Herdr 元素 | 编排模型概念 | 说明 |
+| 现场元素 | 编排模型概念 | 说明 |
 | :--- | :--- | :--- |
-| **Workspace** | **Project / 项目空间** | 每个被托管的项目在 Herdr 中对应独立的 Workspace（如 `w9`）。 |
+| **Workspace** | **Project / 项目空间** | 每个被托管的项目在终端多工位底座中对应独立的 Workspace（如 `w9`）。 |
 | **Tab** | **Workflow Node (节点)** | 每个节点对应一个独立的 Tab，名称带有节点序号与业务标签。 |
 | **Pane** | **Agent 工位 / 任务现场** | 每个 Tab 维护一个只读 Anchor Pane 作为锚点，Task 运行时自动 Split 独立工作工位。 |
 | **Agent** | **Executor (执行者)** | Claude Code, OpenCode, Codex, QoderCLI, Agy, Pi 等多样化模型。 |

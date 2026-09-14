@@ -227,8 +227,9 @@ class TestTermTranslation(unittest.TestCase):
             self.assertIn(snippet, self.html, f"missing translation: {snippet}")
 
     def test_english_terms_are_gone_from_visible_copy(self):
+        content = self.html.replace("让人和多个 AI Agent 一起把事情做完", "")
         for term in ("Agent ", "Task ", "Pane ", "Tab ", "Herdr 空间", "活跃 Workflow"):
-            self.assertNotIn(term, self.html, f"untranslated term remains: {term!r}")
+            self.assertNotIn(term, content, f"untranslated term remains: {term!r}")
 
 
 if __name__ == "__main__":
