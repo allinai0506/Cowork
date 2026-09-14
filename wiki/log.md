@@ -428,21 +428,31 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 ## [2026-09-14] feat | Kernel State Transition Contract & Gateway (Phase 1)
 - **函数式状态机核心 (`herdr/transitions.py`)**：
   - 定义纯逻辑状态转移字典 `TASK_TRANSITIONS` 与 `WORKFLOW_TRANSITIONS`；
+  - 正式引入 `closing` 状态（`running/in_progress -> closing -> completed/failed`），纳入 `ACTIVE_WORKFLOW_STATUSES`；
   - 分类任务状态（`ACTIVE_TASK_STATUSES`, `COMPLETED_TASK_STATUSES`, `TERMINAL_TASK_STATUSES`）；
-  - 提供纯函数验证接口 `validate_task_transition(old_status, new_status)` 与 `validate_workflow_transition(old_status, new_status)`，无任何 I/O 与副作用；
-  - 允许同状态自流转（幂等操作），对非法状态跃迁抛出统一异常 `InvalidTransitionError`。
+  - 提供纯函数验证接口 `validate_task_transition(old_status, new_status)` 与 `validate_workflow_transition(old_status, new_status)`，零 I/O、零副作用；
+  - 允许同状态自流转（幂等），对非法跃迁抛出统一异常 `InvalidTransitionError`。
 - **单一事务状态变迁网关 (`herdr/state_db.py`, `herdr/state_store.py`, `herdr/kernel.py`)**：
-  - 在 `state_db.py` 中实现 `transition_task()` 与 `transition_workflow()`：统一在 SQLite `BEGIN IMMEDIATE` 强事务锁下执行当前状态检查、转移合法性校验、数据表实体更新与对应 `WorkflowEvent`（`event_type="task_transition"` / `"workflow_transition"`）的追加，保证原子性；
-  - 提供 `force=True` 管理员/运维逃生通道，在事件元数据中如实记录 `forced: True`；
-  - `herdr/kernel.py` 对外暴露 `transition_task` 与 `transition_workflow`，并在落库后自动将变更同步导出至 `tasks.json` / `workflows.json`。
+  - 在 `state_db.py` 中实现 `transition_task()` 与 `transition_workflow()`：统一在 SQLite `BEGIN IMMEDIATE` 强事务锁下执行状态检查、转移校验、数据表更新与 `WorkflowEvent`（`task_transition` / `workflow_transition`）原子追加；
+  - 提供 `force=True` 管理员/运维逃生通道，在事件元数据中如实记录 `forced: True`；非法非契约状态即便 `force=True` 也坚决拦截；
+  - 实现原子元数据独立更新网关 `update_task_metadata()` / `update_workflow_metadata()`：仅更新业务元数据（verdict、history、commit 等），强制白名单拦截任何试图篡改 `status`/`task_id` 等保护字段的行为，彻底根除陈旧内存快照全量覆写（Snapshot UPSERT）踩踏新状态的隐患。
+- **跨进程锁定投影同步与严格优先级解析**：
+  - 实现 `sync_tasks_projection()` 与 `sync_workflows_projection()`，基于 `fcntl.flock` 跨进程排他锁并在拿锁后从 SQLite 实时重导出，杜绝脏写与并发覆盖；
+  - 实现 `resolve_tasks_projection_file()` 与 `resolve_workflows_projection_file()`，统一收口优先级：`explicit arg -> os.environ -> store.db_path.parent -> default CONTROLLER_DIR`。
+- **Teardown 所有权预占与 TOCTOU 竞态根除**：
+  - `close_workflow` 严格实行 Preflight Gate：在执行任何物理销毁前，先校验当前状态能否流转至 `closing`；
+  - 在开始物理销毁前，通过 Gateway 原子推进为 `closing` 抢占排他所有权；`closing` 状态下并发 `pause` 天然被拒；物理销毁完成后最终流转至 `completed`。
+- **审计事件元数据防伪与实体健康兜底**：
+  - 定义 `RESERVED_EVENT_METADATA_FIELDS`，前置拦截任何试图通过 metadata 伪造 `from_status` / `to_status` / `source` / `reason` 等字段的行为，并结合结构级末尾覆写实现双重防伪；
+  - `save_task()` 自动补全父工作流严格置为合法初始状态 `"pending"`（严禁非契约的 `"unknown"`）；
+  - `services/herdr-sentinel.py` 启动时显式注入 `HERDR_ROOT` 到 `sys.path[0]`，脱离外部环境变量即可可靠启动。
 - **控制原语与调用方全面收敛**：
   - `kernel.pause_workflow()`、`kernel.resume_workflow()`、`kernel.rollback_workflow()` 改造为通过网关推进；
-  - `bin/herdr-task`（`set_status`, `supersede_task`, `_mark_workflow_completed`, `reopen_workflow`）全量对接网关；
+  - `bin/herdr-task`（`set_status`, `supersede_task`, `_mark_workflow_completed`, `reopen_workflow`）全量对接网关；同状态修改 verdict/note 走纯元数据通道；
   - `bin/herdr-factory`（`_update_workflow_status`）全量对接网关；
-  - `services/herdr-sentinel.py` 超时流转与 `herdr/steering.py` 紧急中断流转全量对接网关；
-  - 在过渡期兼容旧单元测试 monkeypatch 临时文件路径的场景，双向确保 StateStore 与文件句柄强一致。
+  - `services/herdr-sentinel.py` 超时流转与 `herdr/steering.py` 紧急中断流转全量对接网关，废除从 JSON 反向复活已被删除实体的倒灌逻辑。
 - **测试与知识沉淀**：
-  - 新增 `tests/test_state_transition_gateway.py`（14 项全新测试，100% 覆盖纯规则、非法拒绝、事务回滚、Admin 强制覆盖与 CLI 事件触发）；
-  - 全仓自动化回归测试达 404 项（100% 绿灯全部通过）；
+  - 新增 `tests/test_state_transition_gateway.py`（32 项高覆盖专项测试，覆盖纯规则、非法拒绝、事务回滚、Admin 强制覆盖、Fail-Closed、防倒灌、投影锁、Teardown 门禁前置、并发元数据防踩踏、closing 状态防 TOCTOU、投影路径优先级、保留字段防伪、Sentinel 启动 bootstrap、同状态纯元数据更新、父工作流 pending 状态）；
+  - 全仓自动化回归测试达 422 项 + 12 subtests（100% 绿灯全部通过）；
   - 沉淀并归档通用工程教训 §36。
 

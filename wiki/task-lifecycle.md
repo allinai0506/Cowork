@@ -172,18 +172,16 @@ integration branch / 转写证据 / 任务记录)。pane 从不复用——
 - mode=none 的 docs/test/review 任务无 integration 通道 → 默认保留,
   `--purge-clones` 显式授权后才删。
 
-### 5.3 close-workflow 与共享 tab 守卫
+### 5.3 close-workflow、所有权预占与共享 tab 守卫
 
-`herdr-task close-workflow <wf>`:活跃任务闸门 → 逐任务 finalize → 关阶段 tab →
-标记 workflows.json `completed` → 清 stage-state → 输出收尾报告。
-- **共享 tab 连带销毁守卫**:连续 workflow 常复用同一 workspace 的阶段 tab,
-  关 tab 前必须校验 tab 内全部存活 pane 均属本 workflow(锚点 + 本 workflow 任务);
-  有外来 pane 或 pane list 不可用时跳过该 tab 并写入报告 `tabs_skipped`。
-- **总指挥 pane 例外**:默认保留至知识沉淀 + PR 合并后由
-  `--include-coordinator` 关闭。
-- **自动触发**:Controller 在 `is_workflow_completed` 时后台调用
-  `close-workflow`(in-flight 防重入 + status=completed 短路);
-  零任务的已登记运行视为平凡完成。
+`herdr-task close-workflow <wf>`:
+1. **Preflight 门禁与所有权预占**: 首先执行 `validate_workflow_transition(cur_status, "closing", force=force)` 前置校验，通过后在任何物理清理前原子将工作流状态推进为 `closing`；在 `closing` 状态下并发 `pause` 会被状态机天然拒绝，消除物理现场已毁但工作流停在 paused 的 TOCTOU 竞态；
+2. **活跃任务闸门与逐任务 finalize**;
+3. **关阶段 tab（共享 tab 守卫）**: 连续 workflow 常复用同一 workspace 的阶段 tab, 关 tab 前必须校验 tab 内全部存活 pane 均属本 workflow(锚点 + 本 workflow 任务); 有外来 pane 或 pane list 不可用时跳过该 tab 并写入报告 `tabs_skipped`；
+4. **终态流转**: 物理资源销毁完成后，通过 Gateway 将工作流从 `closing` 原子推进为 `completed`；
+5. **清 stage-state 并输出收尾报告**。
+- **总指挥 pane 例外**: 默认保留至知识沉淀 + PR 合并后由 `--include-coordinator` 关闭。
+- **自动触发**: Controller 在 `is_workflow_completed` 时后台调用 `close-workflow`(in-flight 防重入 + status=completed/closing 短路); 零任务的已登记运行视为平凡完成。
 
 Evidence:
 - `bin/herdr-task#finalize_task` `#close_workflow` `#_tab_foreign_panes` `#dump_transcript`
