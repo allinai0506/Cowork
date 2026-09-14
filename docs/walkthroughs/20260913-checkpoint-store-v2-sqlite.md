@@ -3,7 +3,7 @@
 > **交付报告与演进归档**  
 > 日期：2026-09-13  
 > 分支：`feat/checkpoint-store-v2-sqlite`  
-> 涉及模块：[`herdr/state_db.py`](file:///Users/user/herdr/herdr/state_db.py)、[`herdr/kernel.py`](file:///Users/user/herdr/herdr/kernel.py)、[`bin/herdr-task`](file:///Users/user/herdr/bin/herdr-task)、[`tests/test_state_db_v2.py`](file:///Users/user/herdr/tests/test_state_db_v2.py)
+> 涉及模块：[`herdr/state_db.py`](file:///Users/user/HAFlow/herdr/state_db.py)、[`herdr/kernel.py`](file:///Users/user/HAFlow/herdr/kernel.py)、[`bin/herdr-task`](file:///Users/user/HAFlow/bin/herdr-task)、[`tests/test_state_db_v2.py`](file:///Users/user/HAFlow/tests/test_state_db_v2.py)
 
 ---
 
@@ -145,7 +145,7 @@ ALL PHASES OF UNIVERSAL RUNTIME SUBSTRATE VERIFIED SUCCESSFULLY!
 
 ## 4. 沉淀工程教训与规范
 
-本次里程碑沉淀了通用工程教训 **§28**（已更新至 [`docs/lessons/lessons-learned.md`](file:///Users/user/herdr/docs/lessons/lessons-learned.md)）：
+本次里程碑沉淀了通用工程教训 **§28**（已更新至 [`docs/lessons/lessons-learned.md`](file:///Users/user/HAFlow/docs/lessons/lessons-learned.md)）：
 - **连接复用规避嵌套事务死锁**：在开启独占事务时，所有被调用写操作必须支持 `conn: Optional[sqlite3.Connection]` 外部连接透传；
 - **存储双写 ID 归一**：跨介质持久化必须由单一源头确定第一公民业务实体 ID，严禁分头生成 UUID 导致裂脑；
 - **时间旅行分叉需深度重置衍生状态**：分叉派生新执行分支时必须彻底清除旧阶段锁与物理工位绑定，防止调度器幽灵锁死。

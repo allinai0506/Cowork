@@ -6,11 +6,11 @@
 
 | 能力 / 机制 | 实现位置 | 接口形态 (CLI / API / UI) | 验证状态 |
 |------------|---------|--------------------------|---------|
-| **即时制动 (Halt / Interrupt)** | [`herdr/steering.py`](file:///Users/user/herdr/herdr/steering.py) | `herdr-task halt <id>`<br>`POST /api/task/halt`<br>控制台任务看板「制动」按钮 | ✅ 100% 通过 |
-| **插话队列 (Steer Queue)** | [`herdr/steering.py`](file:///Users/user/herdr/herdr/steering.py) | `herdr-task steer <id> "<cmd>"`<br>`POST /api/task/steer`<br>控制台任务看板「插话」弹窗 | ✅ 100% 通过 |
-| **紧急立即打断插话** | [`herdr/steering.py`](file:///Users/user/herdr/herdr/steering.py) | `herdr-task steer <id> "<cmd>" --urgent`<br>`POST /api/task/steer (urgent:true)`<br>控制台插话勾选「紧急插话」 | ✅ 100% 通过 |
-| **闲暇平滑消费注入** | [`services/herdr-sentinel.py`](file:///Users/user/herdr/services/herdr-sentinel.py) | 后台 Sentinel 看门狗周期检测 idle 并自动消费注入 | ✅ 100% 通过 |
-| **结构化纠偏协议** | [`herdr/steering.py`](file:///Users/user/herdr/herdr/steering.py) | `format_steer_prompt`<br>标准发起人、时间戳与指令区 | ✅ 100% 通过 |
+| **即时制动 (Halt / Interrupt)** | [`herdr/steering.py`](file:///Users/user/HAFlow/herdr/steering.py) | `herdr-task halt <id>`<br>`POST /api/task/halt`<br>控制台任务看板「制动」按钮 | ✅ 100% 通过 |
+| **插话队列 (Steer Queue)** | [`herdr/steering.py`](file:///Users/user/HAFlow/herdr/steering.py) | `herdr-task steer <id> "<cmd>"`<br>`POST /api/task/steer`<br>控制台任务看板「插话」弹窗 | ✅ 100% 通过 |
+| **紧急立即打断插话** | [`herdr/steering.py`](file:///Users/user/HAFlow/herdr/steering.py) | `herdr-task steer <id> "<cmd>" --urgent`<br>`POST /api/task/steer (urgent:true)`<br>控制台插话勾选「紧急插话」 | ✅ 100% 通过 |
+| **闲暇平滑消费注入** | [`services/herdr-sentinel.py`](file:///Users/user/HAFlow/services/herdr-sentinel.py) | 后台 Sentinel 看门狗周期检测 idle 并自动消费注入 | ✅ 100% 通过 |
+| **结构化纠偏协议** | [`herdr/steering.py`](file:///Users/user/HAFlow/herdr/steering.py) | `format_steer_prompt`<br>标准发起人、时间戳与指令区 | ✅ 100% 通过 |
 
 ---
 

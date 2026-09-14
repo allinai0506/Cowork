@@ -420,7 +420,7 @@ workflow_config: {project['workflow_file']}
 执行要求：
 1. 这是项目 {project['project_name']}，所有 Task 必须属于 workflow_id={workflow_id}。
 2. 从首个就绪节点 {first_node_id} 开始。
-3. 创建 Task 必须使用 ~/herdr/bin/herdr-task launch。
+3. 创建 Task 必须使用 ~/HAFlow/bin/herdr-task launch。
 4. 每次 launch 必须显式指定：
    --workflow-id {workflow_id}
    --node <node_id>

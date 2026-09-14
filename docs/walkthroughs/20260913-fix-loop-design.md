@@ -112,7 +112,7 @@ loop_count: N / max_loops: 3
 
 Controller 已自动作废受影响的 gate 与下游 Task(见 registry)。
 你现在只需:
-~/herdr/bin/herdr-task launch --workflow-id <wf> --stage <retry_node> \
+~/HAFlow/bin/herdr-task launch --workflow-id <wf> --stage <retry_node> \
      --onto <suggested_branch> --agent auto \
      --goal "修复 <blocker>" [--supersedes <旧 fix task,如再次修复>]
 fix task 完成后,Controller 将自动按 test → review → wrapup 顺序重新推进。

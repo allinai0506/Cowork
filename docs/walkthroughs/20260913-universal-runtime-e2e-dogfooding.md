@@ -4,7 +4,7 @@
 
 在完成《通用人机协同底座架构》五阶段演进（PR #11 - PR #15 全量合入主干）后，为防止“各模块单点可用但全链路集成脱节”的隐患，本任务针对五大阶段开展了**跨领域真实场景全链路端到端集成测试与自动化演练**。
 
-演练以跨领域商业研报模板 [`business-research-v1.yaml`](file:///Users/user/herdr/workflow_templates/business-research-v1.yaml) 为核心载体，横跨五大架构层级执行闭环校验。
+演练以跨领域商业研报模板 [`business-research-v1.yaml`](file:///Users/user/HAFlow/workflow_templates/business-research-v1.yaml) 为核心载体，横跨五大架构层级执行闭环校验。
 
 ---
 
@@ -24,7 +24,7 @@
 ## 3. 核心交付成果
 
 1. **全链路端到端集成测试套件**：
-   - 文件：[`tests/test_universal_substrate_e2e.py`](file:///Users/user/herdr/tests/test_universal_substrate_e2e.py)
+   - 文件：[`tests/test_universal_substrate_e2e.py`](file:///Users/user/HAFlow/tests/test_universal_substrate_e2e.py)
    - 包含 4 大端到端集成测试场景：
      - `test_e2e_full_business_research_lifecycle_approve`：商业研报全生命周期（模板 -> 初始化 -> 挂起恢复 -> 插话制动 -> 白盒遥测 -> 会签批准放行）。
      - `test_e2e_business_research_reject_and_rollback_loop`：门禁节点会签驳回 (`action='reject'`)，验证工作流准确回退至上游节点，下游置为 `superseded`，人类评审反馈全量留痕。
@@ -32,11 +32,11 @@
      - `test_e2e_checkpoint_lifecycle_and_restoration`：验证内核检查点快照存储、检索、状态人为破坏与时间旅行还原。
 
 2. **独立可执行的实战演练工具 (Dogfooding CLI)**：
-   - 文件：[`scripts/verify-universal-runtime-e2e.py`](file:///Users/user/herdr/scripts/verify-universal-runtime-e2e.py)
+   - 文件：[`scripts/verify-universal-runtime-e2e.py`](file:///Users/user/HAFlow/scripts/verify-universal-runtime-e2e.py)
    - 支持开发者或 CI 随时一键执行全流程实战演练，打印彩色的高信噪比日志，自动在隔离环境验证五阶段全部核心原语。
 
 3. **文档与归档索引治理**：
-   - 更新 [`docs/walkthroughs/README.md`](file:///Users/user/herdr/docs/walkthroughs/README.md)，全量索引 Universal Substrate 的 7 份里程碑交付文档。
+   - 更新 [`docs/walkthroughs/README.md`](file:///Users/user/HAFlow/docs/walkthroughs/README.md)，全量索引 Universal Substrate 的 7 份里程碑交付文档。
 
 ---
 

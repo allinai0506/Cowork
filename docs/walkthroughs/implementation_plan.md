@@ -59,7 +59,7 @@ graph TD
    - 在 `herdr-task launch` 中增加 `--supersedes <old_task_id>` 参数：在派发重试/替代任务时，原子化将原任务标记为 `superseded`，记录关联并释放资源。
 
 ### 维度二：DAG 节点完成判定重构 (DAG Completion Re-evaluation)
-- 重构 [`services/herdr-controller.py:is_node_complete`](file:///Users/user/herdr/services/herdr-controller.py#L272) 与 [`bin/herdr-task:node_status`](file:///Users/user/herdr/bin/herdr-task#L1350)：
+- 重构 [`services/herdr-controller.py:is_node_complete`](file:///Users/user/HAFlow/services/herdr-controller.py#L272) 与 [`bin/herdr-task:node_status`](file:///Users/user/HAFlow/bin/herdr-task#L1350)：
   ```python
   # 排除已被替代的任务
   active_tasks = [
@@ -96,28 +96,28 @@ graph TD
 
 ## 3. 拟实施变更清单 (Proposed Changes)
 
-#### [MODIFY] [`bin/herdr-task`](file:///Users/user/herdr/bin/herdr-task)
+#### [MODIFY] [`bin/herdr-task`](file:///Users/user/HAFlow/bin/herdr-task)
 - 拓展 `TRANSITIONS`：增加 `superseded` 状态及对应合法流转（`failed -> superseded`, `cleaned -> completed` 等）。
 - 增加 `supersede` 子命令与处理函数 `supersede_task(task_id, new_task_id, reason)`。
 - 在 `launch` 命令中支持 `--supersedes` 参数，实现派发新任务时原子作废旧任务。
 - 重构 `node_status`：排除 `superseded` 任务后计算 `complete`。
 - 增加 `stage-reset` 与 `advance` 运维子命令。
 
-#### [MODIFY] [`services/herdr-controller.py`](file:///Users/user/herdr/services/herdr-controller.py)
+#### [MODIFY] [`services/herdr-controller.py`](file:///Users/user/HAFlow/services/herdr-controller.py)
 - 重构 `is_node_complete`：过滤 `superseded` 与 `superseded_by` 任务。
 - 增加阶段防重锁自动撤销逻辑 `reconcile_stage_advance_states()`：在每次巡检时清理前置未完成的失效 `notified` 记录。
 - 将 `coordinator_worker` 改造为按工作流并发派发（使用 `ThreadPoolExecutor` 或独立工作流线程），消除 `subprocess.run(..., --wait)` 导致的全局阻塞。
 
-#### [MODIFY] [`herdr/workflow.py`](file:///Users/user/herdr/herdr/workflow.py)
+#### [MODIFY] [`herdr/workflow.py`](file:///Users/user/HAFlow/herdr/workflow.py)
 - 确保相关辅助方法和 DAG 校验兼容 `superseded` 任务语义。
 
-#### [NEW] [`tests/test_stage_advance_and_supersede.py`](file:///Users/user/herdr/tests/test_stage_advance_and_supersede.py)
+#### [NEW] [`tests/test_stage_advance_and_supersede.py`](file:///Users/user/HAFlow/tests/test_stage_advance_and_supersede.py)
 - 编写覆盖以下场景的单元测试：
   1. 节点包含 `failed` 任务被 `supersede` 后，`is_node_complete` 能够正确返回 `True`。
   2. 节点前置重新挂起时，`stage-state.json` 的自动撤销逻辑测试。
   3. `herdr-task supersede` CLI 命令的状态与资源释放流转测试。
 
-#### [MODIFY] [`wiki/common-change-paths.md`](file:///Users/user/herdr/wiki/common-change-paths.md) 与 [`wiki/architecture.md`](file:///Users/user/herdr/wiki/architecture.md)
+#### [MODIFY] [`wiki/common-change-paths.md`](file:///Users/user/HAFlow/wiki/common-change-paths.md) 与 [`wiki/architecture.md`](file:///Users/user/HAFlow/wiki/architecture.md)
 - 同步更新 Wiki：记录 `superseded` 状态规范、替代任务操作流程与自愈机制。
 
 ---

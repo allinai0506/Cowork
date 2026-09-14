@@ -36,7 +36,7 @@
 ```bash
 herdr-deep-preflight --deep
 # 或完整路径：
-python3 /Users/user/herdr/bin/herdr-deep-preflight --deep
+python3 /Users/user/HAFlow/bin/herdr-deep-preflight --deep
 ```
 
 ### 3.2 针对特定项目排查

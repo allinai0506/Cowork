@@ -205,14 +205,14 @@ $$S = w_1 M_{\text{correct}} + w_2 M_{\text{quality}} + w_3 M_{\text{scope}} + w
 
 ### Component 1: 核心循环工具与执行器 (`herdr-loop`)
 
-#### [NEW] [`bin/herdr-loop`](file:///Users/user/herdr/bin/herdr-loop)
+#### [NEW] [`bin/herdr-loop`](file:///Users/user/HAFlow/bin/herdr-loop)
 - 循环守护与评估 CLI：
   - `herdr-loop init`: 初始化工作区的 `.herdr-loop/` 上下文。
   - `herdr-loop evaluate`: 运行评估器，收集测试和静态扫描结果，计算得分，落盘 `METRICS.json` 与 `EVALUATION.md`。
   - `herdr-loop tick`: 单步心跳执行，判断是否收敛或超限。
   - `herdr-loop run-daemon`: Pane 内部的守护进程（类似小型 cron），监控文件变动并自驱动循环。
 
-#### [NEW] [`herdr/evaluator.py`](file:///Users/user/herdr/herdr/evaluator.py)
+#### [NEW] [`herdr/evaluator.py`](file:///Users/user/HAFlow/herdr/evaluator.py)
 - 通用指标评分引擎：
   - 测试通过率解析器（pytest、jest、vitest、cargo test 通用输出适配器）。
   - Lint / Typecheck 结果解析器。
@@ -220,17 +220,17 @@ $$S = w_1 M_{\text{correct}} + w_2 M_{\text{quality}} + w_3 M_{\text{scope}} + w
 
 ### Component 2: 工位装配与调度升级 (`herdr-worker` & `herdr-controller`)
 
-#### [MODIFY] [`services/herdr-worker.py`](file:///Users/user/herdr/services/herdr-worker.py)
+#### [MODIFY] [`services/herdr-worker.py`](file:///Users/user/HAFlow/services/herdr-worker.py)
 - 在 Clone 工位初始化时，按 Node 模板自动生成 `.herdr-loop/` 结构与基础 `EVALUATOR.sh`。
 - 将任务执行命令包装进循环上下文，赋予 Agent 持续感知自身得分的能力。
 
-#### [MODIFY] [`services/herdr-controller.py`](file:///Users/user/herdr/services/herdr-controller.py)
+#### [MODIFY] [`services/herdr-controller.py`](file:///Users/user/HAFlow/services/herdr-controller.py)
 - 消除协调者（Coordinator）在回炉流中的人工阻塞：
   - 当 Gate 判定 `blocked` 时，自动提取 Downstream 写入的 `EVALUATION.md` 与测试用例。
   - 自动向 `retry_node` 派发续接 Task，将回炉指引通过 `GOAL.md` 直接落盘，不再依赖 Coordinator 的文本中转。
   - 彻底解决 `[COORDINATOR BUSY]` 阻塞问题。
 
-#### [MODIFY] [`bin/herdr-task`](file:///Users/user/herdr/bin/herdr-task)
+#### [MODIFY] [`bin/herdr-task`](file:///Users/user/HAFlow/bin/herdr-task)
 - 增强 `set` 与 `finalize`：
   - 支持直接读取 `.herdr-loop/METRICS.json` 作为验收依据（`herdr-task verify-metrics <task_id>`）。
   - 严禁在得分低于 100 时被设为 `completed`。
