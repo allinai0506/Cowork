@@ -41,8 +41,7 @@
 | **工位实时打断与插话纠偏 (Steering Mesh)** | [[task-lifecycle]] | `herdr/steering.py`, `bin/herdr-task:steer` |
 | **白盒遥测、语义提炼与产物投影 (Projection Engine)** | [[task-lifecycle]] | `herdr/projection.py`, `console/herdr_factory_console.py` |
 | **通用配置驱动与受控 MCP 生态容器 (Dynamic Config & MCP Mesh)** | [[dag-workflow-engine]] | `herdr/mcp.py`, `herdr/workflow.py` |
-| **人机对等协同工作舱、注意力中心与成果会签 (Universal Studio UI)** | [[ops-center]], [[task-lifecycle]] | `console/herdr_factory_console.py` |
-| **嵌入式状态引擎、检查点快照与时间旅行分叉 (Checkpoint Store V2)** | [[task-lifecycle]], [[domain-model]] | `herdr/state_db.py`, `herdr/kernel.py`, `bin/herdr-task` |
+| **嵌入式状态引擎、检查点快照与时间旅行分叉 (StateStore & Checkpoint Store V2)** | [[task-lifecycle]], [[domain-model]] | `herdr/state_store.py`, `herdr/state_db.py`, `herdr/kernel.py`, `bin/herdr-task` |
 | **更新或扩展 Wiki 本身** | [[WIKI]] / [[log]] | `wiki/WIKI.md` |
 
 ---

@@ -15,6 +15,9 @@ from . import kernel
 from . import steering
 from . import projection
 from . import mcp
+from . import state_db
+from . import state_store
+from .state_store import StateStore, SQLiteStateStore, get_state_store
 
 __all__ = [
     "workflow",
@@ -28,6 +31,11 @@ __all__ = [
     "steering",
     "projection",
     "mcp",
+    "state_db",
+    "state_store",
+    "StateStore",
+    "SQLiteStateStore",
+    "get_state_store",
 ]
 
 # Provide backwards-compatible module aliases so legacy flat-file imports
@@ -46,5 +54,8 @@ for _alias, _module in [
     ("herdr_steering", steering),
     ("herdr_projection", projection),
     ("herdr_mcp", mcp),
+    ("herdr_state_db", state_db),
+    ("herdr_state_store", state_store),
 ]:
     sys.modules.setdefault(_alias, _module)
+

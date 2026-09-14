@@ -27,6 +27,7 @@ try:
     from herdr.workflow import find_node, normalize_workflow
     from herdr.topology import ensure_stage_topology
     from herdr.agent_binary import resolve_binary
+    from herdr.state_store import get_state_store
 except ImportError:
     from herdr_pane_pool import acquire_pane_for_task
     from herdr_agent_router import choose_agent, release_agent_reservation
@@ -41,6 +42,7 @@ except ImportError:
     from herdr_workflow import find_node, normalize_workflow
     from herdr_topology import ensure_stage_topology
     from herdr_agent_binary import resolve_binary
+    from herdr_state_store import get_state_store
 
 TASKS_FILE = os.environ.get("TASKS_FILE") or os.path.expanduser("~/.herdr-controller/tasks.json")
 WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE") or os.path.expanduser("~/.herdr-controller/workflow.json")
@@ -130,6 +132,13 @@ ANOMALY_ACTIONS = {
 
 def load_workflow(workflow_id=None):
     if workflow_id:
+        try:
+            store = get_state_store()
+            wf = store.get_workflow(workflow_id)
+            if wf:
+                return normalize_workflow(wf)
+        except Exception:
+            pass
         workflow = workflow_config_for(workflow_id)
         if workflow:
             return workflow
@@ -1035,26 +1044,57 @@ def ops_center(args):
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def load_tasks():
-    if not os.path.exists(TASKS_FILE):
-        return {"tasks": []}
+def _get_store():
+    if os.environ.get("HERDR_STATE_DB"):
+        return get_state_store(Path(os.environ["HERDR_STATE_DB"]))
+    t_file = globals().get("TASKS_FILE") or os.environ.get("TASKS_FILE")
+    if t_file:
+        p = Path(t_file)
+        db_path = p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
+        if db_path.parent.exists():
+            return get_state_store(db_path=db_path)
+    return get_state_store()
 
-    with open(TASKS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+
+def load_tasks():
+    store = _get_store()
+    if os.path.exists(TASKS_FILE):
+        try:
+            with open(TASKS_FILE, "r", encoding="utf-8") as f:
+                disk_data = json.load(f)
+            if isinstance(disk_data, dict):
+                for t in disk_data.get("tasks", []):
+                    tid = t.get("task_id")
+                    if tid and not store.get_task(tid):
+                        # ONLY insert new tasks from disk; existing SQLite state is authoritative
+                        store.save_task(t)
+        except Exception:
+            pass
+    return {"tasks": store.list_tasks()}
 
 
 def save_tasks(data):
-    tmp = TASKS_FILE + ".tmp"
+    store = _get_store()
+    for t in data.get("tasks", []):
+        if t.get("task_id"):
+            store.save_task(t)
 
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(
-            data,
-            f,
-            ensure_ascii=False,
-            indent=2
-        )
-
-    os.replace(tmp, TASKS_FILE)
+    # Sync backward-compatible JSON mirror (SQLite -> JSON only)
+    try:
+        tasks_dir = os.path.dirname(TASKS_FILE)
+        if tasks_dir and not os.path.exists(tasks_dir):
+            os.makedirs(tasks_dir, exist_ok=True)
+        tmp = TASKS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(
+                data,
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+        os.replace(tmp, TASKS_FILE)
+    except OSError:
+        pass
 
 
 def find_task(data, task_id):
@@ -2678,10 +2718,17 @@ def _mark_workflow_completed(workflow_id, outcome="delivered"):
     entry["status"] = "completed"
     entry["outcome"] = outcome
     entry["completed_at"] = _now()
-    tmp = WORKFLOWS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, WORKFLOWS_FILE)
+    entry.setdefault("workflow_id", workflow_id)
+    store = _get_store()
+    store.save_workflow(entry)
+
+    try:
+        tmp = WORKFLOWS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"workflows": entries}, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, WORKFLOWS_FILE)
+    except Exception:
+        pass
 
 
 def _workflow_stage_tabs(workflow_id, tasks):

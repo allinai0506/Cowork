@@ -35,6 +35,9 @@ def get_default_db_path() -> Path:
         return Path(os.environ["CHECKPOINTS_DIR"]).parent / "state.db"
     if os.environ.get("WORKFLOWS_FILE"):
         return Path(os.environ["WORKFLOWS_FILE"]).parent / "state.db"
+    if os.environ.get("TASKS_FILE"):
+        p = Path(os.environ["TASKS_FILE"])
+        return p.parent / "state.db" if p.name == "tasks.json" else p.with_suffix(".db")
     return CONTROLLER_DIR / "state.db"
 
 
@@ -107,12 +110,44 @@ def _ensure_schema(conn: sqlite3.Connection, path_key: str) -> None:
         );
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS steering_items (
+            steer_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            workflow_id TEXT,
+            instruction TEXT NOT NULL,
+            operator TEXT,
+            urgent INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'pending',
+            dispatched_at REAL,
+            created_at REAL,
+            payload_json TEXT
+        );
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS steering_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,
+            task_id TEXT,
+            steer_id TEXT,
+            instruction TEXT,
+            operator TEXT,
+            urgent INTEGER DEFAULT 0,
+            reason TEXT,
+            timestamp REAL,
+            payload_json TEXT
+        );
+    """)
+
     # Indexes for fast lookup and DAG queries
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_wf ON tasks(workflow_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_wf_created ON checkpoints(workflow_id, created_at DESC);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_parent ON checkpoints(parent_checkpoint_id);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_wf ON events(workflow_id, timestamp);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_task ON steering_items(task_id, status);")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_steering_hist_task ON steering_history(task_id, timestamp);")
 
     _INITIALIZED_DBS.add(path_key)
 
@@ -226,6 +261,54 @@ def get_workflow(workflow_id: str, db_path: Optional[Path] = None) -> Optional[D
         conn.close()
 
 
+def list_workflows(
+    status: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Fetch all workflows, optionally filtered by status."""
+    conn = get_db_connection(db_path)
+    try:
+        if status:
+            cur = conn.execute("SELECT * FROM workflows WHERE status = ? ORDER BY created_at DESC", (status,))
+        else:
+            cur = conn.execute("SELECT * FROM workflows ORDER BY created_at DESC")
+        results = []
+        for row in cur.fetchall():
+            meta = json.loads(row["metadata_json"] or "{}")
+            cfg = json.loads(row["config_json"] or "{}")
+            wf = dict(meta)
+            wf.update({
+                "workflow_id": row["workflow_id"],
+                "title": row["title"],
+                "status": row["status"],
+                "template_name": row["template_name"],
+                "current_stage": row["current_stage"],
+                "config": cfg,
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            })
+            results.append(wf)
+        return results
+    finally:
+        conn.close()
+
+
+def delete_workflow(workflow_id: str, db_path: Optional[Path] = None) -> bool:
+    """Delete a workflow and cascade its tasks/checkpoints."""
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN TRANSACTION;")
+        cur = conn.execute("DELETE FROM workflows WHERE workflow_id = ?", (workflow_id,))
+        deleted = cur.rowcount > 0
+        conn.execute("COMMIT;")
+        return deleted
+    except Exception:
+        conn.execute("ROLLBACK;")
+        raise
+    finally:
+        conn.close()
+
+
 def save_task(
     task_dict: Dict[str, Any],
     db_path: Optional[Path] = None,
@@ -238,9 +321,14 @@ def save_task(
         should_close = True
 
     tid = task_dict.get("task_id")
-    wid = task_dict.get("workflow_id")
-    if not tid or not wid:
-        raise ValueError("task_id and workflow_id are required")
+    if not tid:
+        raise ValueError("task_id is required")
+    wid = task_dict.get("workflow_id") or "default"
+
+    # Auto-ensure parent workflow exists to prevent foreign key violation
+    cur_wf = conn.execute("SELECT 1 FROM workflows WHERE workflow_id = ?", (wid,))
+    if not cur_wf.fetchone():
+        save_workflow({"workflow_id": wid, "title": wid, "status": "unknown"}, db_path, conn=conn)
 
     now = time.time()
     node = task_dict.get("node") or task_dict.get("stage", "")
@@ -252,11 +340,11 @@ def save_task(
     pane_id = task_dict.get("pane_id", "")
     goal = task_dict.get("goal", "")
     blocker = task_dict.get("blocker", "")
-    created_at = float(task_dict.get("started_at") or task_dict.get("created_at") or now)
+    created_at = float(task_dict.get("created_at") or task_dict.get("started_at") or now)
 
     payload = {k: v for k, v in task_dict.items() if k not in {
         "task_id", "workflow_id", "node", "stage", "agent", "status",
-        "stage_verdict", "stage_verdict_note", "pane_id", "goal", "blocker", "created_at", "started_at"
+        "stage_verdict", "stage_verdict_note", "pane_id", "goal", "blocker", "created_at"
     }}
     payload_json = json.dumps(payload, ensure_ascii=False)
 
@@ -283,11 +371,59 @@ def save_task(
             conn.close()
 
 
-def get_tasks(workflow_id: str, db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
-    """Fetch all tasks for a workflow."""
+def get_task(task_id: str, db_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """Fetch a single task by its task_id."""
     conn = get_db_connection(db_path)
     try:
-        cur = conn.execute("SELECT * FROM tasks WHERE workflow_id = ? ORDER BY created_at ASC", (workflow_id,))
+        cur = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        payload = json.loads(row["payload_json"] or "{}")
+        t = dict(payload)
+        t.update({
+            "task_id": row["task_id"],
+            "workflow_id": row["workflow_id"],
+            "node": row["node"],
+            "stage": row["stage"],
+            "agent": row["agent"],
+            "status": row["status"],
+            "stage_verdict": row["stage_verdict"],
+            "stage_verdict_note": row["stage_verdict_note"],
+            "pane_id": row["pane_id"],
+            "goal": row["goal"],
+            "blocker": row["blocker"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        })
+        return t
+    finally:
+        conn.close()
+
+
+def get_tasks(workflow_id: str, db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Fetch all tasks for a workflow."""
+    return list_tasks(workflow_id=workflow_id, db_path=db_path)
+
+
+def list_tasks(
+    workflow_id: Optional[str] = None,
+    status: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Fetch tasks optionally filtered by workflow_id and/or status."""
+    conn = get_db_connection(db_path)
+    try:
+        query = "SELECT * FROM tasks WHERE 1=1"
+        params: List[Any] = []
+        if workflow_id:
+            query += " AND workflow_id = ?"
+            params.append(workflow_id)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY created_at ASC"
+        cur = conn.execute(query, tuple(params))
         tasks = []
         for row in cur.fetchall():
             payload = json.loads(row["payload_json"] or "{}")
@@ -309,6 +445,228 @@ def get_tasks(workflow_id: str, db_path: Optional[Path] = None) -> List[Dict[str
             })
             tasks.append(t)
         return tasks
+    finally:
+        conn.close()
+
+
+def delete_task(task_id: str, db_path: Optional[Path] = None) -> bool:
+    """Delete a task by its task_id."""
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN TRANSACTION;")
+        cur = conn.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+        deleted = cur.rowcount > 0
+        conn.execute("COMMIT;")
+        return deleted
+    except Exception:
+        conn.execute("ROLLBACK;")
+        raise
+    finally:
+        conn.close()
+
+
+def save_steer(
+    steer_dict: Dict[str, Any],
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> None:
+    """Upsert a steering item."""
+    should_close = False
+    if conn is None:
+        conn = get_db_connection(db_path)
+        should_close = True
+
+    sid = steer_dict.get("steer_id")
+    tid = steer_dict.get("task_id")
+    if not sid or not tid:
+        raise ValueError("steer_id and task_id are required")
+
+    wid = steer_dict.get("workflow_id")
+    instruction = steer_dict.get("instruction", "")
+    operator = steer_dict.get("operator", "human")
+    urgent = 1 if steer_dict.get("urgent") else 0
+    status = steer_dict.get("status", "pending")
+    dispatched_at = steer_dict.get("dispatched_at")
+    created_at = float(steer_dict.get("created_at") or time.time())
+
+    payload = {k: v for k, v in steer_dict.items() if k not in {
+        "steer_id", "task_id", "workflow_id", "instruction", "operator",
+        "urgent", "status", "dispatched_at", "created_at"
+    }}
+    payload_json = json.dumps(payload, ensure_ascii=False)
+
+    try:
+        conn.execute("""
+            INSERT INTO steering_items (
+                steer_id, task_id, workflow_id, instruction, operator,
+                urgent, status, dispatched_at, created_at, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(steer_id) DO UPDATE SET
+                task_id=excluded.task_id,
+                workflow_id=excluded.workflow_id,
+                instruction=excluded.instruction,
+                operator=excluded.operator,
+                urgent=excluded.urgent,
+                status=excluded.status,
+                dispatched_at=excluded.dispatched_at,
+                payload_json=excluded.payload_json;
+        """, (sid, tid, wid, instruction, operator, urgent, status, dispatched_at, created_at, payload_json))
+    finally:
+        if should_close:
+            conn.close()
+
+
+def get_steer(steer_id: str, db_path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """Fetch a steering item by its steer_id."""
+    conn = get_db_connection(db_path)
+    try:
+        cur = conn.execute("SELECT * FROM steering_items WHERE steer_id = ?", (steer_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        payload = json.loads(row["payload_json"] or "{}")
+        item = dict(payload)
+        item.update({
+            "steer_id": row["steer_id"],
+            "task_id": row["task_id"],
+            "workflow_id": row["workflow_id"],
+            "instruction": row["instruction"],
+            "operator": row["operator"],
+            "urgent": bool(row["urgent"]),
+            "status": row["status"],
+            "dispatched_at": row["dispatched_at"],
+            "created_at": row["created_at"],
+        })
+        return item
+    finally:
+        conn.close()
+
+
+def list_steers(
+    task_id: Optional[str] = None,
+    status: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """List steering items optionally filtered by task_id and/or status."""
+    conn = get_db_connection(db_path)
+    try:
+        query = "SELECT * FROM steering_items WHERE 1=1"
+        params: List[Any] = []
+        if task_id:
+            query += " AND task_id = ?"
+            params.append(task_id)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY created_at ASC"
+        cur = conn.execute(query, tuple(params))
+        items = []
+        for row in cur.fetchall():
+            payload = json.loads(row["payload_json"] or "{}")
+            item = dict(payload)
+            item.update({
+                "steer_id": row["steer_id"],
+                "task_id": row["task_id"],
+                "workflow_id": row["workflow_id"],
+                "instruction": row["instruction"],
+                "operator": row["operator"],
+                "urgent": bool(row["urgent"]),
+                "status": row["status"],
+                "dispatched_at": row["dispatched_at"],
+                "created_at": row["created_at"],
+            })
+            items.append(item)
+        return items
+    finally:
+        conn.close()
+
+
+def update_steer_status(
+    steer_id: str,
+    status: str,
+    dispatched_at: Optional[float] = None,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """Update status and dispatched_at for a steering item."""
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute("BEGIN TRANSACTION;")
+        if dispatched_at is not None:
+            cur = conn.execute(
+                "UPDATE steering_items SET status = ?, dispatched_at = ? WHERE steer_id = ?",
+                (status, dispatched_at, steer_id),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE steering_items SET status = ? WHERE steer_id = ?",
+                (status, steer_id),
+            )
+        updated = cur.rowcount > 0
+        conn.execute("COMMIT;")
+        return updated
+    except Exception:
+        conn.execute("ROLLBACK;")
+        raise
+    finally:
+        conn.close()
+
+
+def record_steering_history(
+    record: Dict[str, Any],
+    db_path: Optional[Path] = None,
+) -> None:
+    """Record a steering audit/action entry."""
+    conn = get_db_connection(db_path)
+    try:
+        now = float(record.get("timestamp") or time.time())
+        action = record.get("action", "unknown")
+        task_id = record.get("task_id")
+        steer_id = record.get("steer_id")
+        instruction = record.get("instruction")
+        operator = record.get("operator")
+        urgent = 1 if record.get("urgent") else 0
+        reason = record.get("reason")
+        payload = {k: v for k, v in record.items() if k not in {
+            "action", "task_id", "steer_id", "instruction", "operator", "urgent", "reason", "timestamp"
+        }}
+        payload_json = json.dumps(payload, ensure_ascii=False)
+
+        conn.execute("""
+            INSERT INTO steering_history (
+                action, task_id, steer_id, instruction, operator, urgent, reason, timestamp, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """, (action, task_id, steer_id, instruction, operator, urgent, reason, now, payload_json))
+    finally:
+        conn.close()
+
+
+def list_steering_history(
+    task_id: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """List steering history entries ordered chronologically."""
+    conn = get_db_connection(db_path)
+    try:
+        if task_id:
+            cur = conn.execute("SELECT * FROM steering_history WHERE task_id = ? ORDER BY timestamp ASC", (task_id,))
+        else:
+            cur = conn.execute("SELECT * FROM steering_history ORDER BY timestamp ASC")
+        results = []
+        for row in cur.fetchall():
+            payload = json.loads(row["payload_json"] or "{}")
+            item = dict(payload)
+            item.update({
+                "action": row["action"],
+                "task_id": row["task_id"],
+                "steer_id": row["steer_id"],
+                "instruction": row["instruction"],
+                "operator": row["operator"],
+                "urgent": bool(row["urgent"]),
+                "reason": row["reason"],
+                "timestamp": row["timestamp"],
+            })
+            results.append(item)
+        return results
     finally:
         conn.close()
 
@@ -611,17 +969,20 @@ def migrate_v1_to_v2(
     workflows_file: Optional[Path] = None,
     tasks_file: Optional[Path] = None,
     checkpoints_dir: Optional[Path] = None,
+    steering_file: Optional[Path] = None,
     db_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Lossless migration of V1 JSON registries and checkpoint files into SQLite."""
     wf_path = workflows_file or (CONTROLLER_DIR / "workflows.json")
     tasks_path = tasks_file or (CONTROLLER_DIR / "tasks.json")
     cp_path = checkpoints_dir or (CONTROLLER_DIR / "checkpoints")
+    st_path = steering_file or (CONTROLLER_DIR / "steering.json")
     db = init_db(db_path)
 
     migrated_wfs = 0
     migrated_tasks = 0
     migrated_cps = 0
+    migrated_steers = 0
 
     # 1. Migrate workflows
     if wf_path.exists():
@@ -683,10 +1044,26 @@ def migrate_v1_to_v2(
             except Exception:
                 continue
 
+    # 4. Migrate steering
+    if st_path.exists():
+        try:
+            with open(st_path, "r", encoding="utf-8") as f:
+                s_data = json.load(f)
+            for tid, q in s_data.get("steering_queues", {}).items():
+                for s_item in q:
+                    s_item.setdefault("task_id", tid)
+                    save_steer(s_item, db)
+                    migrated_steers += 1
+            for h in s_data.get("history", []):
+                record_steering_history(h, db)
+        except Exception:
+            pass
+
     return {
         "ok": True,
         "db_path": str(db),
         "migrated_workflows": migrated_wfs,
         "migrated_tasks": migrated_tasks,
         "migrated_checkpoints": migrated_cps,
+        "migrated_steers": migrated_steers,
     }

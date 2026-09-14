@@ -16,6 +16,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from . import state_db
+from .state_store import get_state_store, StateStore
+
 ACTIVE_STATUSES = {"dispatched", "working", "rework", "blocked", "paused", "interrupted"}
 
 
@@ -46,34 +49,88 @@ def _atomic_write_json(file_path: Path, data: Any) -> None:
     os.replace(tmp_path, file_path)
 
 
+def _sync_tasks_from_disk_if_needed(store: StateStore) -> None:
+    tasks_file = get_tasks_file()
+    if tasks_file.exists():
+        try:
+            with open(tasks_file, "r", encoding="utf-8") as f:
+                disk_data = json.load(f)
+            if isinstance(disk_data, dict):
+                for t in disk_data.get("tasks", []):
+                    tid = t.get("task_id")
+                    if tid and t.get("workflow_id"):
+                        existing = store.get_task(tid)
+                        if not existing or existing.get("status") != t.get("status") or existing.get("last_steered_at") != t.get("last_steered_at"):
+                            store.save_task(t)
+        except Exception:
+            pass
+
+
+def _sync_steering_from_disk_if_needed(store: StateStore) -> None:
+    st_file = get_steering_file()
+    if st_file.exists():
+        try:
+            with open(st_file, "r", encoding="utf-8") as f:
+                disk_data = json.load(f)
+            if isinstance(disk_data, dict):
+                for tid, q in disk_data.get("steering_queues", {}).items():
+                    for item in q:
+                        sid = item.get("steer_id")
+                        if sid:
+                            existing = store.get_steer(sid)
+                            if not existing or existing.get("status") != item.get("status"):
+                                item.setdefault("task_id", tid)
+                                store.save_steer(item)
+        except Exception:
+            pass
+
+
+def _sync_tasks_file(store: StateStore) -> None:
+    tasks_file = get_tasks_file()
+    if tasks_file.parent.exists():
+        _atomic_write_json(tasks_file, store.export_tasks_json())
+
+
+def _sync_steering_file(store: StateStore) -> None:
+    st_file = get_steering_file()
+    if st_file.parent.exists():
+        _atomic_write_json(st_file, store.export_steering_json())
+
+
 def load_tasks_data() -> Dict[str, Any]:
-    f = get_tasks_file()
-    if not f.exists():
-        return {"tasks": []}
-    try:
-        with open(f, "r", encoding="utf-8") as fp:
-            return json.load(fp)
-    except Exception:
-        return {"tasks": []}
+    store = get_state_store()
+    _sync_tasks_from_disk_if_needed(store)
+    return store.export_tasks_json()
 
 
 def save_tasks_data(data: Dict[str, Any]) -> None:
-    _atomic_write_json(get_tasks_file(), data)
+    store = get_state_store()
+    for t in data.get("tasks", []):
+        if t.get("task_id") and t.get("workflow_id"):
+            store.save_task(t)
+    tasks_file = get_tasks_file()
+    if tasks_file.parent.exists():
+        _atomic_write_json(tasks_file, data)
 
 
 def load_steering_data() -> Dict[str, Any]:
-    f = get_steering_file()
-    if not f.exists():
-        return {"steering_queues": {}, "history": []}
-    try:
-        with open(f, "r", encoding="utf-8") as fp:
-            return json.load(fp)
-    except Exception:
-        return {"steering_queues": {}, "history": []}
+    store = get_state_store()
+    _sync_steering_from_disk_if_needed(store)
+    return store.export_steering_json()
 
 
 def save_steering_data(data: Dict[str, Any]) -> None:
-    _atomic_write_json(get_steering_file(), data)
+    store = get_state_store()
+    for tid, q in data.get("steering_queues", {}).items():
+        for item in q:
+            item.setdefault("task_id", tid)
+            store.save_steer(item)
+    for h in data.get("history", []):
+        store.record_steering_history(h)
+    st_file = get_steering_file()
+    if st_file.parent.exists():
+        _atomic_write_json(st_file, data)
+
 
 
 def format_steer_prompt(instruction: str, operator: str = "human") -> str:

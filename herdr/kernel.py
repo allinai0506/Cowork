@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from . import workflow
 from . import state_db
+from .state_store import get_state_store, StateStore
 
 
 HOME = Path.home()
@@ -48,42 +49,75 @@ def _atomic_write_json(file_path: Path, data: Any) -> None:
     os.replace(tmp_path, file_path)
 
 
-def load_workflows_data() -> Dict[str, Any]:
+def _import_missing_workflows_from_disk(store: StateStore) -> None:
     wf_file = get_workflows_file()
-    if not wf_file.exists():
-        return {"workflows": {}}
-    try:
-        with open(wf_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if not isinstance(data, dict):
-                return {"workflows": {}}
-            data.setdefault("workflows", {})
-            return data
-    except (OSError, json.JSONDecodeError):
-        return {"workflows": {}}
+    if wf_file.exists():
+        try:
+            with open(wf_file, "r", encoding="utf-8") as f:
+                disk_data = json.load(f)
+            if isinstance(disk_data, dict):
+                for wid, wf in disk_data.get("workflows", {}).items():
+                    wf.setdefault("workflow_id", wid)
+                    existing = store.get_workflow(wid)
+                    is_placeholder = bool(existing and existing.get("status") == "unknown" and not existing.get("project_id"))
+                    if not existing or is_placeholder:
+                        # Import missing workflows or replace auto-generated FK stubs; true SQLite records are authoritative
+                        store.save_workflow(wf)
+        except Exception:
+            pass
+
+
+def _import_missing_tasks_from_disk(store: StateStore) -> None:
+    tasks_file = get_tasks_file()
+    if tasks_file.exists():
+        try:
+            with open(tasks_file, "r", encoding="utf-8") as f:
+                disk_data = json.load(f)
+            if isinstance(disk_data, dict):
+                for t in disk_data.get("tasks", []):
+                    tid = t.get("task_id")
+                    if tid and not store.get_task(tid):
+                        # ONLY import missing tasks; SQLite is authoritative and never overwritten
+                        store.save_task(t)
+        except Exception:
+            pass
+
+
+def load_workflows_data() -> Dict[str, Any]:
+    """Load workflows via StateStore (single source of truth)."""
+    store = get_state_store()
+    _import_missing_workflows_from_disk(store)
+    return store.export_workflows_json()
 
 
 def save_workflows_data(data: Dict[str, Any]) -> None:
-    _atomic_write_json(get_workflows_file(), data)
+    """Save workflows into StateStore and sync compatibility JSON."""
+    store = get_state_store()
+    for wid, wf in (data.get("workflows") or {}).items():
+        wf.setdefault("workflow_id", wid)
+        store.save_workflow(wf)
+    wf_file = get_workflows_file()
+    if wf_file.parent.exists():
+        _atomic_write_json(wf_file, data)
 
 
 def load_tasks_data() -> Dict[str, Any]:
-    tasks_file = get_tasks_file()
-    if not tasks_file.exists():
-        return {"tasks": []}
-    try:
-        with open(tasks_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if not isinstance(data, dict):
-                return {"tasks": []}
-            data.setdefault("tasks", [])
-            return data
-    except (OSError, json.JSONDecodeError):
-        return {"tasks": []}
+    """Load tasks via StateStore (single source of truth)."""
+    store = get_state_store()
+    _import_missing_tasks_from_disk(store)
+    return store.export_tasks_json()
 
 
 def save_tasks_data(data: Dict[str, Any]) -> None:
-    _atomic_write_json(get_tasks_file(), data)
+    """Save tasks into StateStore and sync compatibility JSON."""
+    store = get_state_store()
+    for t in data.get("tasks", []):
+        if t.get("task_id") and t.get("workflow_id"):
+            store.save_task(t)
+    tasks_file = get_tasks_file()
+    if tasks_file.parent.exists():
+        _atomic_write_json(tasks_file, data)
+
 
 
 def collect_downstream_nodes(nodes_by_id: Dict[str, Dict[str, Any]], root_id: str) -> Set[str]:
@@ -387,76 +421,43 @@ def create_checkpoint(
     tag: Optional[str] = None,
     parent_checkpoint_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Capture a durable point-in-time snapshot of the workflow and its tasks across JSON & SQLite."""
-    wf_data = load_workflows_data()
-    wf_entry = wf_data.get("workflows", {}).get(workflow_id)
+    """Capture a durable point-in-time snapshot of the workflow and its tasks via StateStore."""
+    store = get_state_store()
+    _import_missing_workflows_from_disk(store)
+    _import_missing_tasks_from_disk(store)
+
+    wf_entry = store.get_workflow(workflow_id)
     if not wf_entry:
         raise ValueError(f"Workflow '{workflow_id}' not found")
 
-    tasks_data = load_tasks_data()
-    wf_tasks = [t for t in tasks_data.get("tasks", []) if t.get("workflow_id") == workflow_id]
+    res = store.create_checkpoint(
+        workflow_id=workflow_id,
+        tag=tag,
+        parent_checkpoint_id=parent_checkpoint_id,
+    )
+    cp_id = res["checkpoint_id"]
 
-    now = time.time()
-    ts_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(now))
-    short_uuid = uuid.uuid4().hex[:6]
-    cp_id = f"cp_{workflow_id}_{ts_str}_{short_uuid}"
-
-    snapshot = {
-        "checkpoint_id": cp_id,
-        "workflow_id": workflow_id,
-        "tag": tag or "",
-        "parent_checkpoint_id": parent_checkpoint_id,
-        "created_at": now,
-        "workflow": wf_entry,
-        "tasks": wf_tasks,
-    }
-
-    # 1. Write V1 JSON file for backward compatibility
-    cp_dir = get_checkpoints_dir() / workflow_id
-    cp_dir.mkdir(parents=True, exist_ok=True)
-    cp_file = cp_dir / f"{cp_id}.json"
-    _atomic_write_json(cp_file, snapshot)
-
-    # 2. Write to V2 SQLite state_db
+    # Write compatibility JSON file if checkpoints_dir is accessible
     try:
-        state_db.init_db()
-        state_db.save_workflow(wf_entry)
-        for t in wf_tasks:
-            state_db.save_task(t)
-        state_db.create_checkpoint(
-            workflow_id=workflow_id,
-            checkpoint_id=cp_id,
-            tag=tag,
-            parent_checkpoint_id=parent_checkpoint_id,
-        )
+        cp_dir = get_checkpoints_dir() / workflow_id
+        cp_dir.mkdir(parents=True, exist_ok=True)
+        cp_file = cp_dir / f"{cp_id}.json"
+        snapshot = store.get_checkpoint(workflow_id, cp_id)
+        _atomic_write_json(cp_file, snapshot)
+        res["path"] = str(cp_file)
     except Exception:
         pass
 
-    return {
-        "ok": True,
-        "workflow_id": workflow_id,
-        "checkpoint_id": cp_id,
-        "tag": tag or "",
-        "parent_checkpoint_id": parent_checkpoint_id,
-        "created_at": now,
-        "task_count": len(wf_tasks),
-        "path": str(cp_file),
-    }
+    return res
 
 
 def list_checkpoints(workflow_id: str) -> List[Dict[str, Any]]:
-    """List all available checkpoints for workflow_id, unifying SQLite & JSON files."""
-    by_id: Dict[str, Dict[str, Any]] = {}
-
-    # 1. Fetch from SQLite V2 store
-    try:
-        db_cps = state_db.list_checkpoints(workflow_id)
-        for c in db_cps:
-            by_id[c["checkpoint_id"]] = c
-    except Exception:
-        pass
-
-    # 2. Fetch from V1 JSON directory
+    """List all available checkpoints for workflow_id via StateStore."""
+    store = get_state_store()
+    cps = store.list_checkpoints(workflow_id)
+    if cps:
+        return cps
+    # Fallback to scanning legacy JSON directory
     cp_dir = get_checkpoints_dir() / workflow_id
     if cp_dir.exists():
         for f in cp_dir.glob("cp_*.json"):
@@ -464,74 +465,65 @@ def list_checkpoints(workflow_id: str) -> List[Dict[str, Any]]:
                 with open(f, "r", encoding="utf-8") as fp:
                     snap = json.load(fp)
                     cpid = snap.get("checkpoint_id")
-                    if cpid and cpid not in by_id:
-                        by_id[cpid] = {
-                            "checkpoint_id": cpid,
-                            "workflow_id": snap.get("workflow_id"),
-                            "tag": snap.get("tag", ""),
-                            "parent_checkpoint_id": snap.get("parent_checkpoint_id"),
-                            "created_at": snap.get("created_at", 0),
-                            "task_count": len(snap.get("tasks", [])),
-                            "workflow_status": snap.get("workflow", {}).get("status"),
-                        }
+                    if cpid:
+                        if snap.get("workflow"):
+                            store.save_workflow(snap["workflow"])
+                        for t in snap.get("tasks", []):
+                            store.save_task(t)
+                        store.create_checkpoint(
+                            workflow_id=workflow_id,
+                            tag=snap.get("tag"),
+                            parent_checkpoint_id=snap.get("parent_checkpoint_id"),
+                            checkpoint_id=cpid,
+                        )
             except Exception:
                 continue
-
-    results = list(by_id.values())
-    results.sort(key=lambda x: x.get("created_at", 0), reverse=True)
-    return results
+    return store.list_checkpoints(workflow_id)
 
 
 def get_checkpoint(workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
-    """Retrieve full snapshot payload for a checkpoint from SQLite or JSON."""
-    # Try SQLite first
+    """Retrieve full snapshot payload for a checkpoint via StateStore."""
+    store = get_state_store()
     try:
-        return state_db.get_checkpoint(workflow_id, checkpoint_id)
+        return store.get_checkpoint(workflow_id, checkpoint_id)
     except Exception:
-        pass
-
-    # Fallback to JSON file
-    cp_file = get_checkpoints_dir() / workflow_id / f"{checkpoint_id}.json"
-    if not cp_file.exists():
-        # Search all workflow subdirectories if workflow_id was omitted or uncertain
-        matches = list(get_checkpoints_dir().glob(f"*/{checkpoint_id}.json"))
-        if matches:
-            cp_file = matches[0]
-        else:
-            raise FileNotFoundError(f"Checkpoint '{checkpoint_id}' not found for workflow '{workflow_id}'")
-
-    with open(cp_file, "r", encoding="utf-8") as f:
-        return json.load(f)
+        # Fallback to legacy JSON file
+        cp_file = get_checkpoints_dir() / workflow_id / f"{checkpoint_id}.json"
+        if not cp_file.exists():
+            matches = list(get_checkpoints_dir().glob(f"*/{checkpoint_id}.json"))
+            if matches:
+                cp_file = matches[0]
+            else:
+                raise FileNotFoundError(f"Checkpoint '{checkpoint_id}' not found for workflow '{workflow_id}'")
+        with open(cp_file, "r", encoding="utf-8") as f:
+            snap = json.load(f)
+            if snap.get("workflow"):
+                store.save_workflow(snap["workflow"])
+            for t in snap.get("tasks", []):
+                store.save_task(t)
+            store.create_checkpoint(
+                workflow_id=workflow_id,
+                tag=snap.get("tag"),
+                parent_checkpoint_id=snap.get("parent_checkpoint_id"),
+                checkpoint_id=checkpoint_id,
+            )
+            return snap
 
 
 def restore_checkpoint(workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
-    """Restore workflow state and tasks from a checkpoint snapshot in both JSON and SQLite."""
-    snapshot = get_checkpoint(workflow_id, checkpoint_id)
-    restored_wf = snapshot.get("workflow")
-    restored_tasks = snapshot.get("tasks", [])
+    """Restore workflow state and tasks from a checkpoint snapshot via StateStore."""
+    store = get_state_store()
+    res = store.restore_checkpoint(workflow_id, checkpoint_id)
 
-    if not restored_wf:
-        raise ValueError(f"Checkpoint '{checkpoint_id}' contains no workflow data")
+    # Sync compatibility files
+    wf_file = get_workflows_file()
+    if wf_file.parent.exists():
+        _atomic_write_json(wf_file, store.export_workflows_json())
+    tasks_file = get_tasks_file()
+    if tasks_file.parent.exists():
+        _atomic_write_json(tasks_file, store.export_tasks_json())
 
-    # 1. Update workflows.json
-    wf_data = load_workflows_data()
-    wf_data.setdefault("workflows", {})[workflow_id] = restored_wf
-    save_workflows_data(wf_data)
-
-    # 2. Update tasks.json (replace tasks for this workflow with snapshot tasks)
-    tasks_data = load_tasks_data()
-    existing_tasks = [t for t in tasks_data.get("tasks", []) if t.get("workflow_id") != workflow_id]
-    existing_tasks.extend(restored_tasks)
-    tasks_data["tasks"] = existing_tasks
-    save_tasks_data(tasks_data)
-
-    # 3. Restore in SQLite state_db
-    try:
-        state_db.restore_checkpoint(workflow_id, checkpoint_id)
-    except Exception:
-        pass
-
-    # 4. Clean up any transient stage advance locks in stage-state.json
+    # Clean up any transient stage advance locks in stage-state.json
     s_file = get_stage_state_file()
     if s_file.exists():
         try:
@@ -546,13 +538,7 @@ def restore_checkpoint(workflow_id: str, checkpoint_id: str) -> Dict[str, Any]:
         except Exception:
             pass
 
-    return {
-        "ok": True,
-        "workflow_id": workflow_id,
-        "checkpoint_id": checkpoint_id,
-        "restored_tasks": len(restored_tasks),
-        "status": restored_wf.get("status"),
-    }
+    return res
 
 
 def fork_workflow_from_checkpoint(
@@ -560,93 +546,52 @@ def fork_workflow_from_checkpoint(
     new_workflow_id: str,
     new_title: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Time-travel branching: Fork a new workflow instance from a historical checkpoint across JSON & SQLite."""
-    # 1. Primary path: Fork directly via SQLite state_db
+    """Time-travel branching: Fork a new workflow instance via StateStore."""
+    store = get_state_store()
     try:
-        res = state_db.fork_workflow_from_checkpoint(
+        res = store.fork_workflow_from_checkpoint(
             checkpoint_id=checkpoint_id,
             new_workflow_id=new_workflow_id,
             new_title=new_title,
         )
-        # Sync the forked workflow & tasks to workflows.json and tasks.json
-        forked_wf = state_db.get_workflow(new_workflow_id)
-        if forked_wf:
-            wf_data = load_workflows_data()
-            wf_data.setdefault("workflows", {})[new_workflow_id] = forked_wf
-            save_workflows_data(wf_data)
-
-        forked_tasks = state_db.get_tasks(new_workflow_id)
-        if forked_tasks:
-            tasks_data = load_tasks_data()
-            tasks_data.setdefault("tasks", []).extend(forked_tasks)
-            save_tasks_data(tasks_data)
-
+        wf_file = get_workflows_file()
+        if wf_file.parent.exists():
+            _atomic_write_json(wf_file, store.export_workflows_json())
+        tasks_file = get_tasks_file()
+        if tasks_file.parent.exists():
+            _atomic_write_json(tasks_file, store.export_tasks_json())
         return res
     except FileNotFoundError:
-        pass
-    except Exception:
-        pass
-
-    # 2. Fallback path: locate legacy JSON checkpoint file
-    matches = list(get_checkpoints_dir().glob(f"*/{checkpoint_id}.json"))
-    if not matches:
-        raise FileNotFoundError(f"Source checkpoint '{checkpoint_id}' not found")
-    with open(matches[0], "r", encoding="utf-8") as f:
-        snapshot = json.load(f)
-
-    source_wf = snapshot.get("workflow", {})
-    source_tasks = snapshot.get("tasks", [])
-
-    # Seed snapshot into state_db and delegate fork
-    try:
+        # Fallback to locate legacy JSON checkpoint file
+        matches = list(get_checkpoints_dir().glob(f"*/{checkpoint_id}.json"))
+        if not matches:
+            raise FileNotFoundError(f"Source checkpoint '{checkpoint_id}' not found")
+        with open(matches[0], "r", encoding="utf-8") as f:
+            snapshot = json.load(f)
+        source_wf = snapshot.get("workflow", {})
+        source_tasks = snapshot.get("tasks", [])
         if source_wf:
-            state_db.save_workflow(source_wf)
+            store.save_workflow(source_wf)
         for t in source_tasks:
-            state_db.save_task(t)
-        state_db.create_checkpoint(
+            store.save_task(t)
+        store.create_checkpoint(
             workflow_id=snapshot.get("workflow_id", ""),
             checkpoint_id=checkpoint_id,
             tag=snapshot.get("tag"),
             parent_checkpoint_id=snapshot.get("parent_checkpoint_id"),
         )
-        return fork_workflow_from_checkpoint(checkpoint_id, new_workflow_id, new_title)
-    except Exception:
-        # Ultimate standalone JSON fallback
-        now = time.time()
-        forked_wf = dict(source_wf)
-        forked_wf["workflow_id"] = new_workflow_id
-        forked_wf["title"] = new_title or f"{source_wf.get('title', 'Workflow')} (Forked from {checkpoint_id[:12]})"
-        forked_wf["created_at"] = now
-        forked_wf["updated_at"] = now
-        forked_wf["forked_from"] = {
-            "source_workflow_id": snapshot.get("workflow_id"),
-            "source_checkpoint_id": checkpoint_id,
-            "forked_at": now,
-        }
-        forked_tasks = []
-        for t in source_tasks:
-            t_clone = dict(t)
-            orig_tid = t.get("task_id", "")
-            t_clone["task_id"] = f"{orig_tid}-fork-{uuid.uuid4().hex[:6]}"
-            t_clone["workflow_id"] = new_workflow_id
-            t_clone["created_at"] = now
-            forked_tasks.append(t_clone)
+        res = store.fork_workflow_from_checkpoint(
+            checkpoint_id=checkpoint_id,
+            new_workflow_id=new_workflow_id,
+            new_title=new_title,
+        )
+        wf_file = get_workflows_file()
+        if wf_file.parent.exists():
+            _atomic_write_json(wf_file, store.export_workflows_json())
+        tasks_file = get_tasks_file()
+        if tasks_file.parent.exists():
+            _atomic_write_json(tasks_file, store.export_tasks_json())
+        return res
 
-        wf_data = load_workflows_data()
-        wf_data.setdefault("workflows", {})[new_workflow_id] = forked_wf
-        save_workflows_data(wf_data)
-
-        tasks_data = load_tasks_data()
-        tasks_data.setdefault("tasks", []).extend(forked_tasks)
-        save_tasks_data(tasks_data)
-
-        return {
-            "ok": True,
-            "new_workflow_id": new_workflow_id,
-            "new_title": forked_wf["title"],
-            "source_checkpoint_id": checkpoint_id,
-            "source_workflow_id": snapshot.get("workflow_id"),
-            "cloned_tasks": len(forked_tasks),
-        }
 
 

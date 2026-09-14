@@ -60,25 +60,13 @@ def get_workflows_file() -> Path:
 
 
 def load_tasks_data() -> Dict[str, Any]:
-    f = get_tasks_file()
-    if not f.exists():
-        return {"tasks": []}
-    try:
-        with open(f, "r", encoding="utf-8") as fp:
-            return json.load(fp)
-    except Exception:
-        return {"tasks": []}
+    from .kernel import load_tasks_data as _kernel_load_tasks
+    return _kernel_load_tasks()
 
 
 def load_workflows_data() -> Dict[str, Any]:
-    f = get_workflows_file()
-    if not f.exists():
-        return {"workflows": {}}
-    try:
-        with open(f, "r", encoding="utf-8") as fp:
-            return json.load(fp)
-    except Exception:
-        return {"workflows": {}}
+    from .kernel import load_workflows_data as _kernel_load_workflows
+    return _kernel_load_workflows()
 
 
 def extract_task_intent(task: Dict[str, Any], terminal_text: str) -> str:
@@ -397,3 +385,4 @@ def project_workflow(workflow_id: str) -> Dict[str, Any]:
         "tasks": task_projections,
         "projected_at": time.time(),
     }
+
