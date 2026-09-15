@@ -1830,3 +1830,64 @@ python3 -c "from herdr.state_store import get_state_store,sync_workflows_project
 # 4. 投影与库一致性抽查
 python3 -c "import json; from herdr.state_store import get_state_store; print(len(get_state_store().list_workflows()), len(json.load(open('$HOME/.herdr-controller/workflows.json'))['workflows']))"
 ```
+
+---
+
+## 41. 控制面必须 SLA 化：无界等待 + 静默丢弃 + 输入不可信 = 任何瞬态异常都会变成永久卡死
+
+### 问题背景
+
+`wf-xiyu-bid-poc-0915-01` 在 implementation→test 边界卡死 6.5 小时，用户称之为"第 N 次临时救援"。全量日志取证得到一组触目惊心的数字（均为 `~/.herdr-controller/logs` 实测）：
+
+| 现象 | 证据 |
+|---|---|
+| 单条事件把调度通道锁死 5.25h | `controller.out.log:593749-595007` 连续 1,259 行 `[COORDINATOR BUSY]`；frontend `agent_done` 00:17 入队，06:51 才送达 |
+| `interrupted` 状态死区 6h47m | backend 任务 00:06 进入 `interrupted`，`handle_event` 对 interrupted/paused 无任何分支，期间 working/done 翻转 5,572 次全被无视 |
+| 夹具 workflow 空转约 20h | pytest 临时目录里的 `wf-e2e-no-json-01`（协调器 pane `pane-coord-1` 不存在）产生 73,383 次 WAIT + 73,383 条 err |
+| 僵尸 pane 订阅风暴 | 已消失的 `w6:p1M` 被每 2s 重订阅：128,321 次 `[SUBSCRIBED]` + 128,341 条 `agent_not_found` |
+| 完成日志风暴 | 已关闭工作流每 2s sweep 重刷 `[WORKFLOW COMPLETE]` 共 164,398 行 |
+| 哨兵完全失明 | 6.5h 卡死期间哨兵零动作（其巡检只覆盖 pane 完成标记与崩溃特征）；历史上 38 次 "Controller restarted for recovery" 反而重启放大风暴 |
+
+直接根因（本次事故）：opencode 的 lifecycle 集成**从未安装**（`herdr integration status` → `not installed`），herdr 退化为屏幕 manifest 探测；pane 缓冲区残留一行 `• Working (26s • esc to interrupt)` 文本被 `interrupt_hint_working` 规则持续命中，总指挥 agent 状态被永久锁死为 `working` —— 而 Controller 的唯一投递条件是总指挥 idle。
+
+系统性根因：**HAFlow 控制面对 Actor 的所有等待都是无界的，事件投递没有失败语义，输入（agent 状态）不可信，且没有任何一层对"停滞"本身负责。**
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **无界等待** | 任何 `while True + sleep` 等待 Actor 的循环，都会在 Actor 异常时变成永久阻塞；控制面不存在"等多久都合理"的等待 | 所有 Actor 交互必须有 SLA（`herdr/liveness.py`），到期记录 attention 并让位，慢速重试 |
+| **静默丢弃** | `[QUEUE STALE]`、投递失败后 key 被 discard，blocked 事件投递失败后没有任何补投机制——事件"入过队"不等于"送达" | 事件投递必须幂等可重试：attention episode 记录 attempts/next_retry_at，watcher 按退避补投 |
+| **状态死区** | 状态机的合法中间态（interrupted/paused）如果没有驱动者，就是事实上的永久卡死；`handle_event` 只处理 4 种状态，其余全部悬空 | 每个"等待裁决"的状态必须有超时升级机制（attention 事件 → 总指挥必须裁决） |
+| **输入不可信** | agent 状态靠屏幕正则猜测时，一行历史残影即可永久误判；集成缺失必须在启动时大声暴露，而不是让人 6 小时后人工发现 | 启动执行 `herdr integration status` 健康检查并打印 `[INTEGRATION GAP]`；排障第一步 `herdr agent explain` |
+| **重试风暴** | 无退避的 2s 重试会制造 10 万级日志与 CPU 空转；重启（38 次）会重放风暴 | 所有重试指数退避封顶（2s→…→300s），重复性日志加单次闩（完成/放弃只允许打印一次） |
+| **夹具污染调度** | 测试夹具 workflow（pytest tmp / 无项目空壳）进入生产 sweep 后，会对不存在的 pane 无限重试 | sweep 源头过滤夹具指纹（`pytest-*`、/tmp、已删除的 workflow_file、无 project_id 空壳） |
+
+### 操作规范
+
+1. **禁止新增无界等待**：任何等待 Actor 的新代码必须使用 `herdr/liveness.py` 的 SLA/退避策略（`coordinator_delivery_sla` / `stage_advance_sla` / `backoff_delay`），PR 审查重点 grep `while True` + `time.sleep`；
+2. **事件不可静默丢失**：投递失败/停滞必须写入 attention episode（`~/.herdr-controller/attention.json`），由 registry watcher 按 `next_retry_at` 慢速补投；成功送达即清除；
+3. **状态机无死区**：新增/使用中间态（interrupted、paused 等）必须同时提供超时升级路径（本次为 attention 事件 + 总指挥强制裁决指令）；
+4. **重试必须退避 + 封顶 + 单次告警**：订阅退避基线见 `liveness.subscribe_*`；`[LISTENER GIVEUP]`、`[WORKFLOW COMPLETE]`、`[WORKFLOW FOREIGN SKIPPED]` 均只允许出现一次；
+5. **集成健康是启动门禁**：Controller 启动即检查在用 agent 的 herdr 集成，缺失打印修复命令 `herdr integration install <kind>`；
+6. **哨兵补齐停滞盲区**：Sentinel 新增 `[SENTINEL STALL]` 巡检（默认 30 分钟无状态推进即告警 + macOS 通知），不再只盯 pane 完成标记。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 新增 Liveness Guard 回归（22 项：SLA/退避/卫生/attention/停滞检测）
+pytest tests/test_liveness_guard.py -v
+
+# 2. 全量回归
+pytest -q                                   # 期望 476 passed
+
+# 3. 现场验证：夹具 workflow 被排除、真实 workflow 正常调度
+rg "WORKFLOW FOREIGN SKIPPED|STAGE ADVANCE QUEUED" ~/.herdr-controller/logs/controller.out.log | tail
+
+# 4. 集成健康（本事故根因）
+herdr integration status | rg "not installed"
+herdr agent explain w9:p1                   # 期望 screen_detection_skip_reason: full_lifecycle_hook_authority
+
+# 5. 新 BUSY 日志自带等待时长与升级路径（旧版没有 waited=）
+rg "COORDINATOR BUSY|COORDINATOR STALLED" ~/.herdr-controller/logs/controller.out.log | tail
+```

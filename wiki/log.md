@@ -499,3 +499,11 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - 查询核心下沉为纯函数 `herdr/archive.py#query_archived_tasks`（过滤/排序/分页，零 I/O）；控制台壳层 `archive_query` 优先读 StateStore，`tasks.json` 仅作降级兜底，投影损坏时归档仍完整（呼应教训 #40）；
 - 新增 `GET /api/archive` 契约与页面入口；新增 12 项回归测试（纯函数 + 控制台壳层 + 前端契约），全量 450 passed；
 - 更新 [[ops-center]] §7 与 `console/README.md`。
+
+## [2026-09-16] fix | Control-plane Liveness Guard (SLA / attention / hygiene / stall detector)
+- **背景**：`wf-xiyu-bid-poc-0915-01` 在 implementation→test 边界卡死 6.5h（连续 1,259 行 `[COORDINATOR BUSY]`）。取证发现控制面四项系统性缺陷：Actor 等待无界（BUSY 5.25h）、事件投递无失败语义（blocked 静默丢弃）、`interrupted` 状态死区 6h47m、夹具 workflow 空转 20h（73k WAIT）与僵尸订阅风暴（128k 重试）；直接根因是 opencode 集成未安装导致屏幕残影把总指挥状态锁死为 `working`。
+- 新增 `herdr/liveness.py`：SLA/退避/夹具指纹/attention episode/BoundedWait 的单一策略来源（纯逻辑，零 I/O 依赖）。
+- **Controller**：总指挥投递与 stage advance 全部 SLA 化（900s/600s），到期 `[COORDINATOR STALLED]` 记录 attention + macOS 通知并释放 workflow 锁；`done`/`blocked`/`interrupted|paused` 事件全部纳入 attention 慢速重试（`attention.json`）；registry sweep 过滤夹具/空壳 workflow（`[WORKFLOW FOREIGN SKIPPED]`）；`[WORKFLOW COMPLETE]` 单次闩；订阅错误显式失败 + 指数退避（2s→300s，8 次后 `[LISTENER GIVEUP]`）；启动执行集成健康检查（`[INTEGRATION GAP]`）。
+- **Sentinel**：新增 `[SENTINEL STALL]` 停滞检测（默认 1800s 无推进即告警 + 通知），补齐此前对"控制面停滞"完全失明的盲区。
+- 回归：新增 `tests/test_liveness_guard.py` 22 项；`pytest` 全量 476 passed + 12 subtests；Live 重启 Controller 验证夹具过滤与真实 workflow 订阅正常。
+- 更新 [[architecture]] §2.1/§2.2/§3.1（Liveness Guard、Stall Detector、attention.json）；沉淀通用工程教训 §41。
