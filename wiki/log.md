@@ -483,3 +483,8 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
   - 沉淀并归档通用工程教训 §37（仓库根目录重命名与品牌迁移后的运行时路径断裂陷阱）。
 
 
+
+## [2026-09-15] fix | Calibrate executor self-check timeouts and error classification
+- Updated [[preflight-and-health]] §3.2: per-agent smoke timeouts (`claude` 90s + 1 retry, others 40s), new `PROVIDER_ERROR` class, `TIMEOUT` excluded from `--auto-disable`.
+- Root cause: flat 35s timeout deterministically misjudged healthy-but-slow `claude --print` cold start (measured 36.9s success, occasional >60s flake); narrow EN-only patterns misclassified fast startup failures (401/402/billing/overloaded) as generic `ERROR`; console modal dropped `deep.output` evidence.
+- Console「执行者自检」modal now renders per-agent raw output tails for human re-verification; total HTTP timeout 180s → 320s.
