@@ -1787,3 +1787,46 @@ pytest tests/test_deep_preflight_accuracy.py -v
 # 3. 终端与服务结论不一致时，隔离可疑环境变量复测
 env -u DEEPSEEK_API_KEY /opt/homebrew/bin/pi --print --no-session "Reply with exactly HERDR_PREFLIGHT_OK and nothing else."
 ```
+
+---
+
+## 40. 兼容投影的写入必须经统一同步器：一次测试环境隔离缺失覆盖了线上 42 条工作流
+
+### 问题背景
+
+用户报告 `wf-xiyu-bid-poc-0915-01`（应答片段摘要优化）在控制台"过一会儿就完全找不到"，但终端现场仍在、后端仍在运行（卡在需求分析）。
+
+逐层取证定位到两个独立问题，本条记录第二个（数据层）：
+
+1. 卡住：`requirements` 节点下两个任务必须全部终态才算节点完成（`services/herdr-controller.py: is_node_complete` 的 `all()` 语义），一个 qodercli 任务停在 `dispatched`（prompt 投递未达 `working`），整条 DAG 被阻塞——这是设计内门禁，非缺陷；
+2. 丢失：SQLite `state.db` 与 `tasks.json` 完好（42 条工作流 / 159 条任务），但 `workflows.json` 只剩 1 条测试工作流 `wf-e2e-no-json-01`（其 `workflow_file` 指向 pytest 临时目录）。控制台工作流列表/详情全部读取 `workflows.json`，一份被测试污染的文件直接把整个项目的 UI 抹黑。
+
+污染链：`herdr/projects.py`、`herdr/agent_router.py`、`bin/herdr-factory` 的读取统一走 `_get_store()`（感知 `HERDR_STATE_DB` / `WORKFLOWS_FILE`），但写入兼容投影时直接 `_save(WORKFLOWS_FILE, ...)` 硬编码 `~/.herdr-controller/workflows.json`；`tests/test_state_store.py::test_end_to_end_single_source_of_truth_without_workflows_json` 只设了环境变量、未 `monkeypatch.setattr` 模块全局量，pytest 跑一次就把线上 `workflows.json` 覆盖成测试投影。另 `save_workflows()` 还是"按传入子集全量重写文件"，本身即覆盖向量。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|------|------|------|
+| **读写路径不一致** | 读走环境感知的 StateStore、写走硬编码路径——只要有一处写路径不感知环境，测试/沙盒进程就能静默改线上数据 | 投影只是 SQLite 的只读镜像；所有写入收敛到唯一的 `sync_*_projection()`，模块内严禁再出现 `_save(硬编码 WORKFLOWS_FILE)` |
+| **以子集全量重写** | `save_workflows(data)` 把调用方传入的部分数据整体写成文件，天然丢数据 | 投影导出永远从 SQLite 全量导出，禁止"局部数据 + 全量覆盖" |
+| **测试隔离只做一半** | 只设环境变量、不 patch 模块全局量，隔离就是纸糊的 | 测试隔离双保险：环境变量 + `monkeypatch.setattr(module, "FILE", tmp)`；再用"线上文件字节不变"断言防回归 |
+| **UI 主数据源脆弱** | 控制台以兼容投影为主数据源，投影一坏 UI 全黑，且现场难以自证 | 关键读取优先 StateStore；投影损坏可一行 `sync_workflows_projection` 从库重放（本次演练恢复 42 条） |
+
+### 操作规范
+
+1. 任何写 `workflows.json` / `tasks.json` 的代码，必须经 `herdr/state_store.py` 的 `sync_workflows_projection` / `sync_tasks_projection`；PR 审查重点 grep 硬编码直写；
+2. 触发写操作的测试必须同时隔离 env 与模块全局量；回归用例 `test_workflow_writes_never_touch_real_projection_without_global_patch`（仅 env 隔离时断言线上文件字节级不变）纳入全量套件；
+3. 现场恢复 SOP：投影与库不一致时，先备份 `workflows.json`，再从 SQLite 重放投影，严禁反向以投影覆盖库。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 修复前复现：仅 env 隔离下 probe 穿透写入线上 workflows.json（复现后已恢复现场）
+# 2. 修复后回归：单测 14 项 + 全量 432 项通过
+pytest tests/test_state_store.py -x -q
+pytest -q 2>&1 | tail -n 2
+# 3. 现场恢复演练：从 SQLite 重放投影，42 条工作流全部回到控制台可见
+python3 -c "from herdr.state_store import get_state_store,sync_workflows_projection; sync_workflows_projection(store=get_state_store())"
+# 4. 投影与库一致性抽查
+python3 -c "import json; from herdr.state_store import get_state_store; print(len(get_state_store().list_workflows()), len(json.load(open('$HOME/.herdr-controller/workflows.json'))['workflows']))"
+```

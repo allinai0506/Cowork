@@ -54,7 +54,8 @@ def _workflow_record(workflow_id):
             return wf
     except Exception:
         pass
-    data = _load(WORKFLOWS_FILE, {"workflows": {}})
+    fallback = Path(os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE)
+    data = _load(fallback, {"workflows": {}})
     record = data.get("workflows", {}).get(workflow_id)
     if not record:
         raise RuntimeError(f"Workflow not registered: {workflow_id}")

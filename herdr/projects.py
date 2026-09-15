@@ -180,7 +180,13 @@ def save_workflows(data):
     for wid, wf in data.get("workflows", {}).items():
         wf.setdefault("workflow_id", wid)
         store.save_workflow(wf)
-    _save(WORKFLOWS_FILE, data)
+    # 投影必须经 StateStore 同步(环境变量感知)，严禁直写硬编码路径，
+    # 否则测试/沙盒写入会覆盖线上 workflows.json。
+    try:
+        from .state_store import sync_workflows_projection
+    except ImportError:
+        from herdr.state_store import sync_workflows_projection
+    sync_workflows_projection(store=store)
 
 
 TERMINAL_WORKFLOW_STATUSES = {"completed"}
@@ -355,9 +361,11 @@ def register_workflow(workflow_id, project, requirement="", title=""):
     }
     store = _get_store()
     store.save_workflow(wf_entry)
-    data = load_workflows()
-    data.setdefault("workflows", {})[workflow_id] = wf_entry
-    _save(WORKFLOWS_FILE, data)
+    try:
+        from .state_store import sync_workflows_projection
+    except ImportError:
+        from herdr.state_store import sync_workflows_projection
+    sync_workflows_projection(store=store)
 
 
 def mark_workflow_startup_ready(workflow_id, healthy_agents=None, unhealthy_agents=None):
@@ -374,9 +382,11 @@ def mark_workflow_startup_ready(workflow_id, healthy_agents=None, unhealthy_agen
 
     store.save_workflow(record)
 
-    data = load_workflows()
-    data.setdefault("workflows", {})[workflow_id] = record
-    _save(WORKFLOWS_FILE, data)
+    try:
+        from .state_store import sync_workflows_projection
+    except ImportError:
+        from herdr.state_store import sync_workflows_projection
+    sync_workflows_projection(store=store)
 
 
 def _workspace_alive(workspace_id):

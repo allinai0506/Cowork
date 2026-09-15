@@ -126,9 +126,12 @@ def set_workflow_agent_override(workflow_id, agent):
     record["agent_override"] = agent or "auto"
     store.save_workflow(record)
 
-    data = _load(WORKFLOWS_FILE, {"workflows": {}})
-    data.setdefault("workflows", {})[workflow_id] = record
-    _save(WORKFLOWS_FILE, data)
+    # 投影必须经 StateStore 同步(环境变量感知)，严禁直写硬编码路径。
+    try:
+        from .state_store import sync_workflows_projection
+    except ImportError:
+        from herdr.state_store import sync_workflows_projection
+    sync_workflows_projection(store=store)
 
 
 def _clean_reservations(data, ttl=300):
