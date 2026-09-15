@@ -26,6 +26,7 @@ try:
     )
     from herdr.workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
     from herdr.state_store import get_state_store
+    from herdr import liveness
 except ImportError:
     from herdr_projects import (
         project_for_workflow,
@@ -33,6 +34,7 @@ except ImportError:
     )
     from herdr_workflow import find_node, get_ready_nodes, is_workflow_completed, normalize_workflow
     from herdr_state_store import get_state_store
+    from herdr import liveness
 
 STAGE_STATE_FILE = os.environ.get("STAGE_STATE_FILE") or os.path.expanduser(
     "~/.herdr-controller/stage-state.json"
@@ -46,8 +48,78 @@ COORDINATOR_PANE = "w6:p1H"
 
 WORKFLOWS_FILE = os.environ.get("WORKFLOWS_FILE") or os.path.expanduser("~/.herdr-controller/workflows.json")
 
+# ============================================================
+# Liveness guard (SLA / attention episodes / hygiene)
+# ============================================================
+
+ATTENTION_FILE = os.environ.get("HERDR_ATTENTION_FILE") or os.path.expanduser(
+    "~/.herdr-controller/attention.json"
+)
+
+_attention_store = liveness.EpisodeStore(ATTENTION_FILE)
+
+# 夹具/临时 workflow 只提示一次，避免每 2s sweep 刷屏。
+_foreign_workflows_logged = set()
+# 完成日志闩：close 失败也不得每 sweep 重刷 [WORKFLOW COMPLETE]。
+_workflow_complete_logged = set()
+# 监听订阅退避：task_id -> (attempt, next_allowed_at, status_signature)
+_listener_backoff = {}
+_listener_giveup_logged = set()
+
 # 已触发过 close-workflow 的 workflow,防止轮询期间重复派发。
 _workflow_close_inflight = set()
+
+
+def attention_get(key):
+    return _attention_store.get(key)
+
+
+def attention_note(key, task, event_type, reason, attempts=None, next_retry_at=None, detail=None):
+    """Record/refresh an attention episode for a stalled or undeliverable event."""
+    episode = _attention_store.get(key) or {}
+    now = time.time()
+    fields = {
+        "task_id": task.get("task_id"),
+        "workflow_id": task.get("workflow_id"),
+        "event_type": event_type,
+        "reason": reason,
+        "last_attempt_at": now,
+    }
+    if attempts is not None:
+        fields["attempts"] = int(attempts)
+    if next_retry_at is not None:
+        fields["next_retry_at"] = float(next_retry_at)
+    if detail:
+        fields["detail"] = detail
+    if not episode.get("first_seen_at"):
+        fields["first_seen_at"] = now
+    return _attention_store.upsert(key, fields)
+
+
+def attention_clear(key):
+    return _attention_store.clear(key)
+
+
+def attention_blocks_retry(key, now=None):
+    return liveness.blocks_retry(_attention_store, key, now)
+
+
+def attention_throttle(key, interval=None, now=None):
+    liveness.throttle_retry(_attention_store, key, interval=interval, now=now)
+
+
+def notify_attention(title, task, message, reason):
+    """Best-effort macOS notification; never let notifier failure break control flow."""
+    try:
+        import importlib
+
+        notifier = importlib.import_module("services.herdr-notifier")
+        url = notifier.build_console_url(
+            workflow_id=task.get("workflow_id"), task_id=task.get("task_id")
+        )
+        notifier.notify(title, f"{task.get('workflow_id', 'unknown')} · {reason}", message, url=url)
+    except Exception as exc:
+        print(f"[ATTENTION NOTIFY ERROR] {exc}")
 
 
 def _get_store():
@@ -88,6 +160,10 @@ def maybe_close_completed_workflow(workflow_id):
         return
 
     entry = _workflow_entry(workflow_id)
+
+    # 夹具/临时 workflow 严禁物理收尾(会去操作不存在的 clone/pane)。
+    if liveness.workflow_is_foreign(entry):
+        return
 
     if entry.get("status") == "completed":
         return
@@ -785,6 +861,9 @@ def check_workflow_stage_advance(workflow_id):
             if _workflow_entry(workflow_id).get("suppress_auto_close"):
                 return
 
+            if _workflow_entry(workflow_id).get("status") == "completed":
+                return
+
             # 交付终态门禁:任一门禁节点 verdict=blocked 时不得关闭,
             # 回流 fix-loop(由 handle_fix_loop 原子作废并派发事件)。
             nodes_by_id = {
@@ -809,10 +888,15 @@ def check_workflow_stage_advance(workflow_id):
                     )
                 return
 
-            print(
-                f"[WORKFLOW COMPLETE] "
-                f"workflow={workflow_id}"
-            )
+            # 完成日志闩:close 可能失败或需要多轮,日志只允许出现一次,
+            # 否则 sweep 会把 [WORKFLOW COMPLETE] 刷成日志风暴。
+            if workflow_id not in _workflow_complete_logged:
+                _workflow_complete_logged.add(workflow_id)
+                print(
+                    f"[WORKFLOW COMPLETE] "
+                    f"workflow={workflow_id}"
+                )
+
             maybe_close_completed_workflow(workflow_id)
             return
 
@@ -829,6 +913,9 @@ def check_workflow_stage_advance(workflow_id):
                 continue
 
             ready_id = ready_node["id"]
+            if attention_blocks_retry(f"{workflow_id}:stage_advance:{ready_id}"):
+                continue
+
             if not mark_stage_advance_queued(workflow_id, ready_id):
                 continue
 
@@ -869,6 +956,9 @@ def check_workflow_stage_advance(workflow_id):
             handle_fix_loop(workflow_id, stage_key, gate_cfg, workflow_cfg)
             continue
 
+        if attention_blocks_retry(f"{workflow_id}:stage_advance:{next_stage}"):
+            continue
+
         if not mark_stage_advance_queued(workflow_id, next_stage):
             continue
 
@@ -894,8 +984,23 @@ def active_registered_workflows():
     store = _get_store()
     for wf in store.list_workflows():
         wid = wf.get("workflow_id")
-        if wid and wf.get("status") != "completed":
-            workflows.add(wid)
+        if not wid or wf.get("status") == "completed":
+            continue
+
+        # 夹具/临时残留(pytest tmp、已删除的 workflow_file)绝不允许进入调度 sweep,
+        # 否则会对不存在的 pane 无限重试并淹没日志。
+        if liveness.workflow_is_foreign(wf):
+            if wid not in _foreign_workflows_logged:
+                _foreign_workflows_logged.add(wid)
+                print(
+                    f"[WORKFLOW FOREIGN SKIPPED] "
+                    f"workflow={wid} "
+                    f"file={wf.get('workflow_file')} "
+                    f"(fixture/temp residue; excluded from scheduling)"
+                )
+            continue
+
+        workflows.add(wid)
     return workflows
 
 
@@ -991,6 +1096,34 @@ agent_status: blocked
 blocked 只表示等待处理，不代表任务结束。
 """.strip()
 
+    if event_type == "attention":
+        return f"""
+HERDR_CONTROLLER_ATTENTION_EVENT
+
+workflow_id: {workflow_id}
+task_id: {task_id}
+stage: {task['stage']}
+pane_id: {task['pane_id']}
+agent: {task['agent']}
+task_status: {task.get('status')}
+
+任务目标：
+{goal}
+
+该 Task 长时间停留在需要人工/总指挥裁决的中间态（interrupted / paused），
+既未完成也未失败，阻塞了当前节点的推进。
+
+现在必须立即裁决，只处理这一个 Task：
+
+1. 使用 Herdr 读取 {task['pane_id']} 当前界面与最新输出。
+2. 判断现场是否仍有未完成的有效产出：
+   - 产出已就绪 → 执行验收（verify-baseline），通过则 set completed（门禁阶段带 --verdict）。
+   - 实现未完成 → set rework 并用 herdr agent prompt 继续下发指令。
+   - 无法恢复 → set failed。
+3. 严禁让任务继续停留在 interrupted / paused。
+4. 不要创建新 Task，不要推进阶段。
+""".strip()
+
     if event_type == "done":
         return f"""
 HERDR_CONTROLLER_DONE_EVENT
@@ -1081,6 +1214,50 @@ def enqueue_coordinator_event(task, event_type):
         f"[QUEUE] "
         f"task={task['task_id']} "
         f"event={event_type}"
+    )
+
+
+def handle_coordinator_delivery_stall(item, task, elapsed):
+    """总指挥投递 SLA 到期:记录 attention、通知、让位(不再无限 BUSY)。
+
+    registry watcher 会依据 episode 的 next_retry_at 做慢速重试;
+    总指挥恢复后事件会自然补投,不需要人工重启。
+    """
+    key = item["key"]
+    event_type = item["event_type"]
+    workflow_id = task.get("workflow_id")
+    pane_id = coordinator_pane_for_workflow(workflow_id) or "unknown"
+
+    episode = attention_get(key) or {}
+    attempts = int(episode.get("attempts") or 0) + 1
+    retry_at = time.time() + liveness.attention_retry_interval()
+
+    attention_note(
+        key,
+        task,
+        event_type,
+        reason="coordinator_stalled",
+        attempts=attempts,
+        next_retry_at=retry_at,
+        detail=f"waited={int(elapsed)}s pane={pane_id}",
+    )
+
+    print(
+        f"[COORDINATOR STALLED] "
+        f"task={item['task_id']} "
+        f"event={event_type} "
+        f"pane={pane_id} "
+        f"waited={int(elapsed)}s "
+        f"attempts={attempts} "
+        f"-> attention recorded, retry_in={int(liveness.attention_retry_interval())}s"
+    )
+
+    notify_attention(
+        "Herdr Factory · 总指挥停滞",
+        task,
+        f"事件 {event_type} 等待总指挥超过 {int(elapsed)}s（pane={pane_id}）。"
+        "已记录 attention 并将慢速重试，请检查总指挥状态与集成健康。",
+        "coordinator_stalled",
     )
 
 
@@ -1600,6 +1777,8 @@ Node Agent 策略
 - 固定 Agent: {fix}
 """.strip()
 
+        wait_started = time.time()
+
         try:
             while True:
                 # Re-validate on every wait iteration: the workflow may be
@@ -1775,6 +1954,41 @@ task_type:
 
                     break
 
+                elapsed = time.time() - wait_started
+                if elapsed >= liveness.stage_advance_sla():
+                    # 有界等待:总指挥长期不可用(僵尸 pane / 状态僵死)时,
+                    # 释放阶段闩并记录 attention,绝不占用 workflow 调度锁空转。
+                    clear_stage_advance(
+                        workflow_id,
+                        target_node_id
+                    )
+                    key = f"{workflow_id}:stage_advance:{target_node_id}"
+                    episode = attention_get(key) or {}
+                    attempts = int(episode.get("attempts") or 0) + 1
+                    attention_note(
+                        key,
+                        {"task_id": f"stage_advance:{target_node_id}", "workflow_id": workflow_id},
+                        "stage_advance",
+                        reason="coordinator_stalled",
+                        attempts=attempts,
+                        next_retry_at=time.time() + liveness.attention_retry_interval(),
+                        detail=f"coordinator status={status} waited={int(elapsed)}s",
+                    )
+                    print(
+                        f"[STAGE ADVANCE STALLED] "
+                        f"workflow={workflow_id} "
+                        f"{stage} -> {next_stage} "
+                        f"coordinator={status} waited={int(elapsed)}s "
+                        f"attempts={attempts} -> deferred"
+                    )
+                    notify_attention(
+                        "Herdr Factory · 总指挥停滞",
+                        {"task_id": f"stage_advance:{target_node_id}", "workflow_id": workflow_id},
+                        f"阶段 {stage} -> {next_stage} 等待总指挥超过 {int(elapsed)}s，已延迟重试。请检查总指挥 pane 状态。",
+                        "stage_advance_stalled",
+                    )
+                    return
+
                 print(
                     f"[STAGE ADVANCE WAIT] "
                     f"coordinator={status} "
@@ -1796,14 +2010,18 @@ task_type:
     event_type = item["event_type"]
     key = item["key"]
 
-    expected_status = (
-        "blocked"
-        if event_type == "blocked"
-        else "agent_done"
-    )
+    if event_type == "attention":
+        # attention 事件针对 interrupted/paused 等需要裁决的中间态,
+        # 只要任务仍停留在待裁决状态就有效。
+        expected_status = None
+    elif event_type == "blocked":
+        expected_status = "blocked"
+    else:
+        expected_status = "agent_done"
 
     try:
         last_busy_log = 0
+        wait_started = time.time()
         while True:
             task = get_task(task_id)
 
@@ -1816,8 +2034,20 @@ task_type:
 
             current_task_status = task.get("status")
 
+            if event_type == "attention" and current_task_status not in (
+                "interrupted",
+                "paused",
+            ):
+                print(
+                    f"[QUEUE STALE] "
+                    f"task={task_id} "
+                    f"attention resolved actual={current_task_status}"
+                )
+                attention_clear(key)
+                break
+
             # 事件在等待期间已经失效
-            if current_task_status != expected_status:
+            if expected_status is not None and current_task_status != expected_status:
                 print(
                     f"[QUEUE STALE] "
                     f"task={task_id} "
@@ -1856,6 +2086,8 @@ task_type:
                 )
 
                 if result.returncode == 0:
+                    attention_clear(key)
+
                     print(
                         f"[COORDINATOR NOTIFIED] "
                         f"task={task_id} "
@@ -1901,21 +2133,46 @@ task_type:
                                 f"status={decision}"
                             )
                 else:
+                    # 投递失败(如 agent_prompt_stalled):记录退避节流,
+                    # 由 registry watcher 在退避窗口后按需重试,杜绝 1s 级风暴。
+                    episode = attention_get(key) or {}
+                    attempts = int(episode.get("attempts") or 0) + 1
+                    delay = liveness.backoff_delay(attempts)
+                    attention_note(
+                        key,
+                        task,
+                        event_type,
+                        reason="delivery_failed",
+                        attempts=attempts,
+                        next_retry_at=time.time() + delay,
+                        detail=(result.stderr.strip() or result.stdout.strip())[:400],
+                    )
+
                     print(
                         "[COORDINATOR ERROR]",
                         result.stderr.strip()
-                        or result.stdout.strip()
+                        or result.stdout.strip(),
+                        f"-> retry_in={int(delay)}s attempts={attempts}"
                     )
 
                 break
 
             now = time.time()
+
+            elapsed = now - wait_started
+            if elapsed >= liveness.coordinator_delivery_sla():
+                handle_coordinator_delivery_stall(
+                    item, task, elapsed
+                )
+                break
+
             if now - last_busy_log >= 15:
                 last_busy_log = now
                 print(
                     f"[COORDINATOR BUSY] "
                     f"status={status} "
-                    f"task={task_id}"
+                    f"task={task_id} "
+                    f"waited={int(elapsed)}s"
                 )
 
             time.sleep(2)
@@ -2389,6 +2646,18 @@ def listen_task(task_id):
         first = file.readline()
 
         if first:
+            # 订阅响应可能是错误(如目标 pane 已不存在),必须显式失败,
+            # 交由 registry_watcher 的退避逻辑处理,禁止伪装成已订阅。
+            try:
+                payload = json.loads(first)
+            except Exception:
+                payload = None
+
+            if isinstance(payload, dict) and payload.get("error"):
+                raise RuntimeError(
+                    str(payload["error"].get("message") or payload["error"])
+                )
+
             print(
                 f"[SUBSCRIBED] "
                 f"task={task_id} "
@@ -2511,10 +2780,12 @@ def registry_watcher():
                 check_all_workflows_stage_advance()
 
             tasks = load_tasks()
+            task_ids_now = set()
 
             for task in tasks:
                 task_id = task["task_id"]
                 status = task.get("status")
+                task_ids_now.add(task_id)
 
                 if status in (
                     "completed",
@@ -2532,8 +2803,14 @@ def registry_watcher():
                             task_id
                         )
 
+                    _listener_backoff.pop(task_id, None)
+                    _listener_giveup_logged.discard(task_id)
+                    attention_clear(f"{task_id}:done")
+                    attention_clear(f"{task_id}:blocked")
+                    attention_clear(f"{task_id}:attention")
                     continue
 
+                # ---- listener 订阅:指数退避 + 封顶(僵尸 pane 护栏) ----
                 if status in active_statuses:
                     with lock:
                         already = (
@@ -2542,15 +2819,47 @@ def registry_watcher():
                         )
 
                     if not already:
-                        start_task_listener(
-                            task_id
-                        )
+                        signature = (status, task.get("updated_at"))
+                        slot = _listener_backoff.get(task_id)
+                        if not slot or slot.get("signature") != signature:
+                            # 任务真实状态变化即重置退避,避免误封活工位。
+                            slot = {
+                                "attempts": 0,
+                                "next_allowed_at": 0.0,
+                                "signature": signature,
+                            }
+                            _listener_backoff[task_id] = slot
 
-                if status == "agent_done" and not workflow_closed(task.get("workflow_id")):
+                        if now >= slot.get("next_allowed_at", 0.0):
+                            attempts = slot.get("attempts", 0) + 1
+                            slot["attempts"] = attempts
+                            if attempts >= liveness.subscribe_max_attempts():
+                                slot["next_allowed_at"] = (
+                                    now + liveness.subscribe_backoff_cap()
+                                )
+                                if task_id not in _listener_giveup_logged:
+                                    _listener_giveup_logged.add(task_id)
+                                    print(
+                                        f"[LISTENER GIVEUP] "
+                                        f"task={task_id} "
+                                        f"pane={task.get('pane_id')} "
+                                        f"attempts={attempts} -> "
+                                        f"retry every {int(liveness.subscribe_backoff_cap())}s"
+                                    )
+                            else:
+                                slot["next_allowed_at"] = (
+                                    now + liveness.backoff_delay(attempts)
+                                )
+                            start_task_listener(
+                                task_id
+                            )
+
+                # ---- done 事件投递:受 attention episode 节流 ----
+                if status == "agent_done":
                     key = f"{task_id}:done"
                     with lock:
                         already_queued = key in queued_events
-                    if not already_queued:
+                    if not already_queued and not attention_blocks_retry(key, now):
                         print(
                             f"[REGISTRY WATCHER] "
                             f"task={task_id} "
@@ -2560,6 +2869,68 @@ def registry_watcher():
                             task,
                             "done"
                         )
+                        if attention_get(key):
+                            attention_throttle(key, now=now)
+
+                # ---- blocked 事件:此前投递失败会被静默吞掉,这里补投递护栏 ----
+                if status == "blocked":
+                    key = f"{task_id}:blocked"
+                    updated = float(task.get("updated_at") or 0)
+                    with lock:
+                        already_queued = key in queued_events
+                    if (
+                        updated
+                        and now - updated >= liveness.attention_grace()
+                        and not already_queued
+                        and not attention_blocks_retry(key, now)
+                    ):
+                        print(
+                            f"[REGISTRY WATCHER] "
+                            f"task={task_id} "
+                            f"status=blocked -> notify coordinator"
+                        )
+                        enqueue_coordinator_event(task, "blocked")
+                        if not attention_get(key):
+                            attention_note(
+                                key,
+                                task,
+                                "blocked",
+                                reason="blocked_unhandled",
+                                attempts=1,
+                            )
+                        attention_throttle(key, now=now)
+                else:
+                    attention_clear(f"{task_id}:blocked")
+
+                # ---- interrupted / paused 死区:超时未裁决即升级给总指挥 ----
+                if status in ("interrupted", "paused"):
+                    key = f"{task_id}:attention"
+                    updated = float(task.get("updated_at") or 0)
+                    with lock:
+                        already_queued = key in queued_events
+                    if (
+                        updated
+                        and now - updated >= liveness.attention_grace()
+                        and not already_queued
+                        and not attention_blocks_retry(key, now)
+                    ):
+                        print(
+                            f"[REGISTRY WATCHER] "
+                            f"task={task_id} "
+                            f"status={status} -> attention event to coordinator"
+                        )
+                        enqueue_coordinator_event(task, "attention")
+                        if not attention_get(key):
+                            attention_note(
+                                key,
+                                task,
+                                "attention",
+                                reason="status_requires_attention",
+                                attempts=1,
+                            )
+                        attention_throttle(key, now=now)
+                else:
+                    attention_clear(f"{task_id}:attention")
 
                 if status == "rework" and not workflow_closed(task.get("workflow_id")):
                     pane_id = task.get("pane_id")
@@ -2574,6 +2945,11 @@ def registry_watcher():
                                 task = get_task(task_id)
                                 enqueue_coordinator_event(task, "done")
 
+            for stale_id in list(_listener_backoff.keys()):
+                if stale_id not in task_ids_now:
+                    _listener_backoff.pop(stale_id, None)
+                    _listener_giveup_logged.discard(stale_id)
+
         except Exception as e:
             print(
                 f"[REGISTRY ERROR] {e}"
@@ -2586,6 +2962,33 @@ def registry_watcher():
 # Main
 # ============================================================
 
+def report_integration_gaps():
+    """集成健康检查:lifecycle 集成缺失时 herdr 退化为屏幕探测,
+    残影文本会造成 agent 状态永久误判(卡死根因之一),必须在启动时大声暴露。"""
+    try:
+        result = subprocess.run(
+            ["herdr", "integration", "status"],
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        status_text = result.stdout or result.stderr
+    except Exception as exc:
+        print(f"[INTEGRATION CHECK ERROR] {exc}")
+        return
+
+    kinds = {t.get("agent") for t in load_tasks() if t.get("agent")}
+    for gap in liveness.integration_gaps(status_text, kinds):
+        print(
+            f"[INTEGRATION GAP] "
+            f"agent={gap['agent']} "
+            f"integration={gap['integration']} "
+            f"not installed ({gap['status']}) -> "
+            f"状态将退化为屏幕探测,可能误判卡死; "
+            f"修复: herdr integration install {gap['integration']}"
+        )
+
+
 def main():
     print("[CONTROLLER V12] starting")
     print(f"[REGISTRY] {TASKS_FILE}")
@@ -2597,6 +3000,8 @@ def main():
         "[QUEUE] coordinator event "
         "serialization enabled"
     )
+
+    report_integration_gaps()
 
     reset_queued_stage_states()
 

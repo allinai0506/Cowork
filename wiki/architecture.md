@@ -64,6 +64,12 @@ Evidence:
   3. **协调器注入**: 向项目总指挥 Pane (`coordinator_pane_id`) 输入结构化文本提示，指导总指挥 Agent 发起下一阶段 Task 派发。
   4. **重复防抖**: 利用 `stage-state.json` 记录 `queued` / `notified`，杜绝重复向总指挥发送推进指令。
 - `FACT` **终态闸门（2026-09-13 幽灵推进事故后引入）**: 推进扫描只遍历注册表**非终态**条目（`herdr.projects.non_terminal_workflow_ids`，`status=="completed"` 视为终态）；`check_workflow_stage_advance` 对已关闭工作流早退；stage_advance 消费线程在**每次等待迭代**重新校验终态/注销，已入队事件在工作流关闭后被丢弃（`[STAGE ADVANCE DROP]`）。背景：零任务工作流对 `is_node_complete` 真空成立，无此闸门会被逐阶段"真空推进"并向共享协调者 Pane 注入幽灵提示，诱导其派发真实任务（wf-…-111426 事故，见 lessons §12）。
+- `FACT` **Liveness Guard 控制面存活护栏（2026-09-16 6.5h 卡死事故后引入，lessons §41）**:
+  策略与事件簿收敛在 `herdr/liveness.py`（纯逻辑）。三类机制：
+  1. **有界等待 SLA**：总指挥事件投递与 stage advance 均设 SLA（默认 900s / 600s，env 可覆盖）；到期不再无限 `[COORDINATOR BUSY]` 空转，而是记录 attention 并释放 workflow 调度锁；
+  2. **attention episode 投递保证**：投递失败/停滞写入 `~/.herdr-controller/attention.json`（attempts / next_retry_at），registry watcher 按指数退避慢速补投；`done` / `blocked` / `interrupted|paused` 事件均受此护栏，送达即清除；
+  3. **注册表卫生**：夹具/临时 workflow（pytest-*、/tmp、已删除 workflow_file、无 project_id 空壳）不进入调度 sweep；`[WORKFLOW COMPLETE]` 单次闩；僵尸 pane 订阅指数退避封顶（2s→300s，8 次后慢重试一次告警）。
+  启动时执行 `herdr integration status` 健康检查，缺失集成打印 `[INTEGRATION GAP]`（缺集成 → 屏幕探测误判是本次事故直接根因）。
 - `FACT` **创建闸门（herdr-factory 侧）**: `herdr-factory run` 在注册前持 per-project flock（`~/.herdr-controller/locks/<project_id>.workflow-create.lock`）原子执行「同项目活跃工作流检查 + 注册」；同项目已有非终态工作流时拒绝创建（exit 2，列出活跃工作流与处置指引），`--force` 显式 bypass（e2e 自动 bypass）。同项目工作流共享协调者 Pane 与阶段拓扑，默认必须串行。
 
 ### 2.2 Herdr Sentinel (`services/herdr-sentinel.py`)
@@ -72,7 +78,8 @@ Evidence:
   2. **终端可见内容探测**: 通过 `herdr pane read <pane_id> --source visible` 捕获终端异常特征。
   3. **特征匹配**: 匹配 `"Bun has crashed"`, `"segmentation fault"`, `"panic(main thread)"` 等底层崩溃，并在 `tasks.json` 中标记 `sentinel_reason`，更新任务状态。
   4. **假死自动破冰 (Nudge Enter)**: 针对因按键卡顿处于假死状态的窗格，在超过 15 秒无响应时自动向 Pane 发送 `enter` 触发恢复。
-  5. **自愈救援**: 发现 Controller 进程僵死时，主动执行 `launchctl kickstart -k` 重启 Controller。
+  5. **停滞检测 (Stall Detector, 2026-09-16 引入)**: 对处于非终态且长时间（默认 1800s，env `HERDR_TASK_STALL_AFTER`）无任何状态推进的任务，打印 `[SENTINEL STALL]` 并推送 macOS 通知（补上此前"控制面停滞"完全失明的盲区）。
+  6. **自愈救援**: 发现 Controller 进程僵死时，主动执行 `launchctl kickstart -k` 重启 Controller。
 
 ### 2.3 Herdr Notifier (`services/herdr-notifier.py`)
 - `FACT` **核心职能**:
@@ -99,6 +106,8 @@ Evidence:
 | `projects.json` | 本地 Git 仓库到 Herdr Workspace/Coordinator 的映射中心 | `{"projects": {<root>: Project}}` |
 | `workflows.json` | 运行中的工作流实例元数据 | `{"workflows": {<wf_id>: Workflow}}` |
 | `stage-state.json` | Controller 内部阶段推进防抖状态 | `{<wf_id>:<stage>: "queued"\|"notified"}` |
+| `attention.json` | Controller 的投递失败/总指挥停滞事件簿（Liveness Guard） | `{"episodes": {<task>:<event>: {attempts, next_retry_at, reason}}}` |
+| `sentinel-state.json` | Sentinel 巡检状态（seen / nudged / stalls 停滞事件簿） | `{"seen": {}, "nudged": {}, "stalls": {<task_id>: {status, idle_seconds}}}` |
 | `agent-pools.json` | 各项目 Agent 白名单与偏好矩阵 | `{"projects": {<proj_id>: Pool}}` |
 | `agent-reservations.json` | 动态预占锁中心（带 300s TTL） | `{"reservations": {<task_id>: Reservation}}` |
 | `agent-router.lock` | 文件排他锁，保证并发分人安全 | `fcntl.flock` 目标文件 |

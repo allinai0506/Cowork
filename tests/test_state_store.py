@@ -3,6 +3,7 @@
 
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 import pytest
@@ -528,6 +529,11 @@ def test_end_to_end_single_source_of_truth_without_workflows_json(store_env, mon
 
     store = get_state_store()
 
+    # 真实工作流定义必须落在非夹具路径上（pytest-*/tmp 定义会被 Liveness Guard
+    # 判定为夹具残留并排除出调度，这正是 73k 次空转事故的护栏）。
+    live_dir = tempfile.TemporaryDirectory(prefix="herdr-e2e-live-")
+    live_workflow_file = Path(live_dir.name) / "dummy_workflow.json"
+
     proj = {
         "project_id": "proj-e2e-test",
         "project_name": "e2e-project",
@@ -535,9 +541,9 @@ def test_end_to_end_single_source_of_truth_without_workflows_json(store_env, mon
         "base_branch": "main",
         "workspace_id": "ws-e2e-1",
         "coordinator_pane_id": "pane-coord-1",
-        "workflow_file": str(store_env["cp_dir"] / "dummy_workflow.json"),
+        "workflow_file": str(live_workflow_file),
     }
-    Path(proj["workflow_file"]).write_text(json.dumps({
+    live_workflow_file.write_text(json.dumps({
         "workflow_template": "universal_sdlc",
         "nodes": [
             {"id": "requirements", "label": "2需求分析"},
@@ -605,6 +611,17 @@ def test_end_to_end_single_source_of_truth_without_workflows_json(store_env, mon
     active_reg = ctrl.active_registered_workflows()
     assert wid in active_reg
 
+    # 8b. 夹具残留(pytest-* 路径)必须被排除出调度 sweep（Liveness Guard 护栏）。
+    residue_proj = dict(proj)
+    residue_proj["project_id"] = "proj-e2e-residue"
+    residue_proj["workflow_file"] = str(store_env["cp_dir"] / "dummy_workflow.json")
+    Path(residue_proj["workflow_file"]).write_text("{}", encoding="utf-8")
+    projects.register_workflow(
+        "wf-pytest-residue-01", residue_proj,
+        requirement="夹具残留", title="Residue",
+    )
+    assert "wf-pytest-residue-01" not in ctrl.active_registered_workflows()
+
     wf_entry = ctrl._workflow_entry(wid)
     assert wf_entry.get("workflow_id") == wid
     assert wf_entry.get("agent_override") == "claude"
@@ -629,6 +646,8 @@ def test_end_to_end_single_source_of_truth_without_workflows_json(store_env, mon
     assert store.get_workflow(wid)["status"] == "paused"
     factory.resume_workflow(wid)
     assert store.get_workflow(wid)["status"] == "running"
+
+    live_dir.cleanup()
 
 
 def test_workflow_writes_never_touch_real_projection_without_global_patch(store_env):

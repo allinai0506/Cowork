@@ -12,6 +12,8 @@ HERDR_ROOT = Path(__file__).resolve().parent.parent
 if str(HERDR_ROOT) not in sys.path:
     sys.path.insert(0, str(HERDR_ROOT))
 
+from herdr import liveness  # noqa: E402  (must follow sys.path bootstrap)
+
 HOME = Path.home()
 ROOT = HOME / ".herdr-controller"
 TASKS_FILE = ROOT / "tasks.json"
@@ -170,6 +172,50 @@ def restart_controller():
         print(f"[SENTINEL ERROR] Controller restart: {e}", flush=True)
 
 
+def notify_stall(alert):
+    """Best-effort stall notification (deep-linked to the console)."""
+    try:
+        import importlib
+
+        notifier = importlib.import_module("services.herdr-notifier")
+        url = notifier.build_console_url(
+            workflow_id=alert.get("workflow_id"),
+            task_id=alert.get("task_id"),
+        )
+        notifier.notify(
+            "Herdr Factory · 任务停滞",
+            f"{alert.get('workflow_id', 'unknown')} · {alert.get('task_id')}",
+            f"任务停留在 {alert.get('status')} 已 {alert.get('idle_seconds')}s，"
+            "无任何状态推进，需要关注。",
+            url=url,
+        )
+    except Exception as exc:
+        print(f"[SENTINEL NOTIFY ERROR] {exc}", file=sys.stderr, flush=True)
+
+
+def check_task_stalls(tasks, state):
+    """停滞检测:任务处于未终态且长时间无任何状态变迁 -> 告警一次。
+
+    这补上了哨兵此前只扫描 pane 完成标记、对"控制面停滞"完全失明的盲区。
+    """
+    episodes = state.get("stalls") or {}
+    alerts, updated = liveness.evaluate_task_stalls(tasks, episodes, time.time())
+
+    for alert in alerts:
+        print(
+            f"[SENTINEL STALL] "
+            f"task={alert['task_id']} "
+            f"status={alert['status']} "
+            f"idle={alert['idle_seconds']}s "
+            f"workflow={alert.get('workflow_id')}",
+            flush=True,
+        )
+        notify_stall(alert)
+
+    state["stalls"] = updated
+    return updated != episodes
+
+
 def main():
     state = load_json(STATE_FILE, {"seen": {}, "nudged": {}})
 
@@ -255,10 +301,12 @@ def main():
                 pass
 
         if update_statuses(changes):
+            check_task_stalls(tasks, state)
             save_json_atomic(STATE_FILE, state)
             print("[SENTINEL] State updated, controller will auto-sync via registry watcher", flush=True)
             time.sleep(1)
         else:
+            check_task_stalls(tasks, state)
             save_json_atomic(STATE_FILE, state)
             time.sleep(POLL_SECONDS)
 
