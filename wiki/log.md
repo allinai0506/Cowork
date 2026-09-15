@@ -493,3 +493,9 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - Updated [[preflight-and-health]] §3.2: new `LOCAL_ERROR` class (watcher/ENOENT/EACCES), `pi --print --no-session` adapter, fast (≤15s) `PROVIDER_ERROR` retried once; `TIMEOUT`/`LOCAL_ERROR` excluded from `--auto-disable`.
 - Live deep probe proof: `claude` READY at 39.45s (would have been TIMEOUT under old 35s flat threshold); `pi` now reports real `AUTH_REQUIRED` (invalid api key) instead of `UNKNOWN`; `qodercli` watcher flake confirmed transient (READY at 13.66s on rerun).
 - Archived lesson §38 follow-up as §39 in lessons-learned.
+
+## [2026-09-15] feat | Console task archive query list
+- 控制台动作区新增「任务归档」查询列表：跨项目 / 跨 Workflow 检索历史任务，支持项目、工作流 ID 片段、执行者、状态组与关键词过滤，分页浏览并可下钻既有任务白盒简报；
+- 查询核心下沉为纯函数 `herdr/archive.py#query_archived_tasks`（过滤/排序/分页，零 I/O）；控制台壳层 `archive_query` 优先读 StateStore，`tasks.json` 仅作降级兜底，投影损坏时归档仍完整（呼应教训 #40）；
+- 新增 `GET /api/archive` 契约与页面入口；新增 12 项回归测试（纯函数 + 控制台壳层 + 前端契约），全量 450 passed；
+- 更新 [[ops-center]] §7 与 `console/README.md`。
