@@ -83,6 +83,16 @@ PROVIDER_PATTERNS = [
     r"network.*(error|unreachable|timeout)",
     r"econn(refused|reset|timedout)",
 ]
+# CLI-local infrastructure failures (never a model/auth/quota verdict).
+# NOTE: bare "skill conflict" warnings also appear in SUCCESSFUL runs, so only
+# fatal startup signatures are matched here.
+LOCAL_PATTERNS = [
+    r"watcher did not become ready",
+    r"unexpected critical error",
+    r"\benoent\b",
+    r"\beacces\b",
+    r"\beperm\b",
+]
 TRUST_PATTERNS = [
     r"do you trust",
     r"project you created or one you trust",
@@ -227,6 +237,7 @@ def classify_text(text):
         ("TOKEN_EXHAUSTED", TOKEN_PATTERNS),
         ("AUTH_REQUIRED", AUTH_PATTERNS),
         ("PROVIDER_ERROR", PROVIDER_PATTERNS),
+        ("LOCAL_ERROR", LOCAL_PATTERNS),
         ("TRUST_REQUIRED", TRUST_PATTERNS),
         ("UPDATE_BLOCKED", UPDATE_PATTERNS),
     ]
@@ -317,8 +328,17 @@ def choose_smoke_command(agent, binary, cwd):
                 prompt,
             ], "agy --print"
 
-    # Pi is currently disabled in this project. Add a safe adapter only after
-    # its current CLI help is reviewed.
+    if agent == "pi":
+        # Pi documents `-p/--print` as non-interactive mode; `--no-session`
+        # keeps the probe ephemeral (no session persistence side effects).
+        if "--print" in help_text:
+            return [
+                binary,
+                "--print",
+                "--no-session",
+                prompt,
+            ], "pi --print"
+
     return None, "no safe non-interactive adapter"
 
 
@@ -334,11 +354,16 @@ def smoke_probe(agent, binary, cwd, timeout=None):
         }
 
     limit = timeout or SMOKE_TIMEOUTS.get(agent, DEFAULT_SMOKE_TIMEOUT)
-    # Single retry on TIMEOUT: slow-but-healthy CLIs (notably claude cold
-    # start at 35-60s) must not be condemned by one timing sample.
-    attempts = 2 if agent in SMOKE_TIMEOUTS else 1
-    last = None
-    for attempt in range(1, attempts + 1):
+    # Retry policy (single sample must not condemn a flaky-but-healthy CLI):
+    # - claude TIMEOUT: cold start routinely needs 35-60s, always allow 1 retry;
+    # - fast PROVIDER_ERROR (elapsed <= 15s): overload/503 blips reject fast,
+    #   a cheap retry distinguishes blip from sustained outage.
+    # Generic ERROR and slow failures stay single-sample: ERROR has unknown
+    # cost/cause, and slow attempts already spent the time budget.
+    FAST_RETRY_BUDGET = 15
+    attempt = 0
+    while True:
+        attempt += 1
         started = time.time()
         res = normalize_result(run(cmd, timeout=limit, cwd=cwd))
         elapsed = round(time.time() - started, 2)
@@ -346,26 +371,33 @@ def smoke_probe(agent, binary, cwd, timeout=None):
         classification = classify_text(combined)
 
         if res["timeout"]:
-            last = {
+            if agent in SMOKE_TIMEOUTS and attempt == 1:
+                time.sleep(2)
+                continue
+            note = f"真实最小调用超时 ({elapsed}s, 超时阈值 {limit}s)"
+            if agent in SMOKE_TIMEOUTS:
+                note += "；已重试 1 次仍超时，可能是慢而非不可用"
+            return {
                 "attempted": True,
                 "adapter": adapter,
                 "status": "TIMEOUT",
-                "note": f"真实最小调用超时 ({elapsed}s, 超时阈值 {limit}s)",
+                "note": note,
                 "output": combined[-1200:],
             }
-            if attempt < attempts:
-                time.sleep(2)
-                continue
-            if attempts > 1:
-                last["note"] += "；已重试 1 次仍超时，可能是慢而非不可用"
-            return last
+
+        if classification == "PROVIDER_ERROR" and attempt == 1 and elapsed <= FAST_RETRY_BUDGET:
+            time.sleep(2)
+            continue
 
         if classification:
+            note = f"CLI 报告阻塞 ({elapsed}s)"
+            if attempt > 1:
+                note += "；第 2 次重试仍阻塞"
             return {
                 "attempted": True,
                 "adapter": adapter,
                 "status": classification,
-                "note": f"CLI 报告阻塞 ({elapsed}s)",
+                "note": note,
                 "output": combined[-1200:],
             }
 
@@ -379,7 +411,7 @@ def smoke_probe(agent, binary, cwd, timeout=None):
                 if exact_marker
                 else f"真实最小调用成功，输出受项目规则影响 ({elapsed}s)"
             )
-            if attempts > 1 and attempt > 1:
+            if attempt > 1:
                 note += "；第 2 次重试成功"
             return {
                 "attempted": True,
@@ -396,7 +428,6 @@ def smoke_probe(agent, binary, cwd, timeout=None):
             "note": f"真实最小调用失败 code={res['returncode']} ({elapsed}s)",
             "output": combined[-1200:],
         }
-    return last
 
 
 def inspect(project, deep=False):
@@ -483,7 +514,7 @@ def print_table(rows, project_id, deep):
             r for r in rows
             if r["final_status"] in {
                 "TOKEN_EXHAUSTED", "AUTH_REQUIRED", "PROVIDER_ERROR",
-                "TRUST_REQUIRED",
+                "LOCAL_ERROR", "TRUST_REQUIRED",
                 "UPDATE_BLOCKED", "TIMEOUT", "ERROR", "MISSING"
             }
         ]

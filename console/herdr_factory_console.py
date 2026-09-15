@@ -1297,6 +1297,7 @@ async function runPreflight(){
       TOKEN_EXHAUSTED:'额度耗尽',
       AUTH_REQUIRED:'需要认证',
       PROVIDER_ERROR:'服务端繁忙',
+      LOCAL_ERROR:'本地异常',
       TRUST_REQUIRED:'需要信任',
       UPDATE_BLOCKED:'更新受阻',
       TIMEOUT:'超时',
@@ -1304,7 +1305,7 @@ async function runPreflight(){
     })[s]||s;
 
     const hard=new Set([
-      'TOKEN_EXHAUSTED','AUTH_REQUIRED','PROVIDER_ERROR','TRUST_REQUIRED',
+      'TOKEN_EXHAUSTED','AUTH_REQUIRED','PROVIDER_ERROR','LOCAL_ERROR','TRUST_REQUIRED',
       'UPDATE_BLOCKED','TIMEOUT','ERROR','MISSING'
     ]);
 

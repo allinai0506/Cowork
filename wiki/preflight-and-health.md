@@ -74,13 +74,15 @@ Evidence:
 | **Token / 配额耗尽** | `token.*(exhaust\|limit\|quota)`<br/>`quota.*exhaust`<br/>`rate.?limit`<br/>`premium.*limit` / `out of credits` / `billing.*limit` / `402` | `TOKEN_EXHAUSTED` |
 | **认证失效 / 未登录** | `not logged in`<br/>`authentication required`<br/>`unauthorized`<br/>`invalid api key`<br/>`expired.*key` / `access denied` / `401` / `403` | `AUTH_REQUIRED` |
 | **服务端过载 / 不可用** | `overloaded`<br/>`server error` / `service unavailable` / `50x`<br/>`model.*not found`<br/>`connection refused/reset` | `PROVIDER_ERROR` |
+| **CLI 本地基础设施故障** | `watcher did not become ready`<br/>`unexpected critical error`<br/>`ENOENT` / `EACCES` / `EPERM` | `LOCAL_ERROR` |
 | **工作区未授权信任** | `do you trust`<br/>`workspace trust` | `TRUST_REQUIRED` |
 | **正常就绪** | 正常返回且未匹配任何阻断规则 | `READY` |
 
 `FACT` 超时与重试口径（按执行者分别校准，单次采样超时不等同不可用）：
 1. **分执行者超时**: `claude` 90s，其余 40s。依据为实测 `claude --print` 冷启动 36.9s 成功、偶发 60s 仍无输出，统一短阈值会把健康但慢的执行者稳定误判为 `TIMEOUT`。
-2. **超时重试一次**: 仅 `claude` 超时后自动重试 1 次；重试成功记 `READY`，仍超时才判 `TIMEOUT` 并注明“可能是慢而非不可用”。
-3. **`TIMEOUT` 不触发 `--auto-disable`**；`PROVIDER_ERROR` 与 `TOKEN_EXHAUSTED` / `AUTH_REQUIRED` 一样计入建议禁用候选。控制台「执行者自检」弹窗展示每路探针原始输出尾部供人工复核。
+2. **超时重试一次**: 仅 `claude` 超时后自动重试 1 次；重试成功记 `READY`，仍超时才判 `TIMEOUT` 并注明“可能是慢而非不可用”。快速失败（≤15s）的 `PROVIDER_ERROR` 同样重试 1 次以区分抖动与持续中断；慢失败与通用 `ERROR` 保持单样本。
+3. **`TIMEOUT` 与 `LOCAL_ERROR` 不触发 `--auto-disable`**；`PROVIDER_ERROR` 与 `TOKEN_EXHAUSTED` / `AUTH_REQUIRED` 一样计入建议禁用候选。控制台「执行者自检」弹窗展示每路探针原始输出尾部供人工复核。
+4. **`pi` 已接入真实探针**（`pi --print --no-session`，无副作用）：`UNKNOWN` 仅保留给尚无确认安全非交互模式的执行者。
 
 ### 3.3 Claude 工作区信任自动铺路
 针对 Claude Code 常见的 `"do you trust this folder"` 阻塞对话框，系统在任务启动前（`services/herdr-worker.py#ensure_claude_workspace_trust`）自动向 `~/.claude.json` 注入 `hasTrustDialogAccepted = True`，从根源消除交互式卡死。
@@ -89,6 +91,8 @@ Evidence:
 - `herdr/deep_preflight.py:TOKEN_PATTERNS`
 - `herdr/deep_preflight.py:AUTH_PATTERNS`
 - `herdr/deep_preflight.py:PROVIDER_PATTERNS`
+- `herdr/deep_preflight.py:LOCAL_PATTERNS`
 - `herdr/deep_preflight.py:SMOKE_TIMEOUTS` / `smoke_probe`
+- `herdr/deep_preflight.py:choose_smoke_command` (pi `--print --no-session`)
 - `services/herdr-worker.py#ensure_claude_workspace_trust`
 - `RULES.md:探针无副作用安全`

@@ -488,3 +488,8 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - Updated [[preflight-and-health]] §3.2: per-agent smoke timeouts (`claude` 90s + 1 retry, others 40s), new `PROVIDER_ERROR` class, `TIMEOUT` excluded from `--auto-disable`.
 - Root cause: flat 35s timeout deterministically misjudged healthy-but-slow `claude --print` cold start (measured 36.9s success, occasional >60s flake); narrow EN-only patterns misclassified fast startup failures (401/402/billing/overloaded) as generic `ERROR`; console modal dropped `deep.output` evidence.
 - Console「执行者自检」modal now renders per-agent raw output tails for human re-verification; total HTTP timeout 180s → 320s.
+
+## [2026-09-15] fix | Self-check round 2: LOCAL_ERROR, pi adapter, fast-failure retry
+- Updated [[preflight-and-health]] §3.2: new `LOCAL_ERROR` class (watcher/ENOENT/EACCES), `pi --print --no-session` adapter, fast (≤15s) `PROVIDER_ERROR` retried once; `TIMEOUT`/`LOCAL_ERROR` excluded from `--auto-disable`.
+- Live deep probe proof: `claude` READY at 39.45s (would have been TIMEOUT under old 35s flat threshold); `pi` now reports real `AUTH_REQUIRED` (invalid api key) instead of `UNKNOWN`; `qodercli` watcher flake confirmed transient (READY at 13.66s on rerun).
+- Archived lesson §38 follow-up as §39 in lessons-learned.
