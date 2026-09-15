@@ -73,6 +73,29 @@ class TestClassifyAccuracy(unittest.TestCase):
     def test_benign_output_stays_unclassified(self):
         self.assertIsNone(self.m.classify_text("HERDR_PREFLIGHT_OK"))
         self.assertIsNone(self.m.classify_text(""))
+        # Skill-conflict warnings also appear in SUCCESSFUL qoder runs.
+        self.assertIsNone(self.m.classify_text(
+            'Skill conflict: "six-step-finish" from user is overriding the same skill from project.'
+        ))
+
+    def test_local_infra_failures_map_to_local_error(self):
+        for text in [
+            "An unexpected critical error occurred:Error: Watcher did not become ready within 5000ms: /Users/user/.qoder-cn/skills",
+            "Error: ENOENT: no such file or directory, uv_cwd",
+            "EACCES: permission denied, open '/tmp/x.log'",
+        ]:
+            self.assertEqual(
+                self.m.classify_text(text), "LOCAL_ERROR", msg=text
+            )
+
+    def test_pi_invalid_key_maps_to_auth_required(self):
+        self.assertEqual(
+            self.m.classify_text(
+                '401: {"message":"Authentication Fails, Your api key: ****4a3d is invalid",'
+                '"type":"authentication_error"}'
+            ),
+            "AUTH_REQUIRED",
+        )
 
 
 class TestSmokeTimeoutAndRetry(unittest.TestCase):
@@ -156,12 +179,88 @@ class TestSmokeTimeoutAndRetry(unittest.TestCase):
         self.assertEqual(res["status"], "TOKEN_EXHAUSTED")
         self.assertIn("402", res["output"])
 
+    def test_qoder_watcher_failure_maps_to_local_error(self):
+        m = self.m
+
+        class R:
+            returncode = 1
+            stdout = 'Skill conflict: "six-step-finish" overriding.\n'
+            stderr = ("An unexpected critical error occurred:"
+                      "Error: Watcher did not become ready within 5000ms")
+
+        with patch.object(m, "choose_smoke_command",
+                          return_value=(["qodercn", "--print", "x"], "qodercn --print")), \
+             patch.object(m, "run", return_value=R()) as run_mock:
+            res = m.smoke_probe("qodercli", "/usr/bin/qodercn", "/tmp")
+        self.assertEqual(res["status"], "LOCAL_ERROR")
+        # Slow local failures stay single-sample (no blind retry).
+        self.assertEqual(run_mock.call_count, 1)
+
+    def test_fast_provider_error_is_retried_once(self):
+        m = self.m
+        calls = {"n": 0}
+
+        class Fail:
+            returncode = 1
+            stdout = ""
+            stderr = "503 Service Unavailable"
+
+        class Ok:
+            returncode = 0
+            stdout = "HERDR_PREFLIGHT_OK\n"
+            stderr = ""
+
+        def flaky(cmd, timeout=12, cwd=None, stdin=None):
+            calls["n"] += 1
+            return Fail() if calls["n"] == 1 else Ok()
+
+        with patch.object(m, "choose_smoke_command",
+                          return_value=(["opencode", "run", "x"], "opencode run")), \
+             patch.object(m, "run", side_effect=flaky), \
+             patch.object(m.time, "sleep", return_value=None):
+            # Fast failures report small elapsed; force via time mock.
+            with patch.object(m.time, "time", side_effect=[0.0, 1.2, 0.0, 8.0]):
+                res = m.smoke_probe("opencode", "/usr/bin/opencode", "/tmp")
+        self.assertEqual(res["status"], "READY")
+        self.assertEqual(calls["n"], 2)
+        self.assertIn("重试成功", res["note"])
+
+    def test_slow_provider_error_stays_single_sample(self):
+        m = self.m
+
+        class Fail:
+            returncode = 1
+            stdout = ""
+            stderr = "overloaded"
+
+        with patch.object(m, "choose_smoke_command",
+                          return_value=(["codex", "exec", "x"], "codex exec")), \
+             patch.object(m, "run", return_value=Fail()) as run_mock, \
+             patch.object(m.time, "sleep", return_value=None):
+            with patch.object(m.time, "time", side_effect=[0.0, 30.0]):
+                res = m.smoke_probe("codex", "/usr/bin/codex", "/tmp")
+        self.assertEqual(res["status"], "PROVIDER_ERROR")
+        self.assertEqual(run_mock.call_count, 1)
+
+    def test_pi_adapter_uses_print_no_session(self):
+        m = self.m
+        help_text = "  --print, -p  Non-interactive mode: process prompt and exit\n"
+        with patch.object(m, "help_probe", return_value=help_text):
+            cmd, adapter = m.choose_smoke_command("pi", "/opt/homebrew/bin/pi", "/tmp")
+        self.assertEqual(
+            cmd,
+            ["/opt/homebrew/bin/pi", "--print", "--no-session",
+             "Reply with exactly HERDR_PREFLIGHT_OK and nothing else."],
+        )
+        self.assertEqual(adapter, "pi --print")
+
 
 class TestConsoleSelfCheckEvidence(unittest.TestCase):
     def test_modal_renders_probe_output_evidence(self):
         html = load_console_html()
         self.assertIn("deep.output", html)
         self.assertIn("PROVIDER_ERROR", html)
+        self.assertIn("LOCAL_ERROR", html)
         self.assertIn("重试", html)
 
 

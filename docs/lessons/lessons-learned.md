@@ -1747,3 +1747,43 @@ python3 -m compileall -q herdr/ services/ bin/ tests/ console/
 # 4. 手工校准依据（claude 冷启动耗时）
 time (timeout 60 /Users/user/.volta/bin/claude --print "Reply with exactly HERDR_PREFLIGHT_OK and nothing else.")
 ```
+
+---
+
+## 39. 探针分类必须区分“远端拒绝 / 本地崩溃 / 未覆盖”：LOCAL_ERROR 与 pi 适配器的复核闭环
+
+### 问题背景
+
+§38 修复上线后，用户复测报三条新结果：`qodercli code=1 (19.73s)`、`opencode PROVIDER_ERROR (1.16s)`、`pi 未知`。逐路复现抓输出后结论各不相同：
+
+1. **qodercli 是 CLI 本地崩溃**：`Watcher did not become ready within 5000ms: ~/.qoder-cn/skills`（bun 文件监视器启动失败），与模型/凭证/配额完全无关，却被归入无信息量的通用 `ERROR`。且该失败是偶发的（同命令稍后 13.66s 成功）， skills 目录 145 个软链接均无断裂；
+2. **opencode PROVIDER_ERROR 是真阳性**：1.16s 快失败命中服务端拒绝模式，5 次复测全部 6–13s 成功——免费共享模型的过载抖动，探针如实报告了那一刻的真相；
+3. **pi 未知掩盖了真问题**：`pi --help` 明确文档化 `-p/--print` 非交互模式 + `--no-session`  ephemeral 开关，具备安全探针条件；接入后 live 深探直接打出 `AUTH_REQUIRED`（api key invalid）——此前浅层体检因“认证文件存在”一直报 READY，恰是文件存在≠凭证有效的误报。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| **本地崩溃混入通用 ERROR** | watcher/ENOENT/EACCES 这类 CLI 自身基础设施故障与远端拒绝的止血动作完全不同，混在一起误导排查方向 | 新增 `LOCAL_ERROR` 类别（仅匹配致命启动签名；注意 bare `skill conflict` 在成功输出里同样出现，不可匹配）；计入建议禁用、不触发 `--auto-disable` |
+| **快失败值得一次廉价重试** | 过载/503 类拒绝来得快（~1s），单样本易把抖动判成中断；但慢失败已花掉时间预算，不值得再花 | 仅对耗时 ≤15s 的 `PROVIDER_ERROR` 重试 1 次；慢失败与通用 `ERROR` 保持单样本（qoder watcher 每次 ~20s，重试纯浪费） |
+| **UNKNOWN 是债务不是状态** | “暂无安全适配器”长期挂着，等于放任该执行者永远未经真实校验 | 每个 UNKNOWN 都必须有消除计划：核查 `--help` 确认非交互开关后立即接入（如 pi `--print --no-session`），并用一次 live 深探验证分类链路 |
+| **终端与控制台结论打架先查环境** | 同一 pi 在终端 401、控制台 READY——实为终端 `DEEPSEEK_API_KEY` 已过期（尾部 `4a3d` 与报错掩码一致），遮蔽了文件中的有效凭证；LaunchAgent 精简环境反而用了对的凭证。两边探针各自正确，错的是被污染的环境 | 自检结论不一致时，先 `env \| grep` 比对可疑 key 后缀与报错掩码，再用 `env -u <VAR> <probe>` 隔离验证；过期 key 立即轮换或 unset |
+
+### 操作规范
+
+1. 新增 `final_status` 枚举值时同步四处：`print_table` 的 `bad` 集合、控制台 `statusLabel` + `hard` 集合、`auto_disable/hard`（偶发类不进）、`choose_smoke_command`/分类器单测；
+2. 为新执行者写适配器前，必须通读其 `--help` 确认非交互开关的副作用（`--no-session` / `--no-session-persistence` 类开关优先），先手工跑通再接入；
+3. 用户报告自检异常时，先复现抓 `output` 原文再下结论——本轮三条报告对应三种不同真相（本地崩溃 / 真阳性抖动 / 覆盖缺失），不可一概而论。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 新回归 15 项（含 LOCAL 分类、pi 适配器、快失败重试/慢失败单样本）
+pytest tests/test_deep_preflight_accuracy.py -v
+
+# 2. Live 端到端深探（claude 39.45s READY 反证旧 35s 阈值必误杀；pi 打出 AUTH_REQUIRED 真问题）
+./bin/herdr-deep-preflight --deep --json
+
+# 3. 终端与服务结论不一致时，隔离可疑环境变量复测
+env -u DEEPSEEK_API_KEY /opt/homebrew/bin/pi --print --no-session "Reply with exactly HERDR_PREFLIGHT_OK and nothing else."
+```
