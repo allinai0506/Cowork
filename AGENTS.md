@@ -13,7 +13,7 @@
 
 - **知识层主索引**: [`wiki/index.md`](file:///Users/user/HAFlow/wiki/index.md) — 真实代码沉淀的知识图谱与意图寻路主入口。
 - **Wiki 治理规范**: [`wiki/WIKI.md`](file:///Users/user/HAFlow/wiki/WIKI.md) 与 [`wiki/log.md`](file:///Users/user/HAFlow/wiki/log.md) — 当变更涉及架构、模型、状态机、DAG 算法、自愈逻辑或路由时，必须同步更新对应 Wiki。
-- **工程教训知识库**: [`docs/lessons/lessons-learned.md`](file:///Users/user/HAFlow/docs/lessons/lessons-learned.md) — 跨模块可复用工程教训（四段式）。使用 `.agents/skills/knowledge-capture/` 技能在收尾时沉淀。
+- **工程教训知识库**: [`docs/lessons/lessons-learned.md`](file:///Users/user/HAFlow/docs/lessons/lessons-learned.md) — 跨模块可复用工程教训（四段式）。使用统一技能项目提供的 `knowledge-capture` 技能在收尾时沉淀。
 
 ---
 
@@ -69,7 +69,7 @@
 
 - 检查本次 session 是否排查了复杂 bug、解决了同类复发问题、或踩了技术坑；
 - 凡符合通用教训的，按四段式规范追加到 [`docs/lessons/lessons-learned.md`](file:///Users/user/HAFlow/docs/lessons/lessons-learned.md)；
-- 对 Agent 说 **"沉淀一下本次 session 的知识"** 或 **"归档教训"**，Agent 自动执行 `.agents/skills/knowledge-capture/` 流程；
+- 对 Agent 说 **"沉淀一下本次 session 的知识"** 或 **"归档教训"**，Agent 自动执行统一技能项目提供的 `knowledge-capture` 流程；
 - 将知识更新与代码**一同提交到同一个 PR**（禁止事后单独补提 PR）。
 
 ### 收尾第 2 步：验收清单

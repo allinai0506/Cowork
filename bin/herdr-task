@@ -3057,11 +3057,10 @@ def close_workflow(
             "  [COORDINATOR KEPT] "
             f"pane={coordinator_pane or 'unknown'} — "
             "完成知识沉淀并合并 PR 后，请按以下步骤收尾：\n"
-            "    1. 运行 six-step-finish 技能执行破坏性收尾步骤（步骤 3 最终确认 + 步骤 4-6）：\n"
-            f"       bash .agents/skills/six-step-finish/scripts/finish-task.sh "
+            "    1. 运行统一技能项目提供的 six-step-finish 技能执行破坏性收尾步骤（步骤 3 最终确认 + 步骤 4-6）：\n"
+            f"       bash ~/.agents/skills/six-step-finish/scripts/finish-task.sh "
             f"<任务分支> --base {base_branch} --forge none\n"
             "       （<任务分支> 替换为已合入的任务分支名；存在多个已合入分支时分别对每个分支执行）\n"
-            "       （绝对兜底：~/.agents/skills/six-step-finish/scripts/finish-task.sh）\n"
             "    2. 确认收尾完成后，运行：\n"
             f"       herdr-task close-workflow {workflow_id} --include-coordinator"
         )

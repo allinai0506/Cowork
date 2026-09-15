@@ -119,9 +119,8 @@ herdr-task close-workflow <workflow_id> [--include-coordinator] [--purge-clones]
 - 收尾后六步法：close-workflow 完成后（总指挥 pane 保留期间），用户/总指挥应先运行
   six-step-finish 技能的破坏性收尾步骤（步骤 3 最终确认 + 步骤 4-6），再运行
   `--include-coordinator` 关闭总指挥 pane。调用形式：
-  `bash .agents/skills/six-step-finish/scripts/finish-task.sh <任务分支> --base <base_branch> --forge none`
-  （`<任务分支>` 为已合入的任务分支名，多个分支分别执行；绝对兜底
-  `~/.agents/skills/six-step-finish/`）。
+  `bash ~/.agents/skills/six-step-finish/scripts/finish-task.sh <任务分支> --base <base_branch> --forge none`
+  （`<任务分支>` 为已合入的任务分支名，多个分支分别执行；技能由统一技能项目管理）。
 - 自动触发:Controller 在 `[WORKFLOW COMPLETE]` 时自动调用(等价于不带 flags)。
 - 零任务的已登记 workflow 视为平凡完成,直接标记。
 
