@@ -97,3 +97,23 @@ Evidence:
 - `bin/herdr-factory#start_workflow`
 - `services/herdr-controller.py#check_workflow_stage_advance`
 - `tests/test_workflow_start_sync.py`
+
+## 7. 任务归档查询 (Task Archive Query)
+
+`FACT` 控制台动作区「任务归档」提供跨项目、跨 Workflow 的历史任务检索列表。
+查询核心是纯函数 `herdr/archive.py#query_archived_tasks`（过滤/排序/分页，无 I/O）；
+控制台壳层 `archive_query` 优先读取 StateStore（唯一事实源），`tasks.json` 仅作降级兜底，
+因此投影文件损坏或被覆盖时归档列表仍然完整。
+
+- 过滤：`project_id`（精确）、`workflow_id`（片段）、`agent`（精确）、`status`（组别名或精确状态）、
+  `q`（task_id / goal / 节点 / 项目 / 工作流 关键词）；
+- 状态组：`archived`（cleaned/superseded/failed，默认）、`active`、`all`，或任意精确状态名（如 `completed`）；
+- 排序：`updated_at` 倒序（缺失回退 `last_activity_at` → `created_at`），`task_id` 升序兜底；
+- 分页：`limit` 默认 50、上限 200，`offset` 越界安全；响应含 `total/count/limit/offset/status/items`；
+- 下钻：每条任务复用既有「任务白盒简报」（`/api/task/projection`）。
+
+Evidence:
+- `herdr/archive.py#query_archived_tasks`
+- `herdr/archive.py#summarize_task`
+- `console/herdr_factory_console.py#archive_query`
+- `tests/test_archive_query.py`

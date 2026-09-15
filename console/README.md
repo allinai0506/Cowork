@@ -43,6 +43,16 @@ http://127.0.0.1:8765/
 
 脚本会同步 `herdr_factory_console.py` 与 `launcher.applescript`，然后按项目规范重启 `com.user.herdr-factory-console`。可使用 `--no-restart` 只同步文件。
 
+## 任务归档查询 API
+
+```text
+GET /api/archive?project_id=&workflow_id=&agent=&status=&q=&limit=&offset=
+  -> {total, count, limit, offset, status, items: [{task_id, workflow_id, node_label,
+      agent, status, stage_verdict, goal, superseded_by, created_at, updated_at, duration_seconds}]}
+```
+
+数据源优先读取 StateStore（唯一事实源），`tasks.json` 仅作降级兜底——投影文件损坏或被覆盖时归档列表依然完整。`status` 支持组别名 `archived`（cleaned/superseded/failed，默认）、`active`、`all`，或任意精确状态名；`workflow_id`/`q` 为不区分大小写的片段匹配；按 `updated_at` 倒序、`limit` 上限 200。页面入口：动作区“任务归档”，每条任务可下钻既有「任务白盒简报」。
+
 ## Dashboard V2 API
 
 Console 提供：
