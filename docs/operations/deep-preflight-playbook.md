@@ -26,12 +26,14 @@
 | `opencode` | 极简执行 (`opencode run "echo READY..."`) | 40s | 进程返回 0 且包含 `READY` |
 | `qodercli` | 脚本模式 (`qodercli --print "print READY..."`) | 40s | 进程返回 0 且包含 `READY` |
 | `agy` | CLI 简短交互 (`agy --print "output READY..."`) | 40s | 进程返回 0 且包含 `READY` |
-| `pi` | 轻量指令模式（暂无确认安全的非交互适配器，记 UNKNOWN） | — | 不做真实请求，不判不可用 |
+| `pi` | 非交互模式 (`pi --print --no-session "READY..."`) | 40s | 进程返回 0 且包含 `READY` |
 
 > 校准依据（2026-09-15 实测）：`claude --print` 冷启动一次 36.9s 成功、另一次 60s 仍无输出，
 > 统一 35s 阈值会把健康但慢的执行者稳定误判为 TIMEOUT，故 claude 单独 90s + 超时重试。
 > `TIMEOUT` 仅表示单次采样超时，不触发 `--auto-disable`；`PROVIDER_ERROR`（服务端过载/5xx/连接失败/模型不存在）
-> 与 `TOKEN_EXHAUSTED` / `AUTH_REQUIRED` 一样计入建议禁用候选。控制台「执行者自检」弹窗同时展示每路探针
+> 与 `TOKEN_EXHAUSTED` / `AUTH_REQUIRED` 一样计入建议禁用候选；`LOCAL_ERROR`（CLI 本地基础设施故障，如文件 watcher
+> 启动失败、ENOENT/EACCES）计入建议禁用候选但不触发 `--auto-disable`（多为偶发）。快速失败（≤15s）的
+> `PROVIDER_ERROR` 自动重试 1 次以区分抖动与持续中断。控制台「执行者自检」弹窗同时展示每路探针
 > 原始输出尾部（800 字符），以便人工复核分类是否准确。
 
 ---
