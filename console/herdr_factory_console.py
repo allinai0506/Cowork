@@ -84,7 +84,9 @@ def workflows_for_project(pid):
     out=[]
     for wid,w in workflows().items():
         if w.get('project_id')==pid: out.append({'workflow_id':wid,**_with_subject(w)})
-    return sorted(out,key=lambda x:x['workflow_id'],reverse=True)
+    # 工作流 ID 混用两套命名(wf-proj-<hash>-<时间戳> 与 wf-proj-<MMDD>-<序号>)，
+    # 字典序不再等于时间序；必须按 created_at 倒序，保证默认选中最新的工作流。
+    return sorted(out,key=lambda x:(x.get('created_at') or 0,x['workflow_id']),reverse=True)
 
 def tasks_for_workflow(wid):return [t for t in tasks() if t.get('workflow_id')==wid]
 
