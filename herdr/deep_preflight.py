@@ -43,15 +43,45 @@ TOKEN_PATTERNS = [
     r"rate.?limit",
     r"usage limit",
     r"no.*tokens?",
+    r"premium.*(limit|quota|request)",
+    r"free\W*(tier|plan)?.*(limit|exhaust)",
+    r"out of credits?",
+    r"credit.*(balance|exhaust|insufficient|depleted)",
+    r"billing.*(limit|exhaust|issue)",
+    r"payment required",
+    r"\b402\b",
 ]
 AUTH_PATTERNS = [
     r"not logged in",
     r"authentication required",
     r"unauthorized",
+    r"unauthenticated",
     r"invalid api key",
     r"invalid.*token",
     r"login required",
     r"please log in",
+    r"api key.*(missing|not found|invalid|expired)",
+    r"expired.*(key|token|credential)",
+    r"access denied",
+    r"forbidden",
+    r"no auth",
+    r"\b401\b",
+    r"\b403\b",
+]
+PROVIDER_PATTERNS = [
+    r"overloaded",
+    r"server error",
+    r"internal server error",
+    r"temporarily unavailable",
+    r"service unavailable",
+    r"bad gateway",
+    r"gateway timeout",
+    r"\b50[023]\b",
+    r"model.*not found",
+    r"provider.*error",
+    r"connection (refused|reset|timed out|failed)",
+    r"network.*(error|unreachable|timeout)",
+    r"econn(refused|reset|timedout)",
 ]
 TRUST_PATTERNS = [
     r"do you trust",
@@ -196,6 +226,7 @@ def classify_text(text):
     checks = [
         ("TOKEN_EXHAUSTED", TOKEN_PATTERNS),
         ("AUTH_REQUIRED", AUTH_PATTERNS),
+        ("PROVIDER_ERROR", PROVIDER_PATTERNS),
         ("TRUST_REQUIRED", TRUST_PATTERNS),
         ("UPDATE_BLOCKED", UPDATE_PATTERNS),
     ]
@@ -203,6 +234,15 @@ def classify_text(text):
         if any(re.search(p, low, re.I) for p in patterns):
             return status
     return None
+
+
+# Per-agent smoke timeouts (seconds). Claude cold start routinely needs 35-60s
+# (measured 36.9s success, occasional >60s flake), so a flat 35s timeout
+# deterministically misreports healthy-but-slow as TIMEOUT.
+SMOKE_TIMEOUTS = {
+    "claude": 90,
+}
+DEFAULT_SMOKE_TIMEOUT = 40
 
 
 def auth_hint(agent):
@@ -282,7 +322,7 @@ def choose_smoke_command(agent, binary, cwd):
     return None, "no safe non-interactive adapter"
 
 
-def smoke_probe(agent, binary, cwd):
+def smoke_probe(agent, binary, cwd, timeout=None):
     cmd, adapter = choose_smoke_command(agent, binary, cwd)
     if not cmd:
         return {
@@ -293,54 +333,70 @@ def smoke_probe(agent, binary, cwd):
             "output": "",
         }
 
-    started = time.time()
-    res = normalize_result(run(cmd, timeout=35, cwd=cwd))
-    elapsed = round(time.time() - started, 2)
-    combined = (res["stdout"] + "\n" + res["stderr"]).strip()
-    classification = classify_text(combined)
+    limit = timeout or SMOKE_TIMEOUTS.get(agent, DEFAULT_SMOKE_TIMEOUT)
+    # Single retry on TIMEOUT: slow-but-healthy CLIs (notably claude cold
+    # start at 35-60s) must not be condemned by one timing sample.
+    attempts = 2 if agent in SMOKE_TIMEOUTS else 1
+    last = None
+    for attempt in range(1, attempts + 1):
+        started = time.time()
+        res = normalize_result(run(cmd, timeout=limit, cwd=cwd))
+        elapsed = round(time.time() - started, 2)
+        combined = (res["stdout"] + "\n" + res["stderr"]).strip()
+        classification = classify_text(combined)
 
-    if res["timeout"]:
-        return {
-            "attempted": True,
-            "adapter": adapter,
-            "status": "TIMEOUT",
-            "note": f"真实最小调用超时 ({elapsed}s)",
-            "output": combined[-1200:],
-        }
+        if res["timeout"]:
+            last = {
+                "attempted": True,
+                "adapter": adapter,
+                "status": "TIMEOUT",
+                "note": f"真实最小调用超时 ({elapsed}s, 超时阈值 {limit}s)",
+                "output": combined[-1200:],
+            }
+            if attempt < attempts:
+                time.sleep(2)
+                continue
+            if attempts > 1:
+                last["note"] += "；已重试 1 次仍超时，可能是慢而非不可用"
+            return last
 
-    if classification:
-        return {
-            "attempted": True,
-            "adapter": adapter,
-            "status": classification,
-            "note": f"CLI 报告阻塞 ({elapsed}s)",
-            "output": combined[-1200:],
-        }
+        if classification:
+            return {
+                "attempted": True,
+                "adapter": adapter,
+                "status": classification,
+                "note": f"CLI 报告阻塞 ({elapsed}s)",
+                "output": combined[-1200:],
+            }
 
-    if res["returncode"] == 0:
-        exact_marker = any(
-            line.strip() == "HERDR_PREFLIGHT_OK"
-            for line in combined.splitlines()
-        )
-        return {
-            "attempted": True,
-            "adapter": adapter,
-            "status": "READY",
-            "note": (
+        if res["returncode"] == 0:
+            exact_marker = any(
+                line.strip() == "HERDR_PREFLIGHT_OK"
+                for line in combined.splitlines()
+            )
+            note = (
                 f"真实最小调用成功，协议标记精确 ({elapsed}s)"
                 if exact_marker
                 else f"真实最小调用成功，输出受项目规则影响 ({elapsed}s)"
-            ),
+            )
+            if attempts > 1 and attempt > 1:
+                note += "；第 2 次重试成功"
+            return {
+                "attempted": True,
+                "adapter": adapter,
+                "status": "READY",
+                "note": note,
+                "output": combined[-1200:],
+            }
+
+        return {
+            "attempted": True,
+            "adapter": adapter,
+            "status": "ERROR",
+            "note": f"真实最小调用失败 code={res['returncode']} ({elapsed}s)",
             "output": combined[-1200:],
         }
-
-    return {
-        "attempted": True,
-        "adapter": adapter,
-        "status": "ERROR",
-        "note": f"真实最小调用失败 code={res['returncode']} ({elapsed}s)",
-        "output": combined[-1200:],
-    }
+    return last
 
 
 def inspect(project, deep=False):
@@ -426,7 +482,8 @@ def print_table(rows, project_id, deep):
         bad = [
             r for r in rows
             if r["final_status"] in {
-                "TOKEN_EXHAUSTED", "AUTH_REQUIRED", "TRUST_REQUIRED",
+                "TOKEN_EXHAUSTED", "AUTH_REQUIRED", "PROVIDER_ERROR",
+                "TRUST_REQUIRED",
                 "UPDATE_BLOCKED", "TIMEOUT", "ERROR", "MISSING"
             }
         ]
@@ -460,7 +517,8 @@ def main():
 
     if args.auto_disable and args.deep:
         hard = {
-            "TOKEN_EXHAUSTED", "AUTH_REQUIRED", "TRUST_REQUIRED",
+            "TOKEN_EXHAUSTED", "AUTH_REQUIRED", "PROVIDER_ERROR",
+            "TRUST_REQUIRED",
             "UPDATE_BLOCKED", "ERROR", "MISSING"
         }
         changed = []

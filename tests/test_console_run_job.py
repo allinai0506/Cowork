@@ -69,7 +69,7 @@ class TestConsoleDeepPreflight(unittest.TestCase):
         command = run_command.call_args.args[0]
         self.assertEqual(command[0], str(ROOT / "bin" / "herdr-deep-preflight"))
         self.assertEqual(command[1:], ["--project-id", "p1", "--deep", "--json"])
-        self.assertEqual(run_command.call_args.args[1], 180)
+        self.assertEqual(run_command.call_args.args[1], 320)
         self.assertEqual(result, {"agents": []})
 
     def test_falls_back_to_the_library_script_without_the_cli(self):

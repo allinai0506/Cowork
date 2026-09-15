@@ -165,7 +165,7 @@ def deep_preflight(p):
         "--project-id", p.get("project_id"),
         "--deep",
         "--json",
-    ], 180)
+    ], 320)
 
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip() or r.stdout.strip() or "Deep Preflight 执行失败")
@@ -1296,6 +1296,7 @@ async function runPreflight(){
       WARN:'警告',
       TOKEN_EXHAUSTED:'额度耗尽',
       AUTH_REQUIRED:'需要认证',
+      PROVIDER_ERROR:'服务端繁忙',
       TRUST_REQUIRED:'需要信任',
       UPDATE_BLOCKED:'更新受阻',
       TIMEOUT:'超时',
@@ -1303,13 +1304,14 @@ async function runPreflight(){
     })[s]||s;
 
     const hard=new Set([
-      'TOKEN_EXHAUSTED','AUTH_REQUIRED','TRUST_REQUIRED',
+      'TOKEN_EXHAUSTED','AUTH_REQUIRED','PROVIDER_ERROR','TRUST_REQUIRED',
       'UPDATE_BLOCKED','TIMEOUT','ERROR','MISSING'
     ]);
 
     const html='<div class="muted" style="margin-bottom:8px">'
       +'真实最小调用仅用于已确认安全非交互模式的执行者；'
       +'UNKNOWN 表示尚未配置安全适配器，不代表不可用。'
+      +'TIMEOUT 可能是慢而非不可用（claude 冷启动常需 40–60s，已自动重试 1 次），请结合下方原始输出判断，必要时点一次“执行者自检”重试。'
       +'</div><div>'
       +rows.map(a=>{
         const deep=a.deep||{};
@@ -1317,10 +1319,12 @@ async function runPreflight(){
         const cls=final==='READY'?'good-text':(hard.has(final)?'danger-text':'muted');
         const note=deep.note||a.version||a.binary||'';
         const adapter=deep.adapter?(' · '+esc(deep.adapter)):'';
+        const out=(deep.output||'').slice(-800);
+        const outHtml=out?('<pre class="task-meta" style="white-space:pre-wrap;max-height:120px;overflow:auto;background:#080b0f;padding:6px 8px;border-radius:8px;margin-top:4px">'+esc(out)+'</pre>'):'';
         return '<div class="agent-row">'
           +'<div><div><strong>'+esc(a.agent)+'</strong> '
           +'<span class="'+cls+'">'+esc(statusLabel(final))+'</span></div>'
-          +'<div class="task-meta">'+esc(note)+adapter+'</div></div>'
+          +'<div class="task-meta">'+esc(note)+adapter+'</div>'+outHtml+'</div>'
           +'<div class="task-meta">'+esc(authHintLabel(a.auth_hint||'unknown'))+'</div>'
           +'</div>';
       }).join('')

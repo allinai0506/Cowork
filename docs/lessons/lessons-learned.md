@@ -1702,3 +1702,48 @@ pytest -q
 curl -s http://127.0.0.1:8765/api/preflight/deep | grep '"installed": true'
 ```
 
+
+---
+
+## 38. 健康探针“一刀切超时 + 窄分类 + 丢证据”导致的执行者自检误判：按执行者校准超时、分类必须兜底、结论必须附证据
+
+### 问题背景
+
+Web 控制台「执行者自检」（`herdr-deep-preflight --deep`）报告 `opencode 错误 真实最小调用失败 code=1 (1.65s)` 与 `claude 超时 35s`，但手工复测两路执行者实际可用。排查确认三重 compounding 误判：
+
+1. **统一超时阈值误杀慢执行者**：`smoke_probe` 对所有 Agent 一刀切 `timeout=35`，而实测 `claude --print` 冷启动一次 36.9s 才成功、另一次 60s 仍无输出——健康但慢的执行者被确定性误判为 `TIMEOUT`（手册里写的 25s 错得更离谱）；
+2. **分类模式过窄导致快失败无归因**：`TOKEN_PATTERNS` / `AUTH_PATTERNS` 仅覆盖英文基础措辞，`opencode run` 1.65s 启动期快失败的常见措辞（401/402、billing/premium 限额、overloaded/5xx/连接失败、模型不存在）全部漏判，落入无信息量的通用 `ERROR`；
+3. **控制台弹窗丢弃原始输出**：`runPreflight` 弹窗只渲染 `note + adapter`，丢掉 `deep.output`——用户看到结论却看不到证据，无法复核分类是否准确，形成“自检不准”的体感。
+
+### 经验教训
+
+| 问题 | 教训 | 规范 |
+|---|---|---|
+| **单一样本定时判决** | 一次超时就判死刑，混淆了“慢”与“不可用”；冷启动抖动大的 CLI（claude）必然被冤杀 | 超时阈值必须按执行者分别校准（`SMOKE_TIMEOUTS`），抖动大的探针超时后自动重试 1 次；`TIMEOUT` 永不触发 `--auto-disable` |
+| **英文窄模式分类器** | 只写 happy-path 英文正则，真实世界的 provider 错误措辞（计费/过载/5xx/连接）必然漏网 | 分类模式库必须覆盖 401/402/403、billing/credits、overloaded/5xx/connection/model-not-found；新增类别（如 `PROVIDER_ERROR`）要同步更新所有消费者（控制台 label、print_table、auto_disable 集合） |
+| **结论与证据分离展示** | 探针返回了 `output` 但 UI 不展示，等于没有证据 | 任何健康结论的 UI 必须同时渲染原始输出尾部（本例 800 字符 `<pre>`），让人工可复核 |
+| **调用方总超时落后** | 探针侧超时放宽后，控制台 180s 总超时兜不住 `90s×重试 + 串行多路` 的最坏链路 | 放宽探针超时必须同步放宽所有同步调用方的总超时（本例控制台 180s→320s），并更新断言该超时值的单测 |
+
+### 操作规范
+
+1. 在 `herdr/deep_preflight.py` 中维护 `SMOKE_TIMEOUTS`（当前仅 `claude: 90`）与 `DEFAULT_SMOKE_TIMEOUT = 40`；新增抖动大的执行者时优先加超时 + 重试，而非放宽全局阈值；
+2. 新增 `final_status` 枚举值时，必须同步三处：控制台 `statusLabel` + `hard` 集合、`print_table` 的 `bad` 集合、`main` 的 `auto_disable/hard` 集合；
+3. 涉及 `console/` 任何改动，必须执行 `./scripts/install-herdr-console.sh` 并 `launchctl kickstart -k` 热重载（见 §37.3），否则线上仍是旧逻辑；
+4. 探针口径变更必须同步 `docs/operations/deep-preflight-playbook.md` 超时表与 `wiki/preflight-and-health.md` §3.2，并在 `wiki/log.md` 追加演进记录。
+
+### 验证命令 / 证据
+
+```bash
+# 1. 新回归测试（分类/超时/重试/证据展示 9 项）
+pytest tests/test_deep_preflight_accuracy.py -v
+
+# 2. 全仓回归（431 passed）与编译检查
+pytest 2>&1 | tail -n 2
+python3 -m compileall -q herdr/ services/ bin/ tests/ console/
+
+# 3. 浅层口径未回归
+./bin/herdr-deep-preflight --json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['mode'], [(a['agent'],a['final_status']) for a in d['agents']])"
+
+# 4. 手工校准依据（claude 冷启动耗时）
+time (timeout 60 /Users/user/.volta/bin/claude --print "Reply with exactly HERDR_PREFLIGHT_OK and nothing else.")
+```

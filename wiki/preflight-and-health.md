@@ -71,10 +71,16 @@ Evidence:
 
 | 故障类别 | 正则匹配模式 (Patterns) | 判定结果 |
 | :--- | :--- | :--- |
-| **Token / 配额耗尽** | `token.*(exhaust\|limit\|quota)`<br/>`quota.*exhaust`<br/>`rate.?limit` | `TOKEN_EXHAUSTED` |
-| **认证失效 / 未登录** | `not logged in`<br/>`authentication required`<br/>`unauthorized`<br/>`invalid api key` | `AUTH_REQUIRED` |
+| **Token / 配额耗尽** | `token.*(exhaust\|limit\|quota)`<br/>`quota.*exhaust`<br/>`rate.?limit`<br/>`premium.*limit` / `out of credits` / `billing.*limit` / `402` | `TOKEN_EXHAUSTED` |
+| **认证失效 / 未登录** | `not logged in`<br/>`authentication required`<br/>`unauthorized`<br/>`invalid api key`<br/>`expired.*key` / `access denied` / `401` / `403` | `AUTH_REQUIRED` |
+| **服务端过载 / 不可用** | `overloaded`<br/>`server error` / `service unavailable` / `50x`<br/>`model.*not found`<br/>`connection refused/reset` | `PROVIDER_ERROR` |
 | **工作区未授权信任** | `do you trust`<br/>`workspace trust` | `TRUST_REQUIRED` |
 | **正常就绪** | 正常返回且未匹配任何阻断规则 | `READY` |
+
+`FACT` 超时与重试口径（按执行者分别校准，单次采样超时不等同不可用）：
+1. **分执行者超时**: `claude` 90s，其余 40s。依据为实测 `claude --print` 冷启动 36.9s 成功、偶发 60s 仍无输出，统一短阈值会把健康但慢的执行者稳定误判为 `TIMEOUT`。
+2. **超时重试一次**: 仅 `claude` 超时后自动重试 1 次；重试成功记 `READY`，仍超时才判 `TIMEOUT` 并注明“可能是慢而非不可用”。
+3. **`TIMEOUT` 不触发 `--auto-disable`**；`PROVIDER_ERROR` 与 `TOKEN_EXHAUSTED` / `AUTH_REQUIRED` 一样计入建议禁用候选。控制台「执行者自检」弹窗展示每路探针原始输出尾部供人工复核。
 
 ### 3.3 Claude 工作区信任自动铺路
 针对 Claude Code 常见的 `"do you trust this folder"` 阻塞对话框，系统在任务启动前（`services/herdr-worker.py#ensure_claude_workspace_trust`）自动向 `~/.claude.json` 注入 `hasTrustDialogAccepted = True`，从根源消除交互式卡死。
@@ -82,5 +88,7 @@ Evidence:
 Evidence:
 - `herdr/deep_preflight.py:TOKEN_PATTERNS`
 - `herdr/deep_preflight.py:AUTH_PATTERNS`
+- `herdr/deep_preflight.py:PROVIDER_PATTERNS`
+- `herdr/deep_preflight.py:SMOKE_TIMEOUTS` / `smoke_probe`
 - `services/herdr-worker.py#ensure_claude_workspace_trust`
 - `RULES.md:探针无副作用安全`
