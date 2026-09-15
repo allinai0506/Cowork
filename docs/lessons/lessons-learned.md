@@ -1767,6 +1767,7 @@ time (timeout 60 /Users/user/.volta/bin/claude --print "Reply with exactly HERDR
 | **本地崩溃混入通用 ERROR** | watcher/ENOENT/EACCES 这类 CLI 自身基础设施故障与远端拒绝的止血动作完全不同，混在一起误导排查方向 | 新增 `LOCAL_ERROR` 类别（仅匹配致命启动签名；注意 bare `skill conflict` 在成功输出里同样出现，不可匹配）；计入建议禁用、不触发 `--auto-disable` |
 | **快失败值得一次廉价重试** | 过载/503 类拒绝来得快（~1s），单样本易把抖动判成中断；但慢失败已花掉时间预算，不值得再花 | 仅对耗时 ≤15s 的 `PROVIDER_ERROR` 重试 1 次；慢失败与通用 `ERROR` 保持单样本（qoder watcher 每次 ~20s，重试纯浪费） |
 | **UNKNOWN 是债务不是状态** | “暂无安全适配器”长期挂着，等于放任该执行者永远未经真实校验 | 每个 UNKNOWN 都必须有消除计划：核查 `--help` 确认非交互开关后立即接入（如 pi `--print --no-session`），并用一次 live 深探验证分类链路 |
+| **终端与控制台结论打架先查环境** | 同一 pi 在终端 401、控制台 READY——实为终端 `DEEPSEEK_API_KEY` 已过期（尾部 `4a3d` 与报错掩码一致），遮蔽了文件中的有效凭证；LaunchAgent 精简环境反而用了对的凭证。两边探针各自正确，错的是被污染的环境 | 自检结论不一致时，先 `env \| grep` 比对可疑 key 后缀与报错掩码，再用 `env -u <VAR> <probe>` 隔离验证；过期 key 立即轮换或 unset |
 
 ### 操作规范
 
@@ -1782,4 +1783,7 @@ pytest tests/test_deep_preflight_accuracy.py -v
 
 # 2. Live 端到端深探（claude 39.45s READY 反证旧 35s 阈值必误杀；pi 打出 AUTH_REQUIRED 真问题）
 ./bin/herdr-deep-preflight --deep --json
+
+# 3. 终端与服务结论不一致时，隔离可疑环境变量复测
+env -u DEEPSEEK_API_KEY /opt/homebrew/bin/pi --print --no-session "Reply with exactly HERDR_PREFLIGHT_OK and nothing else."
 ```
