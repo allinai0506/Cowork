@@ -294,7 +294,8 @@ def run_workflow_preflight(project, workflow_id):
         pass
 
     if record is None:
-        data = load_json(WORKFLOWS_FILE, {"workflows": {}})
+        wf_fallback = Path(os.environ.get("WORKFLOWS_FILE") or WORKFLOWS_FILE)
+        data = load_json(wf_fallback, {"workflows": {}})
         record = data.setdefault("workflows", {}).get(workflow_id)
         if record is None:
             raise RuntimeError(f"Workflow registry missing: {workflow_id}")
@@ -306,14 +307,13 @@ def run_workflow_preflight(project, workflow_id):
     store = _get_store()
     store.save_workflow(record)
 
-    data = load_json(WORKFLOWS_FILE, {"workflows": {}})
-    data.setdefault("workflows", {})[workflow_id] = record
-    tmp = WORKFLOWS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    tmp.replace(WORKFLOWS_FILE)
+    # 投影必须经 StateStore 同步(环境变量感知)，严禁直写硬编码路径，
+    # 否则测试/沙盒写入会覆盖线上 workflows.json。
+    try:
+        from herdr.state_store import sync_workflows_projection
+    except ImportError:
+        from herdr_state_store import sync_workflows_projection
+    sync_workflows_projection(store=store)
 
     print("PREFLIGHT_READY=" + ",".join(healthy))
     if unhealthy:

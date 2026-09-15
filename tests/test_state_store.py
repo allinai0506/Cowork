@@ -520,6 +520,12 @@ def test_end_to_end_single_source_of_truth_without_workflows_json(store_env, mon
     import importlib.util
     from herdr import projects, agent_router
 
+    # 模块级 WORKFLOWS_FILE/TASKS_FILE 必须同步隔离，否则写入会穿透
+    # 到线上 ~/.herdr-controller/workflows.json（曾覆盖 42 条真实工作流）。
+    monkeypatch.setattr(projects, "WORKFLOWS_FILE", store_env["wf_file"])
+    monkeypatch.setattr(agent_router, "WORKFLOWS_FILE", store_env["wf_file"])
+    monkeypatch.setattr(agent_router, "TASKS_FILE", store_env["tasks_file"])
+
     store = get_state_store()
 
     proj = {
@@ -623,6 +629,50 @@ def test_end_to_end_single_source_of_truth_without_workflows_json(store_env, mon
     assert store.get_workflow(wid)["status"] == "paused"
     factory.resume_workflow(wid)
     assert store.get_workflow(wid)["status"] == "running"
+
+
+def test_workflow_writes_never_touch_real_projection_without_global_patch(store_env):
+    """回归：仅靠环境变量隔离时，写操作不得穿透到线上 workflows.json。
+
+    曾发生真实事故：e2e 测试只设了 WORKFLOWS_FILE 环境变量、
+    未 patch 模块全局量，projects.register_workflow 直写
+    ~/.herdr-controller/workflows.json，把 42 条真实工作流覆盖成 1 条。
+    修复后所有写操作必须经 sync_workflows_projection（环境变量感知）。
+    """
+    from pathlib import Path as _Path
+    from herdr import projects, agent_router
+
+    # 刻意不 patch 模块全局量，只依赖环境变量（store_env 已设置）。
+    assert _Path(os.environ["WORKFLOWS_FILE"]) == store_env["wf_file"]
+
+    real_path = _Path.home() / ".herdr-controller" / "workflows.json"
+    real_before = real_path.read_bytes() if real_path.exists() else None
+
+    proj = {
+        "project_id": "proj-isolation-probe",
+        "project_name": "probe",
+        "project_root": "/tmp/probe",
+        "base_branch": "main",
+        "workspace_id": "ws-probe",
+        "coordinator_pane_id": "ws-probe:p1",
+        "workflow_file": str(store_env["cp_dir"] / "probe_workflow.json"),
+    }
+    _Path(proj["workflow_file"]).write_text(json.dumps({"nodes": []}), encoding="utf-8")
+
+    projects.register_workflow("wf-isolation-probe", proj, requirement="probe", title="probe")
+    projects.mark_workflow_startup_ready("wf-isolation-probe", healthy_agents=["codex"])
+    agent_router.set_workflow_agent_override("wf-isolation-probe", "codex")
+
+    # 线上文件必须字节级不变。
+    if real_before is None:
+        assert not real_path.exists()
+    else:
+        assert real_path.read_bytes() == real_before
+        assert b"wf-isolation-probe" not in real_path.read_bytes()
+
+    # 沙盒投影必须包含新工作流。
+    sandbox = json.loads(store_env["wf_file"].read_text(encoding="utf-8"))
+    assert "wf-isolation-probe" in sandbox.get("workflows", {})
 
 
 def test_fail_closed_prevents_silent_write_loss_when_statestore_fails(tmp_path, monkeypatch):
