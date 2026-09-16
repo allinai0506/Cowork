@@ -166,6 +166,41 @@ class PlanStageDispatchTest(unittest.TestCase):
         self.assertEqual(plan["mode"], "dispatch")
 
 
+class MergeNodePolicyTest(unittest.TestCase):
+    POLICY = {
+        "label": "5测试",
+        "purpose": "验证实现结果是否满足需求与验收标准。",
+        "default_task_type": "test",
+        "default_integration_mode": "none",
+        "required_outputs": ["测试范围", "测试结论"],
+        "rules": ["测试任务默认只读"],
+    }
+
+    def test_empty_node_fields_fall_back_to_policy(self):
+        merged = dd.merge_node_policy(
+            {"id": "test", "purpose": "", "required_outputs": [], "rules": []},
+            self.POLICY,
+        )
+        plan = dd.plan_stage_dispatch("wf-1", merged, [], "需求")
+        self.assertEqual(plan["mode"], "dispatch")
+        self.assertEqual(plan["specs"][0]["task_type"], "test")
+        self.assertIn("测试范围", plan["specs"][0]["acceptance"])
+
+    def test_node_values_override_policy(self):
+        merged = dd.merge_node_policy(
+            {"id": "test", "purpose": "节点自定义职责", "rules": ["节点规则"]},
+            self.POLICY,
+        )
+        plan = dd.plan_stage_dispatch("wf-1", merged, [], "需求")
+        self.assertIn("节点自定义职责", plan["specs"][0]["prompt"])
+        self.assertIn("节点规则", plan["specs"][0]["prompt"])
+
+    def test_policy_and_node_missing_still_falls_back(self):
+        merged = dd.merge_node_policy({"id": "test"}, {})
+        plan = dd.plan_stage_dispatch("wf-1", merged, [], "需求")
+        self.assertEqual(plan["mode"], "fallback")
+
+
 class TryDirectStageAdvanceTest(unittest.TestCase):
     def setUp(self):
         self.ctrl = _load_controller()
@@ -188,6 +223,7 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
                 },
             ),
             patch.object(self.ctrl, "load_tasks", return_value=[]),
+            patch.object(self.ctrl, "get_stage_policy", return_value={}),
             patch.object(
                 self.ctrl, "latest_branch_for_node", return_value=None
             ),
@@ -258,6 +294,26 @@ class TryDirectStageAdvanceTest(unittest.TestCase):
         )
         self.assertFalse(result)
         self.assertEqual(self.commands, [])
+
+    def test_stage_policy_fills_empty_node_purpose(self):
+        with patch.object(
+            self.ctrl,
+            "get_stage_policy",
+            return_value={
+                "purpose": "验证实现结果是否满足需求与验收标准。",
+                "default_task_type": "test",
+                "required_outputs": ["测试结论"],
+                "rules": ["测试任务默认只读"],
+            },
+        ):
+            result = self.ctrl.try_direct_stage_advance(
+                self._item(node={"id": "test", "label": "5测试", "purpose": ""})
+            )
+        self.assertTrue(result)
+        self.assertEqual(len(self.commands), 1)
+        cmd = self.commands[0]
+        self.assertIn("test", cmd)
+        self.assertIn("wf-1-test-auto", cmd)
 
 
 class DecisionTimeoutTest(unittest.TestCase):

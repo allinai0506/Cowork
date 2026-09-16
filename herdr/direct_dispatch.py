@@ -43,6 +43,40 @@ def _as_list(value):
     return result
 
 
+def _has_value(value):
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return bool(value)
+
+
+def merge_node_policy(node, policy):
+    """节点模板与 stage policy 合并：节点字段为空时回退 policy。
+
+    与总指挥路径的 `node.get(...) or policy.get(...)` 语义保持一致，
+    兼容历史 workflow.json 中 purpose/outputs 为空的旧快照。
+    """
+    node = node if isinstance(node, dict) else {}
+    policy = policy if isinstance(policy, dict) else {}
+
+    def pick(key, default=None):
+        if _has_value(node.get(key)):
+            return node.get(key)
+        if _has_value(policy.get(key)):
+            return policy.get(key)
+        return default
+
+    merged = dict(node)
+    merged["purpose"] = pick("purpose", "")
+    merged["label"] = pick("label")
+    merged["required_outputs"] = pick("required_outputs", [])
+    merged["rules"] = pick("rules", [])
+    merged["default_task_type"] = pick("default_task_type")
+    merged["default_integration_mode"] = pick("default_integration_mode")
+    return merged
+
+
 def normalize_node(node):
     """节点模板 -> 决策所需的稳定结构；缺少 id 时返回 None。"""
     if not isinstance(node, dict):

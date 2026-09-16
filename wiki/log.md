@@ -513,5 +513,6 @@ Workflow 完成后任务 pane/clone 永不销毁(pane_persistent 默认保留),�
 - **新增 `herdr/direct_dispatch.py`（纯函数）**：按节点模板 + 需求正文生成 Task 规格；fix-loop 回流只补派被作废且无替代的子集任务（`-rN`），`verdict=pass` 且已落定任务保留；节点有活跃任务返回 wait；配置不足/需求缺失返回 fallback。
 - **Controller**：`try_direct_stage_advance` 装配 launch（`[STAGE ADVANCED DIRECT]` / `[DIRECT DISPATCH FALLBACK]` / `[DIRECT DISPATCH WAIT]`，`HERDR_DIRECT_STAGE_DISPATCH=0` 可关）；`invalidate_for_fix_loop` 门禁子集保留（`[FIX LOOP SUBSET KEEP]`，`completed+git` 仍走 finalize+作废）；`wait_for_coordinator_decision` 30s→180s（`HERDR_COORDINATOR_DECISION_TIMEOUT`）且超时落 attention 退避；Git 集成 commit 下发 `HERDR_DEFER_HEAVY_TESTS=1`；活跃 workflow 期间持有 `caffeinate` 唤醒守卫（`[AWAKE GUARD]`，`HERDR_AWAKE_GUARD=0` 可关）。
 - **跨仓（xiyu-bid-poc，用户授权）**：`scripts/check-testing-standards.sh` 识别 `HERDR_DEFER_HEAVY_TESTS=1`（仅 controller 收尾注入，避免按仓库来源猜测误伤人类提交），herdr 任务提交只跑快速检查，全量测试交由 workflow test 节点与 pre-push 门禁。
-- 回归：新增 `tests/test_direct_stage_dispatch.py` 16 项 + `test_fix_loop_gates` 子集用例 2 项；相关套件 146 passed；unittest 全量 317 passed（17 个 pytest-only 文件因环境缺 pytest 未进入）。
+- **现场重载验证**：热重载后真实工作流 `wf-xiyu-bid-poc-0915-01` 的 test 节点首次触发 `[DIRECT DISPATCH FALLBACK] reason=node purpose missing` —— 该项目 `workflow.json` 为旧模板快照（`purpose=""`/`required_outputs=[]`）。修复：新增 `merge_node_policy`（纯函数），节点字段为空时回退 `stage-policies.json`（与总指挥路径语义一致），policy 也缺 purpose 才回落；补 3 项合并用例 + 1 项 policy 回退用例。
+- 回归：新增 `tests/test_direct_stage_dispatch.py` 20 项 + `test_fix_loop_gates` 子集用例 2 项；相关套件 147 passed；unittest 全量 318 passed（17 个 pytest-only 文件因环境缺 pytest 未进入）。
 - 更新 [[architecture]] §2.1（Direct Stage Dispatch）。

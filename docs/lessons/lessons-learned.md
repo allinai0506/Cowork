@@ -1923,7 +1923,7 @@ rg "COORDINATOR BUSY|COORDINATOR STALLED" ~/.herdr-controller/logs/controller.ou
 
 ### 操作规范
 
-1. **阶段推进默认规则化**：`herdr/direct_dispatch.py`（纯函数）负责决策，controller 只做 launch 装配；新增节点类型必须提供 `purpose` 才能进入规则化路径，否则回落协调器；总开关 `HERDR_DIRECT_STAGE_DISPATCH=0`；
+1. **阶段推进默认规则化**：`herdr/direct_dispatch.py`（纯函数）负责决策，controller 只做 launch 装配；节点字段为空时与总指挥路径一致回退 `stage-policies.json`（`merge_node_policy`），节点与 policy 都没有 `purpose` 才回落协调器；总开关 `HERDR_DIRECT_STAGE_DISPATCH=0`；
 2. **等待预算必须标定**：任何新增 Actor 等待的预算按"真实回合尾部耗时"设置并 env 可覆盖（`HERDR_COORDINATOR_DECISION_TIMEOUT`），超时一律走 attention 退避；
 3. **返工作废按子集**：fix-loop 只作废失败任务 + 全部下游；保留项必须"已落定或无需 Git 集成"（`completed+git` 仍走 finalize+作废，防止未提交任务滞留）；
 4. **提交门禁延迟显式化**：controller 收尾 commit 下发 `HERDR_DEFER_HEAVY_TESTS=1`，目标仓 hook 只认该显式开关；

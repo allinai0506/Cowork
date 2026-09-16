@@ -71,7 +71,7 @@ Evidence:
   3. **注册表卫生**：夹具/临时 workflow（pytest-*、/tmp、已删除 workflow_file、无 project_id 空壳）不进入调度 sweep；`[WORKFLOW COMPLETE]` 单次闩；僵尸 pane 订阅指数退避封顶（2s→300s，8 次后慢重试一次告警）。
   启动时执行 `herdr integration status` 健康检查，缺失集成打印 `[INTEGRATION GAP]`（缺集成 → 屏幕探测误判是本次事故直接根因）。
 - `FACT` **Direct Stage Dispatch 规则化推进会（2026-09-16 延迟优化，lessons §42）**:
-  1. **常规推进（`[STAGE ADVANCED DIRECT]`）**：`herdr/direct_dispatch.py` 纯函数按节点模板（purpose / required_outputs / rules / default_task_type / default_integration_mode）与需求正文生成 Task 规格，Controller 直接调用 `herdr-task launch`，不再等待总指挥 LLM 回合；fix-loop 回流时只补派"被作废且无替代"的子集任务（`-rN` 命名），`verdict=pass` 且已落定的任务保留（`[FIX LOOP SUBSET KEEP]`）；
+  1. **常规推进（`[STAGE ADVANCED DIRECT]`）**：`herdr/direct_dispatch.py` 纯函数按节点模板（purpose / required_outputs / rules / default_task_type / default_integration_mode）与需求正文生成 Task 规格（节点字段为空时回退 `stage-policies.json`，兼容历史 workflow.json 旧快照），Controller 直接调用 `herdr-task launch`，不再等待总指挥 LLM 回合；fix-loop 回流时只补派"被作废且无替代"的子集任务（`-rN` 命名），`verdict=pass` 且已落定的任务保留（`[FIX LOOP SUBSET KEEP]`）；
   2. **例外回落**：节点无 purpose、需求正文缺失、legacy stages 路径、launch 非零退出才回落总指挥注入（`[DIRECT DISPATCH FALLBACK]`）；节点已有活跃任务时为 `wait` 模式（不注入、直接标记 notified）；`HERDR_DIRECT_STAGE_DISPATCH=0` 整段回退旧路径；
   3. **决策等待校准**：`wait_for_coordinator_decision` 默认预算 30s → 180s（`HERDR_COORDINATOR_DECISION_TIMEOUT`），超时不再立即重试，写入 attention（`decision_timeout`）按 `HERDR_ATTENTION_RETRY_INTERVAL` 退避；
   4. **提交门禁拆分**：Git 集成任务的 commit 由 Controller 下发 `HERDR_DEFER_HEAVY_TESTS=1`（目标仓 hook 识别该显式开关，不做仓库来源猜测，人类/Agent 手工提交仍走全量门禁），全量测试交给 workflow test 节点与 pre-push 门禁；
